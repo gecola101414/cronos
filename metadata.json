@@ -1,6 +1,5 @@
-
 {
-  "name": "CHRONOS_2026_INTRANET",
+  "name": "CHRONOS_2026_2 importiamo direttamente il progetto",
   "description": "Sistema professionale per la gestione del cronoprogramma e la contabilità lavori della Direzione Lavori. Ottimizzato per uso in rete interna aziendale senza dipendenze cloud.",
   "requestFramePermissions": [
     "geolocation"

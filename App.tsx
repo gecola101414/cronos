@@ -37,11 +37,12 @@ function isNewProjectFile(data: any): data is { id?: string, projectDocuments: P
     return data && typeof data === 'object' && 'projectDocuments' in data && Array.isArray(data.projectDocuments);
 }
 
-/**
- * Checks if the JSON is a raw list of groups like the user provided.
- */
 function isRawJsonComputo(data: any): data is any[] {
     return Array.isArray(data) && data.length > 0 && data[0].groupName !== undefined;
+}
+
+function isGecolaData(data: any): boolean {
+    return data && data.gecolaData && Array.isArray(data.gecolaData.categories) && Array.isArray(data.gecolaData.articles);
 }
 
 const sanitizeDocuments = (documents: ProjectDocument[]): ProjectDocument[] => {
@@ -66,7 +67,8 @@ const sanitizeDocuments = (documents: ProjectDocument[]): ProjectDocument[] => {
         annotations: item.annotations || [],
         variations: item.variations || [],
         laborRate: item.laborRate || 0,
-        laborValue: item.laborValue || 0
+        laborValue: item.laborValue || 0,
+        originalMeasurements: item.originalMeasurements || []
       }))
     }))
   }));
@@ -205,7 +207,6 @@ const App: React.FC = () => {
       try {
         const jsonData = JSON.parse(content);
         
-        // 1. CHRONOS FULL PROJECT FILE
         if (isNewProjectFile(jsonData)) {
             setProjectDocuments(sanitizeDocuments(jsonData.projectDocuments));
             setExpenses(sanitizeExpenses(jsonData.expenses || []));
@@ -217,15 +218,81 @@ const App: React.FC = () => {
             if (jsonData.workers) setWorkers(prev => { const map = new Map(prev.map(w => [w.id, w])); jsonData.workers?.forEach((w:any) => map.set(w.id, w)); return Array.from(map.values()); });
             setCurrentProjectId(jsonData.id || crypto.randomUUID());
         } 
-        // 2. RAW JSON COMPUTO (ARRAY OF GROUPS LIKE THE ONE PROVIDED BY USER)
+        else if (isGecolaData(jsonData)) {
+            const gecola = jsonData.gecolaData;
+            let currentDate = new Date();
+            
+            const mappedGroups: WorkGroup[] = gecola.categories.map((cat: any, idx: number) => {
+                const groupArticles = gecola.articles.filter((art: any) => art.categoryCode === cat.code);
+                const totalValue = groupArticles.reduce((acc: number, art: any) => acc + ((art.unitPrice || 0) * (art.quantity || 0)), 0);
+                const duration = Math.max(3, Math.ceil(totalValue / 1500));
+                const startDate = new Date(currentDate);
+                const endDate = addDays(startDate, duration - 1);
+                currentDate = addDays(endDate, 1);
+
+                return {
+                    id: crypto.randomUUID(),
+                    name: cat.name,
+                    duration,
+                    value: totalValue,
+                    color: colorPalette[idx % colorPalette.length],
+                    startDate: format(startDate, 'yyyy-MM-dd'),
+                    endDate: format(endDate, 'yyyy-MM-dd'),
+                    progress: 0,
+                    accountingType: 'measure',
+                    isSecurityCost: cat.type === 'safety' || cat.code.startsWith('S.'),
+                    items: groupArticles.map((art: any) => ({
+                        articleCode: art.code || art.id,
+                        description: art.description || '',
+                        quantity: art.quantity || 0,
+                        unit: art.unit || 'n',
+                        unitPrice: art.unitPrice || 0,
+                        total: (art.unitPrice || 0) * (art.quantity || 0),
+                        laborRate: art.laborRate || 0,
+                        laborValue: ((art.unitPrice || 0) * (art.quantity || 0)) * (art.laborRate / 100),
+                        measurements: [],
+                        annotations: [],
+                        variations: [],
+                        originalMeasurements: art.measurements || [] // MAPPING RIGHE ANALITICHE
+                    }))
+                };
+            }).filter((g: WorkGroup) => g.items.length > 0);
+
+            const newDoc: ProjectDocument = {
+                fileName: file.name,
+                workGroups: mappedGroups,
+                totalValue: mappedGroups.reduce((acc, g) => acc + g.value, 0),
+                isVisible: true,
+                isFrozen: false,
+                isLocked: false,
+                location: gecola.projectInfo?.location
+            };
+
+            setProjectDocuments(sanitizeDocuments([newDoc]));
+            setExpenses([]);
+            setProjectName(gecola.projectInfo?.title || file.name.replace('.json', ''));
+            
+            setContractConfig({
+                discountPercent: 0,
+                withholdingTaxPercent: 0.5,
+                vatPercent: gecola.projectInfo?.vatRate || 22,
+                contractorName: gecola.projectInfo?.designer || '',
+                contractCode: '',
+                contractDate: gecola.projectInfo?.date || '',
+                advancePaymentPercent: 20,
+                excludeLaborFromDiscount: false
+            });
+
+            setCurrentProjectId(crypto.randomUUID());
+        }
         else if (isRawJsonComputo(jsonData)) {
             let currentDate = new Date();
             const mappedGroups: WorkGroup[] = jsonData.map((g, idx) => {
                 const totalValue = g.items.reduce((acc: number, item: any) => acc + (item.total || 0), 0);
-                const duration = Math.max(5, Math.ceil(totalValue / 1500)); // Stima durata basata su importo
+                const duration = Math.max(5, Math.ceil(totalValue / 1500));
                 const startDate = new Date(currentDate);
                 const endDate = addDays(startDate, duration - 1);
-                currentDate = addDays(endDate, 2); // Buffer di 2 giorni per la prossima attività
+                currentDate = addDays(endDate, 2);
                 
                 return {
                     id: crypto.randomUUID(),
@@ -236,7 +303,7 @@ const App: React.FC = () => {
                     startDate: format(startDate, 'yyyy-MM-dd'),
                     endDate: format(endDate, 'yyyy-MM-dd'),
                     progress: 0,
-                    accountingType: g.groupName.startsWith('S.') ? 'measure' : 'measure',
+                    accountingType: 'measure',
                     isSecurityCost: g.groupName.startsWith('S.'),
                     items: g.items.map((i: any) => ({
                         articleCode: i.tariffCode || `VOCE.${idx}`,
@@ -249,7 +316,8 @@ const App: React.FC = () => {
                         laborValue: i.laborAmount || i.laborValue || 0,
                         measurements: [],
                         annotations: [],
-                        variations: []
+                        variations: [],
+                        originalMeasurements: []
                     }))
                 };
             });
@@ -273,7 +341,7 @@ const App: React.FC = () => {
         
         setActiveView('dashboard');
       } catch (err: any) { 
-          alert(`Errore: Il file selezionate non è un JSON valido.`); 
+          alert(`Errore: Il file selezionato non è un JSON valido.`); 
       } finally { 
           setIsLoading(false); 
           if (fileInputRef.current) fileInputRef.current.value = '';
@@ -414,7 +482,20 @@ const App: React.FC = () => {
             <div className="w-full">{renderContent()}</div>
           )}
       </div>
-      <TaskModal isOpen={!!selectedTask} onClose={() => setSelectedTask(null)} group={selectedTask} allWorkGroups={projectDocuments.flatMap(d => d.workGroups)} dependencies={projectDocuments.flatMap(d => d.dependencies || [])} setWorkGroups={handleWorkGroupsUpdate} onDependenciesChange={handleDependenciesChange} isViewOnly={effectiveIsViewOnly} isLocked={isCurrentTaskLocked} teams={teams} workers={workers} />
+      <TaskModal 
+        isOpen={!!selectedTask} 
+        onClose={() => setSelectedTask(null)} 
+        group={selectedTask} 
+        allWorkGroups={projectDocuments.flatMap(d => d.workGroups)} 
+        allDocuments={projectDocuments}
+        dependencies={projectDocuments.flatMap(d => d.dependencies || [])} 
+        setWorkGroups={handleWorkGroupsUpdate} 
+        onDependenciesChange={handleDependenciesChange} 
+        isViewOnly={effectiveIsViewOnly} 
+        isLocked={isCurrentTaskLocked} 
+        teams={teams} 
+        workers={workers} 
+      />
       <ShareModal isOpen={isShareModalOpen} onClose={() => setIsShareModalOpen(false)} link={shareableLink} />
       {isAdmin && <LicenseGeneratorModal isOpen={isGeneratorModalOpen} onClose={() => setIsGeneratorModalOpen(false)} />}
     </div>

@@ -11,6 +11,7 @@ export interface WorkItem {
   variations?: Variation[]; // New: Variations (Increases/Decreases)
   laborRate?: number; // NEW: Labor Incidence Percentage (e.g. 3.48)
   laborValue?: number; // NEW: Total Labor Value (e.g. total * laborRate / 100)
+  originalMeasurements?: any[]; // NEW: Keeps the BoQ detailed lines for easy import
 }
 
 export interface Variation {
