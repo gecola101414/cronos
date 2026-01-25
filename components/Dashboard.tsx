@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { View } from '../App';
 
@@ -17,6 +16,7 @@ interface DashboardProps {
 }
 
 const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
+const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
 const StatCard: React.FC<{ title: string; value: string; icon: React.ReactNode; color: string; }> = ({ title, value, icon, color }) => (
     <div className="bg-white dark:bg-gray-800 p-5 rounded-xl shadow-md flex items-center space-x-4">
@@ -68,7 +68,7 @@ const ProgressDonut: React.FC<{ progress: number }> = ({ progress }) => {
                 />
             </svg>
             <span className="absolute text-2xl font-bold text-indigo-700 dark:text-indigo-300">
-                {progress.toFixed(1)}%
+                {numberFormatter.format(progress)}%
             </span>
         </div>
     );
@@ -145,7 +145,7 @@ const Dashboard: React.FC<DashboardProps> = ({ projectSummary, onViewChange, doc
                 <div className="space-y-3 text-sm">
                     <div className="flex justify-between">
                         <span className="text-gray-500 dark:text-gray-400">Documenti Caricati:</span>
-                        <span className="font-semibold text-gray-800 dark:text-gray-100">{documentCount}</span>
+                        <span className="font-semibold text-gray-800 dark:text-gray-100">{numberFormatter.format(documentCount)}</span>
                     </div>
                 </div>
              </div>

@@ -12,6 +12,7 @@ export interface WorkItem {
   laborRate?: number; // NEW: Labor Incidence Percentage (e.g. 3.48)
   laborValue?: number; // NEW: Total Labor Value (e.g. total * laborRate / 100)
   originalMeasurements?: any[]; // NEW: Keeps the BoQ detailed lines for easy import
+  originalIndex?: number; // NEW: Stable reference to BoQ position
 }
 
 export interface Variation {

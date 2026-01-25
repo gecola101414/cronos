@@ -221,6 +221,7 @@ const App: React.FC = () => {
         else if (isGecolaData(jsonData)) {
             const gecola = jsonData.gecolaData;
             let currentDate = new Date();
+            let globalItemCounter = 1; // RESET COUNTER PER GECOLA
             
             const mappedGroups: WorkGroup[] = gecola.categories.map((cat: any, idx: number) => {
                 const groupArticles = gecola.articles.filter((art: any) => art.categoryCode === cat.code);
@@ -253,7 +254,8 @@ const App: React.FC = () => {
                         measurements: [],
                         annotations: [],
                         variations: [],
-                        originalMeasurements: art.measurements || [] // MAPPING RIGHE ANALITICHE
+                        originalMeasurements: art.measurements || [],
+                        originalIndex: globalItemCounter++ // MAPPING POSIZIONE
                     }))
                 };
             }).filter((g: WorkGroup) => g.items.length > 0);
@@ -287,6 +289,7 @@ const App: React.FC = () => {
         }
         else if (isRawJsonComputo(jsonData)) {
             let currentDate = new Date();
+            let globalItemCounter = 1;
             const mappedGroups: WorkGroup[] = jsonData.map((g, idx) => {
                 const totalValue = g.items.reduce((acc: number, item: any) => acc + (item.total || 0), 0);
                 const duration = Math.max(5, Math.ceil(totalValue / 1500));
@@ -317,7 +320,8 @@ const App: React.FC = () => {
                         measurements: [],
                         annotations: [],
                         variations: [],
-                        originalMeasurements: []
+                        originalMeasurements: [],
+                        originalIndex: globalItemCounter++
                     }))
                 };
             });

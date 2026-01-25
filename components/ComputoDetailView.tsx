@@ -35,7 +35,7 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents, onTogg
 
       const imgData = canvas.toDataURL('image/png');
       const pdf = new jsPDF({
-        orientation: 'landscape', // Changed to landscape to fit more columns
+        orientation: 'landscape', 
         unit: 'mm',
         format: 'a4',
       });
@@ -70,8 +70,6 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents, onTogg
   };
 
   const formatVariationHeader = (header: string) => {
-      // Se l'intestazione è solo un numero (es. "1"), trasformala in "Variante n. 1"
-      // Altrimenti lascia il testo originale (es. "Perizia 2", "CPA")
       if (!isNaN(Number(header))) {
           return `Variante n. ${header}`;
       }
@@ -106,7 +104,6 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents, onTogg
        </div>
       <div ref={reportRef}>
         {documents.map((doc, docIndex) => {
-            // Find all unique variation identifiers in this document
             const variationHeaders = Array.from(new Set<string>(
                 doc.workGroups.flatMap(wg => 
                     wg.items.flatMap(i => i.variations?.map(v => v.number) || [])
@@ -121,7 +118,6 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents, onTogg
                 return acc + groupVal;
             }, 0);
 
-            // Progressive item counter for the document
             let itemCounter = 1;
 
             return (
@@ -145,21 +141,29 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents, onTogg
 
                     return (
                     <div key={groupIndex}>
-                      <h3 className={`text-lg font-semibold mb-3 p-2 rounded-md flex justify-between items-center ${group.isSecurityCost ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-100 border border-green-300 dark:border-green-700' : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200'}`}>
+                      <h3 className={`text-lg font-semibold mb-3 p-2 rounded-md flex justify-between items-center ${group.isSecurityCost ? 'bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-100 border border-orange-300 dark:border-orange-700' : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200'}`}>
                         <div className="flex items-center gap-3">
                             <span>{group.name}</span>
                             {onToggleGroupSecurity && (
                                 <button 
                                     onClick={() => onToggleGroupSecurity(group.id)}
-                                    className={`p-1 rounded transition-colors ${group.isSecurityCost ? 'text-green-600 hover:text-green-800 bg-white shadow-sm' : 'text-gray-400 hover:text-indigo-600'}`}
-                                    title={group.isSecurityCost ? "Oneri Sicurezza (Non soggetti a ribasso)" : "Lavori a Misura (Soggetti a ribasso)"}
+                                    className={`p-1 rounded-lg transition-all flex items-center gap-1.5 shadow-sm border border-transparent ${group.isSecurityCost ? 'bg-orange-600 text-white hover:bg-orange-700' : 'bg-white text-gray-400 hover:text-indigo-600 hover:border-indigo-300'}`}
+                                    title={group.isSecurityCost ? "Disattiva Oneri Sicurezza (Rendi soggetto a ribasso)" : "Attiva Oneri Sicurezza (Rendi non soggetto a ribasso)"}
                                 >
-                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                                        <path fillRule="evenodd" d="M10 1.944A11.954 11.954 0 012.166 5C2.056 5.649 2 6.319 2 7c0 5.225 3.34 9.67 8 11.317C14.66 16.67 18 12.225 18 7c0-.682-.057-1.35-.166-2.001A11.954 11.954 0 0110 1.944zM11 14a1 1 0 11-2 0 1 1 0 012 0zm0-7a1 1 0 10-2 0v3a1 1 0 102 0V7z" clipRule="evenodd" />
-                                    </svg>
+                                    <div className="relative">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                            <path fillRule="evenodd" d="M10 1.944A11.954 11.954 0 012.166 5C2.056 5.649 2 6.319 2 7c0 5.225 3.34 9.67 8 11.317C14.66 16.67 18 12.225 18 7c0-.682-.057-1.35-.166-2.001A11.954 11.954 0 0110 1.944zM11 14a1 1 0 11-2 0 1 1 0 012 0zm0-7a1 1 0 10-2 0v3a1 1 0 102 0V7z" clipRule="evenodd" />
+                                        </svg>
+                                        <div className="absolute -top-1 -right-1 bg-white rounded-full p-0.5 shadow-xs">
+                                            <svg className={`w-2.5 h-2.5 ${group.isSecurityCost ? 'text-orange-600' : 'text-indigo-600'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={4}>
+                                                <path d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+                                            </svg>
+                                        </div>
+                                    </div>
+                                    <span className="text-[10px] font-black uppercase px-1 hidden sm:inline">Switch</span>
                                 </button>
                             )}
-                            {group.isSecurityCost && <span className="text-xs font-bold px-2 py-0.5 bg-green-200 text-green-800 rounded-full border border-green-300">SICUREZZA</span>}
+                            {group.isSecurityCost && <span className="text-xs font-bold px-2 py-0.5 bg-orange-200 text-orange-800 rounded-full border border-orange-300">SICUREZZA</span>}
                         </div>
                         <span className="font-normal text-base text-indigo-600 dark:text-indigo-400">
                           {currencyFormatter.format(groupTotalNewValue)}
