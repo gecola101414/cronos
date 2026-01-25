@@ -1,0 +1,8 @@
+{
+  "name": "CHRONOS_2026 stampe perfette",
+  "description": "Upload a bill of quantities, and let Gemini AI analyze it to create a dynamic, interactive Gantt chart. Adjust schedules with drag-and-drop, and calculate theoretical progress payments in real-time.",
+  "requestFramePermissions": [
+    "geolocation",
+    "microphone"
+  ]
+}

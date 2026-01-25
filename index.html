@@ -1,0 +1,248 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chronos AI: Dynamic Project Scheduler</title>
+    
+    <!-- ANTI-DEVTOOLS & BROWSER LOCK -->
+    <script>
+      (function() {
+        // 1. Disable React DevTools Hook
+        if (typeof window.__REACT_DEVTOOLS_GLOBAL_HOOK__ === 'object') {
+          __REACT_DEVTOOLS_GLOBAL_HOOK__.inject = function() {};
+        }
+
+        // 2. Block Right Click & Inspector Shortcuts
+        document.addEventListener('contextmenu', event => event.preventDefault());
+        document.onkeydown = function(e) {
+          if(e.keyCode == 123) { return false; } // F12
+          if(e.ctrlKey && e.shiftKey && e.keyCode == 'I'.charCodeAt(0)) { return false; } // Ctrl+Shift+I
+          if(e.ctrlKey && e.shiftKey && e.keyCode == 'C'.charCodeAt(0)) { return false; } // Ctrl+Shift+C
+          if(e.ctrlKey && e.shiftKey && e.keyCode == 'J'.charCodeAt(0)) { return false; } // Ctrl+Shift+J
+          if(e.ctrlKey && e.keyCode == 'U'.charCodeAt(0)) { return false; } // Ctrl+U
+        }
+
+        // 3. Browser Lock (The Bouncer) - Allow only Chrome
+        var isChromium = window.chrome;
+        var winNav = window.navigator;
+        var vendorName = winNav.vendor;
+        var isOpera = typeof window.opr !== "undefined";
+        var isIEedge = winNav.userAgent.indexOf("Edg") > -1;
+        var isIOSChrome = winNav.userAgent.match("CriOS");
+
+        // Logic: Must be Google Inc, NOT Opera, NOT Edge
+        var isChrome = 
+            (isIOSChrome) || 
+            (isChromium !== null && typeof isChromium !== "undefined" && vendorName === "Google Inc." && isOpera === false && isIEedge === false);
+
+        // Bypass check if strictly on localhost for development comfort
+        if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+            return;
+        }
+
+        if (!isChrome) {
+            // Nuke the DOM immediately to prevent app loading
+            document.documentElement.innerHTML = '';
+            document.documentElement.style.backgroundColor = '#111827';
+            document.documentElement.style.color = '#ffffff';
+            document.documentElement.style.height = '100%';
+            document.documentElement.style.display = 'flex';
+            document.documentElement.style.justifyContent = 'center';
+            document.documentElement.style.alignItems = 'center';
+            document.documentElement.style.fontFamily = 'system-ui, -apple-system, sans-serif';
+            
+            document.documentElement.innerHTML = `
+              <div style="text-align:center; padding: 20px;">
+                  <svg style="width: 64px; height: 64px; color: #ef4444; margin: 0 auto 20px;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <h1 style="font-size: 2rem; margin-bottom: 1rem;">Accesso Negato</h1>
+                  <p style="font-size: 1.1rem; color: #9ca3af; max-width: 500px; margin: 0 auto;">
+                      Per garantire i massimi standard di sicurezza e offuscamento del codice, 
+                      <strong>Chronos AI</strong> è certificato per funzionare esclusivamente su 
+                      <span style="color: #fff; font-weight: bold;">Google Chrome</span>.
+                  </p>
+                  <br/>
+                  <p style="font-size: 0.9rem; color: #6b7280;">Browser rilevato non supportato.</p>
+              </div>
+            `;
+            
+            // Stop loading
+            window.stop();
+            throw new Error("Security Restriction: Only Chrome is allowed.");
+        }
+      })();
+    </script>
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    
+    <!-- Google API Scripts -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="https://apis.google.com/js/api.js" async defer></script>
+
+    <style>
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(-10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      .animate-fade-in {
+        animation: fadeIn 0.5s ease-out forwards;
+      }
+      
+      .line-clamp-8 {
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 8;
+      }
+
+      .no-print {
+        display: block; /* Default state */
+      }
+       
+       @page {
+          size: A4;
+          margin: 1.5cm;
+          @bottom-center {
+            content: "Pagina " counter(page);
+            font-size: 9pt;
+            color: #666;
+          }
+        }
+        
+        @media print {
+            body * {
+                visibility: hidden;
+            }
+            .printable-area, .printable-area * {
+                visibility: visible;
+            }
+            .printable-area {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 100%;
+            }
+            .no-print {
+                display: none !important;
+            }
+            .print-block {
+                display: block !important;
+            }
+            .print-table {
+                width: 100% !important;
+                border-collapse: collapse !important;
+            }
+            .print-table th, .print-table td {
+                border: 1px solid #000 !important;
+                padding: 4px !important;
+                font-size: 10pt !important;
+                color: #000 !important;
+            }
+            .print-table th {
+                background-color: #f0f0f0 !important;
+                font-weight: bold !important;
+            }
+            .print-row {
+                break-inside: avoid;
+            }
+        }
+        
+        /* Landscape Print Style for Gantt */
+        @media print and (orientation: landscape) {
+            @page {
+                size: landscape;
+                margin: 5mm;
+            }
+            /* Hide Sidebar & Header */
+            aside, header, .no-print {
+                display: none !important;
+            }
+            
+            /* Reset Layout for Full Width */
+            #root > div {
+                height: auto !important;
+                display: block !important;
+            }
+            #root > div > div {
+                margin-left: 0 !important;
+                width: 100% !important;
+                display: block !important;
+            }
+            main {
+                padding: 0 !important;
+                overflow: visible !important;
+            }
+            
+            /* Target Gantt Specifics */
+            .overflow-x-auto {
+                overflow: visible !important;
+            }
+            
+            /* Force chart to expand fully */
+            .printable-gantt {
+                width: 100% !important;
+                min-width: 100% !important;
+            }
+            
+            /* Hide Scrollbars visuals */
+            ::-webkit-scrollbar {
+                display: none;
+            }
+            
+            /* Improve text contrast for print */
+            * {
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+            }
+            
+            /* Ensure background colors print */
+            .bg-gray-50, .bg-white {
+                background-color: #ffffff !important;
+            }
+            
+            /* Hide UI elements inside chart */
+            button, .cursor-ew-resize, .sal-line {
+                display: none !important;
+            }
+            
+            /* Show Print Header */
+            .print-only-header {
+                display: block !important;
+                margin-bottom: 20px;
+                text-align: center;
+                border-bottom: 2px solid #000;
+                padding-bottom: 10px;
+            }
+        }
+        
+        .print-only-header {
+            display: none;
+        }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.29.0",
+    "date-fns": "https://aistudiocdn.com/date-fns@^4.1.0",
+    "date-fns/": "https://aistudiocdn.com/date-fns@^4.1.0/",
+    "vite": "https://aistudiocdn.com/vite@^7.2.6",
+    "@vitejs/plugin-react": "https://aistudiocdn.com/@vitejs/plugin-react@^5.1.1"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-gray-100 dark:bg-gray-900">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
