@@ -7,11 +7,9 @@ interface HeaderProps {
   userEmail: string;
   remainingDays: number | null;
   serverDate: Date | null;
-  onAnalyzeRisks: () => void;
-  isAnalyzingRisks: boolean;
   onImport: () => void;
   onExport: () => void;
-  onSaveToDrive?: () => void; // Added prop
+  onSaveToDrive?: () => void;
   onShare: () => void;
   isProjectLoaded: boolean;
   isAdmin: boolean;
@@ -54,8 +52,6 @@ const Header: React.FC<HeaderProps> = ({
     userEmail, 
     remainingDays, 
     serverDate,
-    onAnalyzeRisks,
-    isAnalyzingRisks,
     onImport,
     onExport,
     onSaveToDrive,
@@ -104,7 +100,6 @@ const Header: React.FC<HeaderProps> = ({
   return (
     <header className="bg-white dark:bg-gray-800 shadow-sm sticky top-0 z-30 no-print border-b border-gray-200 dark:border-gray-700 h-20 flex-shrink-0">
       <div className="max-w-7xl mx-auto h-full px-4 sm:px-6 lg:px-8 flex justify-between items-center">
-        {/* Left Side: Project Name and Actions */}
         <div className="flex items-center space-x-4 flex-wrap">
             <div className="mr-4 flex flex-col justify-center group relative">
                 <div className="flex items-center">
@@ -146,7 +141,7 @@ const Header: React.FC<HeaderProps> = ({
                 <NavButton
                   onClick={onImport}
                   disabled={isDemoMode}
-                  title={isDemoMode ? "L'importazione non è disponibile in modalità demo" : "Importa file di progetto (.txt, .json, o PDF Primus)"}
+                  title={isDemoMode ? "L'importazione non è disponibile in modalità demo" : "Importa file di progetto (.json)"}
                 >
                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
                     <span className="hidden md:inline">Importa</span>
@@ -168,12 +163,6 @@ const Header: React.FC<HeaderProps> = ({
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12s-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.368a3 3 0 105.367 2.684 3 3 0 00-5.367-2.684z" /></svg>
                 <span className="hidden md:inline">Condividi</span>
             </NavButton>
-            {!isViewOnly && (
-                <NavButton onClick={onAnalyzeRisks} disabled={!isProjectLoaded || isAnalyzingRisks} title="Analizza i rischi del progetto con l'AI">
-                    <svg xmlns="http://www.w3.org/2000/svg" className={`h-5 w-5 ${isAnalyzingRisks ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                    <span className="hidden md:inline">{isAnalyzingRisks ? 'Analisi...' : 'Rischi AI'}</span>
-                </NavButton>
-            )}
             {isAdmin && !isViewOnly && (
                 <NavButton onClick={onGenerateLicense} title="Genera una nuova chiave di licenza">
                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -191,9 +180,6 @@ const Header: React.FC<HeaderProps> = ({
                     <p className={`text-sm font-bold tracking-wider ${isSessionExpired || sessionSecondsRemaining <= 10 ? 'text-red-600 dark:text-red-400 animate-pulse' : 'text-gray-700 dark:text-gray-200'}`} aria-live="polite" aria-atomic="true">
                         {isSessionExpired ? 'Sessione Scaduta' : `Sessione: ${formattedTime}`}
                     </p>
-                    {!isProjectLoaded && !isSessionExpired && (
-                        <p className="text-xs text-gray-500 dark:text-gray-400">Si avvia con il progetto</p>
-                    )}
                  </div>
             )}
              <div>

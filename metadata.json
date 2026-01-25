@@ -1,8 +1,8 @@
+
 {
-  "name": "CHRONOS_2026 stampe perfette",
-  "description": "Upload a bill of quantities, and let Gemini AI analyze it to create a dynamic, interactive Gantt chart. Adjust schedules with drag-and-drop, and calculate theoretical progress payments in real-time.",
+  "name": "CHRONOS_2026_INTRANET",
+  "description": "Sistema professionale per la gestione del cronoprogramma e la contabilità lavori della Direzione Lavori. Ottimizzato per uso in rete interna aziendale senza dipendenze cloud.",
   "requestFramePermissions": [
-    "geolocation",
-    "microphone"
+    "geolocation"
   ]
 }
