@@ -44,6 +44,7 @@ export interface Measurement {
   width?: number;
   height?: number;
   _isCommitted?: boolean;
+  sourceBoqId?: string; // ID della riga originale nel computo per evitare duplicati
 }
 
 export type AccountingType = 'measure' | 'body'; // 'measure' = A Misura, 'body' = A Corpo
@@ -51,7 +52,8 @@ export type AccountingType = 'measure' | 'body'; // 'measure' = A Misura, 'body'
 export interface WorkGroup {
   id: string;
   name:string;
-  duration: number; // in days
+  duration: number; // in working days
+  teamSize?: number; // number of workers in team
   value: number; // monetary value
   color: string;
   startDate: string; // ISO format 'yyyy-MM-dd'
@@ -82,7 +84,7 @@ export interface Team {
 export interface Worker {
   id: string;
   name: string; // Name and Surname
-  role: string; // e.g., Caposquadra, Manovale
+  role: string; // e.g., Capocantiere, Manovale
   status: 'active' | 'inactive';
   teamId?: string; // Current team assignment
 }
@@ -137,6 +139,7 @@ export interface ContractConfig {
     contractDate?: string; 
     advancePaymentPercent?: number; // Recupero Anticipazione %
     excludeLaborFromDiscount?: boolean; // Scorpora Costo Manodopera dal Ribasso
+    contractLaborAmount?: number; // NEW: Importo manodopera offerto dall'impresa
 }
 
 export interface SalEntry {

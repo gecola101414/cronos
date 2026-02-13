@@ -1,5 +1,6 @@
+
 import React, { useState, useMemo, useRef, useCallback, MouseEvent as ReactMouseEvent, useEffect } from 'react';
-import { WorkGroup, Expense, ExpenseCategory, Dependency, DependencyType } from '../types';
+import { WorkGroup, Expense, ProjectDocument, Dependency } from '../types';
 import { 
   eachDayOfInterval, 
   eachWeekOfInterval, 
@@ -12,12 +13,13 @@ import {
   endOfMonth,
   startOfWeek,
   endOfWeek,
+  isWeekend,
+  isSameDay,
+  isSameMonth,
+  isSameYear,
   parseISO
 } from 'date-fns';
 import { it } from 'date-fns/locale/it';
-
-declare const jspdf: any;
-declare const html2canvas: any;
 
 interface GanttChartProps {
   workGroups: WorkGroup[];
@@ -31,38 +33,13 @@ interface GanttChartProps {
   onToggleEconomicView: () => void;
   onUpdateExpenseSupplyDate?: (expenseId: string, newDate: string) => void;
   projectName?: string;
+  documents: ProjectDocument[];
+  salMarkers: number[];
+  onSalMarkersChange: (updater: React.SetStateAction<number[]>) => void;
+  onAddVariant?: () => void; 
 }
 
 type ZoomLevel = 'day' | 'week' | 'month';
-
-interface TooltipData {
-  x: number;
-  y: number;
-  group: WorkGroup;
-  totalCost: number;
-  margin: number;
-}
-
-interface ExpenseTooltipData {
-  x: number;
-  y: number;
-  expense: Expense;
-  isSupply?: boolean;
-}
-
-interface ExpenseClusterTooltipData {
-  x: number;
-  y: number;
-  expenses: Expense[];
-  date: string;
-}
-
-type LinkingState = {
-  fromId: string;
-  fromSide: 'start' | 'end';
-  x: number;
-  y: number;
-};
 
 const UNIT_CONFIG: Record<ZoomLevel, { width: number; getIntervals: (interval: {start: Date, end: Date}) => Date[], labelFormat: string, subLabelFormat?: string }> = {
   day: { 
@@ -74,626 +51,555 @@ const UNIT_CONFIG: Record<ZoomLevel, { width: number; getIntervals: (interval: {
   week: { 
     width: 70,
     getIntervals: (interval) => eachWeekOfInterval(interval, { weekStartsOn: 1 }),
-    labelFormat: "'Sett' w", // Week number
+    labelFormat: "'Sett' w", 
   },
   month: {
     width: 150,
     getIntervals: eachMonthOfInterval,
-    labelFormat: 'MMMM yyyy'
+    labelFormat: 'MMMM'
   }
 };
 
-const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2 });
-const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
+const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-const getExpenseSvgIcon = (category: ExpenseCategory, className = "w-5 h-5") => {
-    const commonProps = {
-        className: className,
-        fill: "none",
-        viewBox: "0 0 24 24",
-        stroke: "currentColor",
-        strokeWidth: 1.5,
-    };
-    switch (category) {
-        case 'Personale': 
-            return <svg {...commonProps}><path strokeLinecap="round" strokeLinejoin="round" d="M15 9h-1a2 2 0 100 4h1m-1-4a2 2 0 110-4h1m-1 4v4m-1-4H9m6 8a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>;
-        case 'Materiali': 
-            return <svg {...commonProps}><path strokeLinecap="round" strokeLinejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-14L4 7v10l8 4" /></svg>;
-        case 'Noleggi': 
-            return <svg {...commonProps}><path d="M9 17a2 2 0 11-4 0 2 2 0 014 0zM19 17a2 2 0 11-4 0 2 2 0 014 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M13 16V6a1 1 0 00-1-1H4a1 1 0 00-1 1v10l2 2h8a1 1 0 001-1z" /><path strokeLinecap="round" strokeLinejoin="round" d="M18 18h1a1 1 0 001-1v-3.354a1.5 1.5 0 00-.9-1.342l-3.286-1.643A1.5 1.5 0 0013 7.354V16" /></svg>;
-        case 'Subappalti': 
-            return <svg {...commonProps}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>;
-        case 'Spese Generali': 
-            return <svg {...commonProps}><path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 00-1.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924-1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>;
-        default: 
-            return <svg {...commonProps}><path strokeLinecap="round" strokeLinejoin="round" d="M14.121 15.536c-1.171 1.952-3.07 1.952-4.242 0-1.172-1.953-1.172-5.119 0-7.072 1.171-1.952 3.07-1.952 4.242 0 1.172 1.953 1.172 5.119 0 7.072zM12 12h.01M12 12v.01" /></svg>;
-    }
+const DAILY_RATE_PER_PERSON = 240;
+
+const ITALIAN_HOLIDAYS = [
+  '01-01', '06-01', '25-04', '01-05', '02-06', '15-08', '01-11', '08-12', '25-12', '26-12'
+];
+
+const isHoliday = (date: Date): boolean => {
+  const dayMonth = format(date, 'dd-MM');
+  return ITALIAN_HOLIDAYS.includes(dayMonth) || isWeekend(date);
 };
 
-const TruckIcon = ({ className = "w-5 h-5", dragging = false }: { className?: string, dragging?: boolean }) => (
-    <svg className={`${className} ${dragging ? 'text-indigo-600 drop-shadow-lg scale-110' : 'text-orange-500'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-        <path d="M5 18h5M18 18h1a2 2 0 0 0 2-2v-5l-3-4h-4v9h4" />
-        <path d="M9 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0" />
-        <path d="M19 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0" />
-        <path d="M14 9h4l1.5 2H14V9z" />
-        <path d="M2 16V4a1 1 0 0 1 1-1h11a1 1 0 0 1 1 1v12" />
-        <path d="M2 13h13" />
-    </svg>
-);
-
-const getExpenseClusterIcon = (count: number) => {
-    return (
-        <div className="relative w-6 h-6">
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-            </svg>
-            <div className="absolute -top-1 -right-1 bg-indigo-600 text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center border-2 border-gray-50 dark:border-gray-800/50">
-                {numberFormatter.format(count).split(',')[0]}
-            </div>
-        </div>
-    );
+const calculateEndDateWithHolidays = (startDate: Date, workingDays: number): Date => {
+  let currentDate = new Date(startDate);
+  let daysCounted = 0;
+  if (workingDays <= 0) return startDate;
+  while (daysCounted < workingDays) {
+    if (!isHoliday(currentDate)) daysCounted++;
+    if (daysCounted < workingDays) currentDate = addDays(currentDate, 1);
+  }
+  return currentDate;
 };
 
-
-const GanttChart: React.FC<GanttChartProps> = ({ workGroups, dependencies, expenses, setWorkGroups, onDependenciesChange, isViewOnly, onBarDoubleClick, isEconomicViewVisible, onToggleEconomicView, onUpdateExpenseSupplyDate, projectName }) => {
+const GanttChart: React.FC<GanttChartProps> = ({ 
+    workGroups, dependencies, expenses, setWorkGroups, onDependenciesChange, 
+    isViewOnly, onBarDoubleClick, isEconomicViewVisible, onToggleEconomicView, 
+    onUpdateExpenseSupplyDate, projectName, documents, salMarkers, onSalMarkersChange,
+    onAddVariant
+}) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
+  const scrollSyncRef = useRef<HTMLDivElement>(null);
+  const progressBarRef = useRef<HTMLDivElement>(null);
+  const horizontalHeaderRef = useRef<HTMLDivElement>(null);
+  const hoverScrollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isSyncingRef = useRef(false);
+  const isMouseDownOnScrollRef = useRef(false);
+  const scrollSpeedRef = useRef(4);
+  
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [dragging, setDragging] = useState<{ id: string; type: 'move' | 'resize-end'; initialX: number; initialStartDate: Date; initialDuration: number } | null>(null);
-  const [salLineX, setSalLineX] = useState<number>(300);
-  const [isSalDragging, setIsSalDragging] = useState<boolean>(false);
-  
-  const [supplyDragging, setSupplyDragging] = useState<{ expenseId: string; initialClientX: number; initialLeft: number } | null>(null);
-  const [currentSupplyX, setCurrentSupplyX] = useState<number | null>(null);
-  
+  const [draggingMarkerIndex, setDraggingMarkerIndex] = useState<number | null>(null);
   const [zoom, setZoom] = useState<ZoomLevel>('week');
-  const [tooltipData, setTooltipData] = useState<TooltipData | null>(null);
-  const [expenseTooltipData, setExpenseTooltipData] = useState<ExpenseTooltipData | null>(null);
-  const [expenseClusterTooltipData, setExpenseClusterTooltipData] = useState<ExpenseClusterTooltipData | null>(null);
-  const [linkingState, setLinkingState] = useState<LinkingState | null>(null);
-  const [isExporting, setIsExporting] = useState(false);
-  const taskPositions = useRef<Map<string, { y: number, x: number, width: number }>>(new Map());
-
+  const [simX, setSimX] = useState<number | null>(null);
+  const [isSimActive, setIsSimActive] = useState(false); 
+  
   const ROW_HEIGHT = 56; 
-  const BAR_HEIGHT_CLASS = 'h-8';
-  const HEADER_HEIGHT = 70;
+  const WBS_TABLE_WIDTH = 340;
+  const BOTTOM_SPACER = 500;
 
-  const { chartStart, chartEnd, headerIntervals, totalWidth, dayPixelWidth } = useMemo(() => {
-    if (workGroups.length === 0) {
-      const start = new Date();
-      const end = addDays(start, 30);
-       return {
-         chartStart: start,
-         chartEnd: end,
-         headerIntervals: UNIT_CONFIG[zoom].getIntervals({ start, end }),
-         totalWidth: 30 * UNIT_CONFIG.day.width,
-         dayPixelWidth: UNIT_CONFIG.day.width
-       };
-    }
-    const allTaskDates = workGroups.flatMap(g => [parse(g.startDate, 'yyyy-MM-dd', new Date()), parse(g.endDate, 'yyyy-MM-dd', new Date())]);
-    const allExpenseDates = expenses.map(e => parseISO(e.date));
-    const allSupplyDates = expenses.filter(e => e.expectedSupplyDate).map(e => parseISO(e.expectedSupplyDate!));
+  const enrichedWorkGroups = useMemo(() => {
+      return workGroups.map(g => {
+          const teamSize = g.teamSize || 1;
+          const earnedValue = g.items.reduce((acc, item) => 
+            acc + (item.measurements || []).reduce((mAcc, m) => mAcc + (m.quantity * item.unitPrice), 0)
+          , 0);
+          
+          const residualValue = Math.max(0, g.value - earnedValue);
+          const remainingWorkingDays = Math.ceil(residualValue / (DAILY_RATE_PER_PERSON * teamSize));
+          
+          let baselineStr = g.startDate;
+          const allMeasures = g.items.flatMap(i => i.measurements || []);
+          if (allMeasures.length > 0) {
+              baselineStr = allMeasures.reduce((max, m) => m.date > max ? m.date : max, allMeasures[0].date);
+          }
+          
+          const baselineDate = parseISO(baselineStr);
+          const projectedEnd = calculateEndDateWithHolidays(baselineDate, remainingWorkingDays);
+          const start = parse(g.startDate, 'yyyy-MM-dd', new Date());
 
-    const allDates = [...allTaskDates, ...allExpenseDates, ...allSupplyDates];
+          let totalWorkingDays = 0;
+          let temp = new Date(start);
+          while (temp <= projectedEnd) {
+              if (!isHoliday(temp)) totalWorkingDays++;
+              temp = addDays(temp, 1);
+          }
 
-    let minDate = allDates.length > 0 ? new Date(Math.min(...allDates.map(d => d.getTime()))) : new Date();
-    let maxDate = allDates.length > 0 ? new Date(Math.max(...allDates.map(d => d.getTime()))) : addDays(new Date(), 30);
+          return { 
+            ...g, 
+            duration: totalWorkingDays || 1, 
+            endDate: format(projectedEnd, 'yyyy-MM-dd') 
+          };
+      });
+  }, [workGroups]);
 
-    if (zoom === 'week') {
-      minDate = startOfWeek(minDate, { weekStartsOn: 1 });
-      maxDate = endOfWeek(addDays(maxDate, 10), { weekStartsOn: 1 });
-    } else if (zoom === 'month') {
-      minDate = startOfMonth(minDate);
-      maxDate = endOfMonth(addDays(maxDate, 30));
+  // PATTO DI FERRO: Creazione lista gerarchica per intestazioni Progetto/Varianti
+  const displayItems = useMemo(() => {
+    const items: ({ type: 'header', label: string, isVariant: boolean, docId: string } | { type: 'group', group: any, index: number })[] = [];
+    documents.forEach((doc, docIdx) => {
+        const isVariant = doc.fileName.toUpperCase().startsWith('VAR');
+        // Se è il primo documento e non è variante, chiamalo PROGETTO
+        const headerLabel = (docIdx === 0 && !isVariant) ? `PROGETTO: ${doc.fileName}` : doc.fileName;
+        
+        items.push({ 
+            type: 'header', 
+            label: headerLabel, 
+            isVariant, 
+            docId: doc.fileName 
+        });
+        
+        doc.workGroups.forEach((wg, wgIdx) => {
+            // PATTO DI FERRO: Lookup basato su ID per garantire visibilità dopo sanificazione in App.tsx
+            const enriched = enrichedWorkGroups.find(eg => eg.id === wg.id);
+            if (enriched) {
+                items.push({ type: 'group', group: enriched, index: wgIdx + 1 });
+            }
+        });
+    });
+    return items;
+  }, [documents, enrichedWorkGroups]);
+
+  const totalContentHeight = useMemo(() => {
+      return (displayItems.length * ROW_HEIGHT) + BOTTOM_SPACER;
+  }, [displayItems.length]);
+
+  const { grandTotal, earnedValue } = useMemo(() => {
+    const total = documents.reduce((acc, doc) => acc + doc.workGroups.reduce((gAcc, group) => {
+        const groupTotal = group.items.reduce((iAcc, item) => {
+            const varTotal = (item.variations || []).reduce((vAcc, v) => v.type === 'increase' ? vAcc + v.quantity : vAcc - v.quantity, 0);
+            return iAcc + ((item.quantity + varTotal) * item.unitPrice);
+        }, 0);
+        return gAcc + groupTotal;
+    }, 0), 0);
+    const ev = documents.filter(doc => !doc.isFrozen).reduce((acc, doc) => acc + doc.workGroups.reduce((gAcc, g) => gAcc + g.items.reduce((iAcc, i) => iAcc + (i.measurements || []).reduce((mAcc, m) => mAcc + (m.quantity * i.unitPrice), 0), 0), 0), 0);
+    return { grandTotal: total, earnedValue: ev, overallProgress: total > 0 ? (ev / total) * 100 : 0 };
+  }, [documents]);
+
+  const { chartStart, headerIntervals, monthHeaderIntervals, totalWidth, dayPixelWidth } = useMemo(() => {
+    let minDate: Date;
+    let maxDate: Date;
+    
+    if (enrichedWorkGroups.length === 0) {
+      minDate = new Date();
+      maxDate = addDays(minDate, 30);
     } else {
-      maxDate = addDays(maxDate, 10);
+      const allTaskDates = enrichedWorkGroups.flatMap(g => [parse(g.startDate, 'yyyy-MM-dd', new Date()), parse(g.endDate, 'yyyy-MM-dd', new Date())]);
+      minDate = new Date(Math.min(...allTaskDates.map(d => d.getTime())));
+      maxDate = new Date(Math.max(...allTaskDates.map(d => d.getTime())));
     }
+
+    if (zoom === 'week') { minDate = startOfWeek(minDate, { weekStartsOn: 1 }); maxDate = endOfWeek(addDays(maxDate, 15), { weekStartsOn: 1 }); }
+    else if (zoom === 'month') { minDate = startOfMonth(minDate); maxDate = endOfMonth(addDays(maxDate, 45)); }
+    else { maxDate = addDays(maxDate, 15); }
 
     const intervals = UNIT_CONFIG[zoom].getIntervals({ start: minDate, end: maxDate });
+    
+    const mHeaderIntervals: { name: string, count: number, date: Date, x: number }[] = [];
+    let currentX = 0;
+    intervals.forEach(date => {
+        const groupName = zoom === 'month' ? format(date, 'yyyy') : format(date, 'MMMM yyyy', { locale: it });
+        if (mHeaderIntervals.length > 0 && mHeaderIntervals[mHeaderIntervals.length - 1].name === groupName) {
+            mHeaderIntervals[mHeaderIntervals.length - 1].count++;
+        } else {
+            mHeaderIntervals.push({ name: groupName, count: 1, date: startOfMonth(date), x: currentX });
+        }
+        currentX += UNIT_CONFIG[zoom].width;
+    });
+
     const totalW = intervals.length * UNIT_CONFIG[zoom].width;
     const totalDaysInView = differenceInDays(maxDate, minDate) || 1;
-    
-    return {
-      chartStart: minDate,
-      chartEnd: maxDate,
-      headerIntervals: intervals,
-      totalWidth: totalW,
-      dayPixelWidth: totalW / totalDaysInView
+    return { 
+        chartStart: minDate, 
+        chartEnd: maxDate, 
+        headerIntervals: intervals, 
+        monthHeaderIntervals: mHeaderIntervals, 
+        totalWidth: totalW, 
+        dayPixelWidth: totalW / totalDaysInView 
     };
-  }, [workGroups, expenses, zoom]);
+  }, [enrichedWorkGroups, zoom]);
 
-  const monthHeaderIntervals = useMemo(() => {
-    if (zoom === 'month' || headerIntervals.length === 0) return [];
-    
-    const groups: { name: string; count: number }[] = [];
-    let currentMonth = '';
-    
-    headerIntervals.forEach(date => {
-        const monthName = format(date, 'MMMM yyyy', { locale: it });
-        if (monthName !== currentMonth) {
-            currentMonth = monthName;
-            groups.push({ name: monthName, count: 1 });
-        } else {
-            groups[groups.length - 1].count++;
-        }
-    });
+  const simDate = useMemo(() => {
+    if (simX === null) return null;
+    return addDays(chartStart, simX / dayPixelWidth);
+  }, [simX, chartStart, dayPixelWidth]);
 
-    return groups;
-  }, [headerIntervals, zoom]);
-
-
-  const groupTotalCostMap = useMemo(() => {
-    const costMap = new Map<string, number>();
-    expenses.forEach(expense => {
-        if (expense.relatedWorkGroupId) {
-            const currentCost = costMap.get(expense.relatedWorkGroupId) || 0;
-            costMap.set(expense.relatedWorkGroupId, currentCost + expense.amount);
-        }
-    });
-    return costMap;
-  }, [expenses]);
-
-  const groupedExpensesByDateAndGroup = useMemo(() => {
-    const map = new Map<string, Expense[]>();
-    expenses.forEach(expense => {
-        if (expense.relatedWorkGroupId) {
-            const key = `${expense.relatedWorkGroupId}-${expense.date}`;
-            if (!map.has(key)) {
-                map.set(key, []);
-            }
-            map.get(key)!.push(expense);
-        }
-    });
-    return map;
-  }, [expenses]);
-
-  const handleTaskMouseDown = (e: ReactMouseEvent<HTMLDivElement>, id: string, type: 'move' | 'resize-end') => {
-    if (isViewOnly) return;
-    
-    const group = workGroups.find(g => g.id === id);
-    if (!group) return;
-
-    if (type === 'move') {
-        const hasMeasurements = group.items.some(item => item.measurements && item.measurements.length > 0);
-        if (hasMeasurements || group.officialStartDate) {
-            return; 
-        }
+  const isIntervalHighlighted = useCallback((date: Date) => {
+    if (!simDate) return false;
+    if (zoom === 'day') return isSameDay(date, simDate);
+    if (zoom === 'week') {
+        const weekStart = startOfWeek(date, { weekStartsOn: 1 });
+        const weekEnd = endOfWeek(date, { weekStartsOn: 1 });
+        return simDate >= weekStart && simDate <= weekEnd;
     }
+    if (zoom === 'month') return isSameMonth(date, simDate);
+    return false;
+  }, [simDate, zoom]);
 
-    e.preventDefault();
-    e.stopPropagation();
-
-    setDragging({
-      id,
-      type,
-      initialX: e.clientX,
-      initialStartDate: parse(group.startDate, 'yyyy-MM-dd', new Date()),
-      initialDuration: group.duration
-    });
-    setTooltipData(null); 
-  };
-  
-  const handleDependencyMouseDown = (e: ReactMouseEvent, fromId: string, fromSide: 'start' | 'end') => {
-    e.stopPropagation();
-    if(isViewOnly) return;
-
-    const taskPos = taskPositions.current.get(fromId);
-    if (taskPos && chartContainerRef.current) {
-      const rect = chartContainerRef.current.getBoundingClientRect();
-      const scrollLeft = chartContainerRef.current.scrollLeft;
-      const scrollTop = chartContainerRef.current.scrollTop;
-      
-      const startX = taskPos.x + (fromSide === 'end' ? taskPos.width : 0) - scrollLeft;
-      const startY = taskPos.y + (ROW_HEIGHT / 2) - scrollTop;
-      
-      setLinkingState({
-        fromId,
-        fromSide,
-        x: e.clientX - rect.left + scrollLeft,
-        y: e.clientY - rect.top + scrollTop,
-      });
-    }
-  };
-
-  const handleSupplyMouseDown = (e: React.MouseEvent, expenseId: string, currentDate: string, leftPos: number) => {
+  const handleMarkerMouseDown = useCallback((e: React.MouseEvent, index: number) => {
     if (isViewOnly) return;
     e.stopPropagation();
-    e.preventDefault();
-    
-    setSupplyDragging({
-        expenseId,
-        initialClientX: e.clientX,
-        initialLeft: leftPos
-    });
-    setCurrentSupplyX(leftPos);
+    setDraggingMarkerIndex(index);
+  }, [isViewOnly]);
+
+  const handleBarDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (isViewOnly || !progressBarRef.current) return;
+    const rect = progressBarRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percentage = (x / rect.width) * 100;
+    onSalMarkersChange(prev => [...prev, Math.max(0, Math.min(100, percentage))].sort((a,b) => a-b));
   };
 
-  const handleMouseMove = useCallback((e: globalThis.MouseEvent) => {
-    if (dragging && !linkingState) {
-        if (!chartContainerRef.current) return;
-        
+  const centerTaskInView = useCallback((group: WorkGroup) => {
+    if (!chartContainerRef.current) return;
+    const groupStart = parse(group.startDate, 'yyyy-MM-dd', new Date());
+    const left = differenceInDays(groupStart, chartStart) * dayPixelWidth;
+    const targetX = Math.max(0, left - 150); 
+    const index = displayItems.findIndex(item => item.type === 'group' && item.group.id === group.id);
+    const targetY = Math.max(0, index * ROW_HEIGHT - 20);
+    chartContainerRef.current.scrollTo({ left: targetX, top: targetY, behavior: 'smooth' });
+    setSelectedGroupId(group.id);
+  }, [chartStart, dayPixelWidth, displayItems]);
+
+  const handleStartHoverScroll = (dir: 'left' | 'right') => {
+      if (hoverScrollRef.current) return;
+      scrollSpeedRef.current = 4;
+      hoverScrollRef.current = setInterval(() => {
+          if (chartContainerRef.current) {
+              if (isMouseDownOnScrollRef.current) {
+                  scrollSpeedRef.current = Math.min(scrollSpeedRef.current + 1.2, 55);
+              } else {
+                  scrollSpeedRef.current = 4;
+              }
+              const move = dir === 'left' ? -scrollSpeedRef.current : scrollSpeedRef.current;
+              chartContainerRef.current.scrollBy({ left: move });
+          }
+      }, 16);
+  };
+
+  const handleStopHoverScroll = () => {
+      if (hoverScrollRef.current) {
+          clearInterval(hoverScrollRef.current);
+          hoverScrollRef.current = null;
+      }
+      isMouseDownOnScrollRef.current = false;
+  };
+
+  const handleMouseMoveGlobal = useCallback((e: globalThis.MouseEvent) => {
+    if (dragging) {
         const deltaX = e.clientX - dragging.initialX;
         const dayDelta = Math.round(deltaX / dayPixelWidth);
-        
-        setWorkGroups(prevGroups => 
-          prevGroups.map(g => {
+        setWorkGroups(prevGroups => prevGroups.map(g => {
             if (g.id === dragging.id) {
               if (dragging.type === 'move') {
                 const newStartDate = addDays(dragging.initialStartDate, dayDelta);
-                const newEndDate = addDays(newStartDate, g.duration - 1);
-                return { ...g, startDate: format(newStartDate, 'yyyy-MM-dd'), endDate: format(newEndDate, 'yyyy-MM-dd') };
-              } else { // resize-end
-                const newDuration = Math.max(1, dragging.initialDuration + dayDelta);
-                const newEndDate = addDays(parse(g.startDate, 'yyyy-MM-dd', new Date()), newDuration - 1);
-                return { ...g, duration: newDuration, endDate: format(newEndDate, 'yyyy-MM-dd') };
+                return { ...g, startDate: format(newStartDate, 'yyyy-MM-dd') };
+              } else {
+                const newTeamSize = Math.max(1, Math.round(g.value / (DAILY_RATE_PER_PERSON * Math.max(1, dragging.initialDuration + dayDelta))));
+                return { ...g, teamSize: newTeamSize };
               }
             }
             return g;
-          })
-        );
-    } else if (supplyDragging) {
-         const deltaX = e.clientX - supplyDragging.initialClientX;
-         const newX = Math.max(0, supplyDragging.initialLeft + deltaX);
-         setCurrentSupplyX(newX);
-    } else if (linkingState && chartContainerRef.current) {
-        const rect = chartContainerRef.current.getBoundingClientRect();
-        setLinkingState(prev => prev ? ({
-            ...prev,
-            x: e.clientX - rect.left + chartContainerRef.current!.scrollLeft,
-            y: e.clientY - rect.top + chartContainerRef.current!.scrollTop
-        }) : null);
+        }));
     }
-  }, [dragging, linkingState, setWorkGroups, dayPixelWidth, supplyDragging]);
-
-  const handleMouseUp = useCallback((e: MouseEvent) => {
-    if (dragging) {
-      setWorkGroups(prevGroups => [...prevGroups], dragging.id);
-      setDragging(null);
+    if (draggingMarkerIndex !== null && progressBarRef.current) {
+        const rect = progressBarRef.current.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const newPercentage = Math.max(0, Math.min(100, (x / rect.width) * 100));
+        onSalMarkersChange(prev => {
+            const next = [...prev];
+            next[draggingMarkerIndex] = newPercentage;
+            return next;
+        });
     }
-    
-    if (supplyDragging && onUpdateExpenseSupplyDate && currentSupplyX !== null) {
-        const pixelDelta = currentSupplyX - supplyDragging.initialLeft;
-        const dayDelta = Math.round(pixelDelta / dayPixelWidth);
-        
-        if (dayDelta !== 0) {
-            const newDate = addDays(chartStart, Math.round(currentSupplyX / dayPixelWidth));
-            onUpdateExpenseSupplyDate(supplyDragging.expenseId, format(newDate, 'yyyy-MM-dd'));
-        }
-        setSupplyDragging(null);
-        setCurrentSupplyX(null);
+  }, [dragging, draggingMarkerIndex, dayPixelWidth, setWorkGroups, onSalMarkersChange]);
+
+  const handleMouseUpGlobal = useCallback(() => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
     }
-
-    if (linkingState) {
-      const toEl = e.target as HTMLElement;
-      const toId = toEl.dataset.taskid;
-      const toSide = toEl.dataset.side as 'start' | 'end';
-
-      if (toId && toSide && toId !== linkingState.fromId) {
-        let type: DependencyType = 'FS';
-        if (linkingState.fromSide === 'start' && toSide === 'start') type = 'SS';
-        if (linkingState.fromSide === 'end' && toSide === 'end') type = 'FF';
-        if (linkingState.fromSide === 'start' && toSide === 'end') type = 'SF';
-        
-        const newDep: Omit<Dependency, 'id'> = {
-          from: linkingState.fromId,
-          to: toId,
-          type,
-          lag: 0,
-        };
-        onDependenciesChange(prev => [...prev, { ...newDep, id: crypto.randomUUID() }]);
-      }
-      setLinkingState(null);
-    }
-  }, [dragging, linkingState, setWorkGroups, onDependenciesChange, supplyDragging, onUpdateExpenseSupplyDate, dayPixelWidth, currentSupplyX, chartStart]);
-
-  const handleSalMouseDown = useCallback((e: ReactMouseEvent) => {
-    e.preventDefault();
-    setIsSalDragging(true);
-  }, []);
-
-  const handleSalMouseMove = useCallback((e: globalThis.MouseEvent) => {
-    if (!isSalDragging || !chartContainerRef.current) return;
-    const rect = chartContainerRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left + chartContainerRef.current.scrollLeft;
-    setSalLineX(Math.max(0, Math.min(x, totalWidth - 2)));
-  }, [isSalDragging, totalWidth]);
-
-  const handleSalMouseUp = useCallback(() => {
-    setIsSalDragging(false);
-  }, []);
+    setIsSimActive(false);
+    setSimX(null);
+    setDragging(null);
+    if (draggingMarkerIndex !== null) onSalMarkersChange(prev => [...prev].sort((a,b) => a-b));
+    setDraggingMarkerIndex(null);
+  }, [onSalMarkersChange]);
 
   useEffect(() => {
-    const moveListener = (e: MouseEvent) => handleMouseMove(e);
-    const upListener = (e: MouseEvent) => handleMouseUp(e);
-    const salMoveListener = (e: MouseEvent) => handleSalMouseMove(e);
-    const salUpListener = () => handleSalMouseUp();
-    
-    if (dragging || linkingState || supplyDragging) {
-      document.addEventListener('mousemove', moveListener);
-      document.addEventListener('mouseup', upListener);
-    } else if (isSalDragging) {
-      document.addEventListener('mousemove', salMoveListener);
-      document.addEventListener('mouseup', salUpListener);
-    }
-    
+    document.addEventListener('mousemove', handleMouseMoveGlobal);
+    document.addEventListener('mouseup', handleMouseUpGlobal);
     return () => {
-      document.removeEventListener('mousemove', moveListener);
-      document.removeEventListener('mouseup', upListener);
-      document.removeEventListener('mousemove', salMoveListener);
-      document.removeEventListener('mouseup', salUpListener);
+      document.removeEventListener('mousemove', handleMouseMoveGlobal);
+      document.removeEventListener('mouseup', handleMouseUpGlobal);
+      if(hoverScrollRef.current) clearInterval(hoverScrollRef.current);
     };
-  }, [dragging, linkingState, handleMouseMove, handleMouseUp, isSalDragging, handleSalMouseMove, handleSalMouseUp, supplyDragging]);
-  
-  const handleGridDoubleClick = (e: ReactMouseEvent<HTMLDivElement>) => {
-    if (!chartContainerRef.current) return;
-    const rect = chartContainerRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left + chartContainerRef.current.scrollLeft;
-    setSalLineX(Math.max(0, Math.min(x, totalWidth - 2)));
-  }
+  }, [handleMouseMoveGlobal, handleMouseUpGlobal]);
 
-  const { salDate, plannedValue, earnedValue } = useMemo(() => {
-    const salDayIndex = Math.floor(salLineX / dayPixelWidth);
-    const date = addDays(chartStart, salDayIndex);
-
-    const pv = workGroups.reduce((acc, group) => {
-      const groupStart = parse(group.startDate, 'yyyy-MM-dd', new Date());
-      if (date < groupStart) return acc;
-      const daysCompleted = differenceInDays(date, groupStart) + 1;
-      const completionRatio = Math.min(1, Math.max(0, daysCompleted / group.duration));
-      return acc + (group.value * completionRatio);
-    }, 0);
-
-    const ev = workGroups.reduce((totalEv, group) => {
-      const groupEvAtSalDate = group.items.reduce((itemEv, item) => {
-        const measuredQuantityAtSalDate = (item.measurements || [])
-          .filter(m => parse(m.date, 'yyyy-MM-dd', new Date()) <= date)
-          .reduce((sum, m) => sum + m.quantity, 0);
-        return itemEv + (measuredQuantityAtSalDate * item.unitPrice);
-      }, 0);
-      return totalEv + groupEvAtSalDate;
-    }, 0);
-
-    return { salDate: date, plannedValue: pv, earnedValue: ev };
-  }, [salLineX, workGroups, chartStart, dayPixelWidth]);
-
-  const handleBarMouseMove = (e: React.MouseEvent, group: WorkGroup) => {
-    if (dragging) return;
-    if (!isEconomicViewVisible) return; 
-    const totalCost = groupTotalCostMap.get(group.id) || 0;
-    const groupEarnedValue = group.value * (group.progress / 100);
-    const margin = groupEarnedValue - totalCost;
-
-    setTooltipData({
-      x: e.clientX,
-      y: e.clientY,
-      group: group,
-      totalCost,
-      margin,
-    });
+  const handleSyncScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    if (isSyncingRef.current) return;
+    isSyncingRef.current = true;
+    const target = e.currentTarget;
+    if (target === chartContainerRef.current) {
+        if (scrollSyncRef.current) scrollSyncRef.current.scrollTop = target.scrollTop;
+        if (horizontalHeaderRef.current) horizontalHeaderRef.current.scrollLeft = target.scrollLeft;
+    } else if (target === scrollSyncRef.current) {
+        if (chartContainerRef.current) chartContainerRef.current.scrollTop = target.scrollTop;
+    }
+    window.requestAnimationFrame(() => { isSyncingRef.current = false; });
   };
 
-  const handleBarMouseLeave = () => {
-    setTooltipData(null);
-  };
-  
-  const handleExpenseMouseEnter = (e: React.MouseEvent, expense: Expense, isSupply: boolean = false) => {
-    setExpenseTooltipData({
-        x: e.clientX,
-        y: e.clientY,
-        expense,
-        isSupply
-    });
+  const handleGanttMouseMove = (e: React.MouseEvent) => {
+      if (!chartContainerRef.current) return;
+      if (!isEconomicViewVisible && !isSimActive) {
+          if (simX !== null) setSimX(null);
+          return;
+      }
+      const rect = chartContainerRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left + chartContainerRef.current.scrollLeft;
+      setSimX(x);
   };
 
-  const handleExpenseMouseLeave = () => {
-    setExpenseTooltipData(null);
+  const handleGanttMouseDown = (e: React.MouseEvent) => {
+      if (e.button === 0) {
+          longPressTimerRef.current = setTimeout(() => {
+              setIsSimActive(true);
+              handleGanttMouseMove(e);
+          }, 2000);
+      }
   };
 
-  const handleExpenseClusterMouseEnter = (e: React.MouseEvent, expenses: Expense[]) => {
-    setExpenseClusterTooltipData({
-        x: e.clientX,
-        y: e.clientY,
-        expenses,
-        date: expenses[0].date,
-    });
-  };
-
-  const handleExpenseClusterMouseLeave = () => {
-    setExpenseClusterTooltipData(null);
-  };
-
-  const handleExportPdf = async () => {
-    const chartContent = chartContainerRef.current?.firstChild as HTMLElement;
-    if (!chartContent) return;
-    setIsExporting(true);
-    try {
-        const { jsPDF } = jspdf;
-        const captureWidth = chartContent.scrollWidth;
-        const captureHeight = chartContent.scrollHeight;
-        const canvas = await html2canvas(chartContent, {
-            scale: 2, useCORS: true, backgroundColor: '#ffffff',
-            width: captureWidth, height: captureHeight,
-            windowWidth: captureWidth, windowHeight: captureHeight,
-            onclone: (clonedDoc: Document) => {
-                const allElements = clonedDoc.querySelectorAll('*');
-                allElements.forEach((el) => {
-                    const element = el as HTMLElement;
-                    element.style.overflow = 'visible';
-                    if (element.classList.contains('wbs-visual-bar')) {
-                        element.style.overflow = 'hidden';
-                        (element.style as any).printColorAdjust = 'exact';
-                        (element.style as any).webkitPrintColorAdjust = 'exact';
-                    }
-                });
-                const elementsToHide = clonedDoc.querySelectorAll('.sal-line, .pdf-hide-value');
-                elementsToHide.forEach((el) => { (el as HTMLElement).style.display = 'none'; });
-                clonedDoc.body.style.color = '#000000';
-                const labels = clonedDoc.querySelectorAll('.whitespace-nowrap');
-                labels.forEach((el) => {
-                    const element = el as HTMLElement;
-                    element.style.background = 'transparent'; element.style.boxShadow = 'none'; element.style.zIndex = '9999999';
-                    const textNodes = element.querySelectorAll('*');
-                    textNodes.forEach(t => (t as HTMLElement).style.color = 'black');
-                    element.style.color = 'black';
-                });
-                const stickyElements = clonedDoc.querySelectorAll('.sticky, .fixed');
-                stickyElements.forEach((el) => { (el as HTMLElement).style.position = 'static'; });
-            }
-        });
-        const imgData = canvas.toDataURL('image/png');
-        const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
-        const pdfWidth = pdf.internal.pageSize.getWidth();
-        const pdfHeight = pdf.internal.pageSize.getHeight();
-        const margin = 10; const headerHeight = 35; const contentWidth = pdfWidth - (margin * 2);
-        pdf.setFontSize(16); pdf.setTextColor(40, 40, 40); pdf.text("CRONOPROGRAMMA LAVORI", margin, 15);
-        pdf.setFontSize(12); pdf.setTextColor(100, 100, 100); pdf.text(projectName || "Progetto Senza Nome", margin, 22);
-        const allDates = workGroups.flatMap(g => [parse(g.startDate, 'yyyy-MM-dd', new Date()), parse(g.endDate, 'yyyy-MM-dd', new Date())]);
-        if (allDates.length > 0) {
-            const minDate = new Date(Math.min(...allDates.map(d => d.getTime())));
-            const maxDate = new Date(Math.max(...allDates.map(d => d.getTime())));
-            pdf.setFontSize(10); pdf.setTextColor(80, 80, 80); pdf.text(`Inizio Lavori: ${format(minDate, 'dd/MM/yyyy')}  -  Fine Lavori: ${format(maxDate, 'dd/MM/yyyy')}`, margin, 28);
+  const simulatedProgress = useMemo(() => {
+    if (simDate === null || grandTotal === 0) return 0;
+    let plannedValue = 0;
+    enrichedWorkGroups.forEach(g => {
+        const start = parse(g.startDate, 'yyyy-MM-dd', new Date());
+        const end = parse(g.endDate, 'yyyy-MM-dd', new Date());
+        if (simDate >= end) { plannedValue += g.value; } 
+        else if (simDate >= start) {
+            const totalDays = differenceInDays(end, start) + 1;
+            const elapsedDays = differenceInDays(simDate, start) + 1;
+            plannedValue += g.value * (elapsedDays / totalDays);
         }
-        pdf.setFontSize(8); pdf.setTextColor(150, 150, 150); pdf.text(`Stampato il: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, pdfWidth - margin - 40, 15);
-        pdf.setDrawColor(200, 200, 200); pdf.line(margin, 30, pdfWidth - margin, 30);
-        const imgProps = pdf.getImageProperties(imgData);
-        let finalImgHeight = (imgProps.height * contentWidth) / imgProps.width;
-        let finalImgWidth = contentWidth;
-        const maxContentHeight = pdfHeight - headerHeight - 15; 
-        if (finalImgHeight > maxContentHeight) { const ratio = maxContentHeight / finalImgHeight; finalImgHeight = maxContentHeight; finalImgWidth = contentWidth * ratio; }
-        pdf.addImage(imgData, 'PNG', margin, headerHeight, finalImgWidth, finalImgHeight);
-        pdf.save(`Cronoprogramma_${(projectName || 'progetto').replace(/[^a-z0-9]/gi, '_')}.pdf`);
-    } catch (error) { console.error("PDF Generation Error:", error); alert("Errore durante la generazione del PDF."); } finally { setIsExporting(false); }
+    });
+    return (plannedValue / grandTotal) * 100;
+  }, [simDate, enrichedWorkGroups, grandTotal]);
+
+  const handleTaskMouseDown = (e: ReactMouseEvent<HTMLDivElement>, id: string, type: 'move' | 'resize-end') => {
+    if (isViewOnly || e.button !== 0) return;
+    const group = enrichedWorkGroups.find(g => g.id === id);
+    if (!group) return;
+    if (type === 'move' && group.officialStartDate) return;
+    e.preventDefault(); e.stopPropagation();
+    setSelectedGroupId(id);
+    setDragging({ id, type, initialX: e.clientX, initialStartDate: parse(group.startDate, 'yyyy-MM-dd', new Date()), initialDuration: group.duration });
   };
 
-  const ZoomControl = () => (
-    <div className="flex space-x-1 bg-gray-200 dark:bg-gray-700 p-1 rounded-lg">
-      {(['day', 'week', 'month'] as ZoomLevel[]).map(level => (
-        <button key={level} onClick={() => setZoom(level)} className={`px-3 py-1 text-sm font-medium rounded-md capitalize transition-colors ${zoom === level ? 'bg-white dark:bg-gray-900 text-indigo-600 dark:text-indigo-400 shadow' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'}`}>{level === 'day' ? 'Giorno' : level === 'week' ? 'Settimana' : 'Mese'}</button>
-      ))}
-    </div>
-  );
+  const overallProgress = grandTotal > 0 ? (earnedValue / grandTotal) * 100 : 0;
 
   return (
-    <>
-      <div className="p-4 md:p-6">
-        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 gap-4">
-          <div className="flex items-center gap-4 flex-wrap">
-            <h2 className="text-xl font-bold text-gray-800 dark:text-gray-100">Timeline Progetto</h2>
-            <ZoomControl />
-             <button onClick={onToggleEconomicView} className={`flex items-center space-x-2 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium ${isEconomicViewVisible ? 'bg-yellow-300 text-yellow-800' : 'bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-yellow-200'}`}>
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path d="M11 3a1 1 0 10-2 0v1a1 1 0 102 0V3zM15.657 5.657a1 1 0 00-1.414-1.414l-.707.707a1 1 0 001.414 1.414l.707-.707zM18 10a1 1 0 01-1 1h-1a1 1 0 110-2h1a1 1 0 011 1zM5.05 14.95a1 1 0 001.414 1.414l.707-.707a1 1 0 00-1.414-1.414l-.707.707zM10 18a1 1 0 01-1-1v-1a1 1 0 112 0v1a1 1 0 01-1 1zM4.343 5.657a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414l.707.707zM2 10a1 1 0 01-1-1h-1a1 1 0 110-2h1a1 1 0 011 1zM14.95 14.95a1 1 0 00-1.414 1.414l.707.707a1 1 0 001.414-1.414l-.707-.707z" /><path d="M10 7a3 3 0 100 6 3 3 0 000-6z" /></svg>
-                <span>Spese</span>
-            </button>
-            <button onClick={handleExportPdf} disabled={isExporting} className="flex items-center space-x-2 px-3 py-1.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium disabled:bg-indigo-400">
-                {isExporting ? <svg className="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> : <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M5 4v3H4a2 2 0 00-2 2v3a2 2 0 002 2h1v2a2 2 0 002 2h6a2 2 0 002-2v-2h1a2 2 0 002-2V9a2 2 0 00-2-2h-1V4a2 2 0 00-2-2H7a2 2 0 00-2 2zm8 0H7v3h6V4zm0 8H7v4h6v-4z" clipRule="evenodd" /></svg>}
-                <span>Stampa PDF</span>
-            </button>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-right p-3 rounded-lg bg-gray-100 dark:bg-gray-800/50 w-full sm:w-auto">
-             <div className="p-2 rounded-md bg-green-50 dark:bg-green-900/40">
-                <p className="text-sm font-medium text-green-600 dark:text-green-300">SAL Reale al {format(salDate, 'd MMM', { locale: it })}</p>
-                <p className="text-2xl font-bold text-green-800 dark:text-green-100">{currencyFormatter.format(earnedValue)}</p>
-             </div>
-             <div className="p-2 rounded-md bg-indigo-50 dark:bg-indigo-900/40">
-                <p className="text-sm font-medium text-indigo-600 dark:text-indigo-300">SAL Teorico al {format(salDate, 'd MMM', { locale: it })}</p>
-                <p className="text-2xl font-bold text-indigo-800 dark:text-indigo-100">{currencyFormatter.format(plannedValue)}</p>
-            </div>
-          </div>
-        </div>
-        <div className="overflow-x-auto overflow-y-auto max-h-[70vh] bg-gray-50 dark:bg-gray-800/50 rounded-lg relative" ref={chartContainerRef}>
-          <div className="relative" style={{ width: totalWidth, minHeight: workGroups.length * ROW_HEIGHT + HEADER_HEIGHT }} onDoubleClick={handleGridDoubleClick}>
-             <div className="sticky top-0 z-20 h-[70px]">
-              {(zoom === 'day' || zoom === 'week') ? (
-                <>
-                  <div className="absolute top-0 left-0 right-0 flex bg-gray-100 dark:bg-gray-700 select-none h-[30px] border-b border-gray-200 dark:border-gray-600">
-                    {monthHeaderIntervals.map(({ name, count }) => (
-                      <div key={name} className="flex-shrink-0 text-center font-bold text-gray-800 dark:text-gray-200 flex items-center justify-center border-r border-gray-200 dark:border-gray-600 capitalize" style={{ width: count * UNIT_CONFIG[zoom].width }}>{name}</div>
-                    ))}
-                  </div>
-                  <div className="absolute top-[30px] left-0 right-0 flex bg-gray-100 dark:bg-gray-700 select-none h-[40px]">
-                    {headerIntervals.map((date, i) => (
-                      <div key={i} className="flex-shrink-0 text-center border-r border-gray-200 dark:border-gray-600 pt-1" style={{ width: UNIT_CONFIG[zoom].width }}>
-                        {UNIT_CONFIG[zoom].subLabelFormat && <div className="text-xs font-medium text-gray-500 dark:text-gray-400">{format(date, UNIT_CONFIG[zoom].subLabelFormat, { locale: it })}</div>}
-                        <div className="text-sm font-bold text-gray-700 dark:text-gray-200">{format(date, UNIT_CONFIG[zoom].labelFormat, { locale: it })}</div>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <div className="absolute top-0 left-0 right-0 flex bg-gray-100 dark:bg-gray-700 select-none h-full">
-                  {headerIntervals.map((date, i) => (
-                    <div key={i} className="flex-shrink-0 text-center border-r border-gray-200 dark:border-gray-600 flex items-center justify-center" style={{ width: UNIT_CONFIG[zoom].width }}>
-                      <div className="text-sm font-bold text-gray-700 dark:text-gray-200 capitalize">{format(date, UNIT_CONFIG[zoom].labelFormat, { locale: it })}</div>
+    <div className="flex flex-col h-full bg-white dark:bg-gray-800 relative overflow-hidden min-h-0">
+        <div className="flex-shrink-0 z-30 bg-white dark:bg-gray-800 border-b dark:border-gray-700 shadow-md no-print">
+            <div className="px-4 py-2 flex items-center justify-between gap-4 border-b dark:border-gray-700">
+                <div className="flex items-center gap-2 flex-shrink-0">
+                    <div className="flex bg-gray-100 dark:bg-gray-700 p-1 rounded-lg">
+                        {(['day', 'week', 'month'] as ZoomLevel[]).map(level => (
+                            <button key={level} onClick={() => setZoom(level)} className={`px-2 py-0.5 text-[9px] font-black rounded capitalize transition-all ${zoom === level ? 'bg-white dark:bg-gray-900 text-indigo-600 shadow' : 'text-gray-500 hover:text-gray-700'}`}>{level === 'day' ? 'Gior.' : level === 'week' ? 'Sett.' : 'Mese'}</button>
+                        ))}
                     </div>
-                  ))}
+                    <button onClick={onToggleEconomicView} className={`flex items-center space-x-1 px-2.5 py-1.5 rounded text-[9px] font-black transition-colors uppercase ${isEconomicViewVisible ? 'bg-yellow-300 text-yellow-800' : 'bg-gray-100 dark:bg-gray-700 text-gray-500'}`}>Spese</button>
+                    {isSimActive && <span className="text-[8px] font-black bg-red-600 text-white px-2 py-1 rounded animate-pulse shadow-sm">SIMULAZIONE ATTIVA</span>}
                 </div>
-              )}
-              <div className="absolute top-0 bottom-0 w-0.5 bg-red-500 cursor-ew-resize z-30 sal-line" style={{ left: salLineX }} onMouseDown={handleSalMouseDown}><div className="absolute top-[70px] -translate-y-1/2 -ml-3 w-6 h-5 rounded-b-md bg-red-500/70 flex items-center justify-center text-white cursor-ew-resize shadow-lg"><svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" /></svg></div></div>
-            </div>
-            <svg className="absolute top-0 left-0 w-full h-full pointer-events-none" style={{ top: HEADER_HEIGHT }}>
-              {dependencies.map(dep => {
-                const fromPos = taskPositions.current.get(dep.from); const toPos = taskPositions.current.get(dep.to);
-                if (!fromPos || !toPos) return null;
-                const fromY = fromPos.y + (ROW_HEIGHT / 2); const toY = toPos.y + (ROW_HEIGHT / 2);
-                const fromX = fromPos.x + (dep.type.startsWith('S') ? 0 : fromPos.width);
-                const toX = toPos.x + (dep.type.endsWith('S') ? 0 : toPos.width);
-                const path = `M ${fromX} ${fromY} L ${fromX + 10} ${fromY} L ${fromX + 10} ${toY} L ${toX - 10} ${toY} L ${toX} ${toY}`;
-                return (<g key={dep.id}><path d={path} stroke="#4f46e5" strokeWidth="2" fill="none" /><path d={`M ${toX - 5} ${toY - 4} L ${toX} ${toY} L ${toX - 5} ${toY + 4}`} stroke="#4f46e5" strokeWidth="2" fill="none" /></g>);
-              })}
-              {linkingState && <path d={`M ${linkingState.fromSide === 'start' ? taskPositions.current.get(linkingState.fromId)!.x : taskPositions.current.get(linkingState.fromId)!.x + taskPositions.current.get(linkingState.fromId)!.width} ${taskPositions.current.get(linkingState.fromId)!.y + ROW_HEIGHT/2} L ${linkingState.x} ${linkingState.y}`} stroke="#3b82f6" strokeWidth="2" strokeDasharray="4 4" fill="none" />}
-            </svg>
-            <div className="absolute top-[70px] left-0 w-full h-full">
-              {headerIntervals.map((_, i) => (<div key={i} className="absolute top-0 bottom-0 border-r border-gray-200 dark:border-gray-700" style={{ left: i * UNIT_CONFIG[zoom].width, width: UNIT_CONFIG[zoom].width }}></div>))}
-              {workGroups.map((_, i) => (<div key={i} className="absolute left-0 right-0 border-b border-gray-200 dark:border-gray-700" style={{ top: (i + 1) * ROW_HEIGHT }}></div>))}
-            </div>
-            <div className="relative pt-2 pb-4">
-              {workGroups.map((group, index) => {
-                const groupStart = parse(group.startDate, 'yyyy-MM-dd', new Date());
-                const left = differenceInDays(groupStart, chartStart) * dayPixelWidth;
-                const width = group.duration * dayPixelWidth;
-                taskPositions.current.set(group.id, { y: index * ROW_HEIGHT, x: left, width });
-                const progressWidth = width * (group.progress || 0) / 100;
-                const groupEarnedValue = group.value * (group.progress || 0) / 100;
-                return (
-                  <div key={group.id} className="absolute" style={{top: index * ROW_HEIGHT, height: ROW_HEIGHT, left:0, width:'100%'}}>
-                    {isEconomicViewVisible && <div className="absolute top-1/2 left-0 right-0 h-px border-t border-green-400/60 dark:border-green-500/60 border-dashed z-20 pointer-events-none w-full transform -translate-y-1/2" />}
-                    <div className={`absolute ${BAR_HEIGHT_CLASS} flex items-center my-2 group/task`} style={{ left, width }} onDoubleClick={() => onBarDoubleClick(group)} onMouseMove={(e) => handleBarMouseMove(e, group)} onMouseLeave={handleBarMouseLeave}>
-                      <div className={`relative inset-0 flex items-center justify-start rounded-lg shadow-md ${!isViewOnly ? 'hover:opacity-90 transition-opacity cursor-move' : ''} overflow-hidden w-full h-full z-10 wbs-visual-bar`} style={{ backgroundColor: group.color }} onMouseDown={(e) => handleTaskMouseDown(e, group.id, 'move')}>
-                          <div className="absolute left-0 top-0 h-full bg-black/30 rounded-l-lg" style={{ width: `${group.progress || 0}%` }} />
-                          {progressWidth > 40 && <div className="absolute top-1/2 -translate-y-1/2 text-white font-bold text-xs pointer-events-none select-none z-10" style={{ left: Math.max(5, progressWidth - 38) }}>{numberFormatter.format(group.progress)}%</div>}
-                      </div>
-                      {!isViewOnly && (<><div className="absolute -left-1.5 top-1/2 -translate-y-1/2 w-3 h-3 bg-white dark:bg-gray-300 border-2 border-indigo-500 rounded-full cursor-pointer opacity-0 group-hover/task:opacity-100 transition-opacity z-20" data-taskid={group.id} data-side="start" onMouseDown={(e) => handleDependencyMouseDown(e, group.id, 'start')} /><div className="absolute -right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 bg-white dark:bg-gray-300 border-2 border-indigo-500 rounded-full cursor-pointer opacity-0 group-hover/task:opacity-100 transition-opacity z-20" data-taskid={group.id} data-side="end" onMouseDown={(e) => handleDependencyMouseDown(e, group.id, 'end')} /></>)}
-                      <div className="absolute left-full ml-2 flex items-center h-full whitespace-nowrap z-50 pointer-events-none label-container">
-                          <div className="bg-white/90 dark:bg-gray-900/90 backdrop-blur-sm shadow-sm px-2 py-1 rounded-md text-xs z-50 relative">
-                              <p className="font-bold text-gray-900 dark:text-gray-100 truncate max-w-[250px]">{group.name}<span className="ml-2 font-medium text-indigo-700 dark:text-indigo-400 pdf-hide-value">{numberFormatter.format(group.progress)}%</span></p>
-                              <p className="text-gray-700 dark:text-gray-300 leading-tight pdf-hide-value">{currencyFormatter.format(groupEarnedValue)}</p>
-                          </div>
-                      </div>
-                      {!isViewOnly && <div style={{ backgroundColor: group.color }} className="absolute top-0 right-0 w-4 h-full filter brightness-90 hover:brightness-75 z-20 transition-all flex items-center justify-center rounded-r-lg cursor-ew-resize" onMouseDown={(e) => handleTaskMouseDown(e, group.id, 'resize-end')}><div className="space-y-1"><div className="h-1 w-1 bg-white/50 rounded-full"></div><div className="h-1 w-1 bg-white/50 rounded-full"></div><div className="h-1 w-1 bg-white/50 rounded-full"></div></div></div>}
+
+                <div className="flex-grow max-w-2xl px-4 flex flex-col justify-center pt-2">
+                    <div className="flex justify-between items-center mb-0.5">
+                        <span className="text-[8px] font-black text-gray-400 uppercase tracking-tighter">Avanzamento Progetto</span>
+                        <div className="flex gap-2">
+                           {(isEconomicViewVisible || isSimActive) && <span className="text-[9px] font-black text-red-600 dark:text-red-400 animate-pulse">PREV: {numberFormatter.format(simX !== null ? simulatedProgress : 0)}%</span>}
+                           <span className="text-[9px] font-black text-indigo-600 dark:text-indigo-400">REALE: {numberFormatter.format(overallProgress)}%</span>
+                        </div>
                     </div>
-                    {isEconomicViewVisible && (<>{/* Spese e Forniture icons render qui come prima ... */}</>)}
-                  </div>
-                );
-              })}
+                    <div ref={progressBarRef} onDoubleClick={handleBarDoubleClick} className="relative w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5 overflow-visible cursor-crosshair" title="Doppio click per aggiungere un obiettivo SAL">
+                        <div className="bg-indigo-600 h-full rounded-full transition-all duration-500 shadow-sm" style={{ width: `${overallProgress}%` }}></div>
+                        {simX !== null && (isEconomicViewVisible || isSimActive) && (<div className="absolute top-0 bottom-0 w-0.5 bg-red-600 shadow-[0_0_8px_rgba(220,38,38,0.8)] z-40" style={{ left: `${simulatedProgress}%` }}><div className="absolute -top-1.5 -translate-x-1/2 w-1.5 h-5 bg-red-600 rounded-full border border-white" /></div>)}
+                        {salMarkers.map((marker, idx) => (<div key={idx} className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2" style={{ left: `${marker}%` }}><div className="absolute -top-7 left-1/2 -translate-x-1/2 px-1.5 py-0.5 bg-red-600 text-white text-[8px] font-black rounded-md shadow-[0_2px_10px_rgba(220,38,38,0.4)] whitespace-nowrap z-[60] border border-white"><span>{idx + 1}° SAL - {currencyFormatter.format(grandTotal * (marker / 100))}</span></div><div onMouseDown={e => handleMarkerMouseDown(e, idx)} className={`w-3 h-3 ${isViewOnly ? '' : 'cursor-ew-resize'} bg-red-500 border border-white rounded-full shadow-md hover:scale-125 transition-transform z-[61]`} /></div>))}
+                    </div>
+                </div>
+
+                <div className="flex-shrink-0 text-right">
+                    <p className="text-[9px] font-black text-gray-400 uppercase tracking-tighter leading-none">Valore Cantiere</p>
+                    <p className="text-[10px] font-black text-blue-600 dark:text-blue-400">{currencyFormatter.format(grandTotal)}</p>
+                </div>
             </div>
-             <div className="absolute top-[70px] bottom-0 w-0.5 bg-red-500 z-20 pointer-events-none sal-line" style={{ left: salLineX }} />
-          </div>
+
+            <div className="flex bg-gray-50 dark:bg-gray-900 overflow-hidden">
+                <div className="flex-shrink-0 border-r dark:border-gray-700 p-2 flex flex-col items-center justify-center gap-1" style={{ width: WBS_TABLE_WIDTH }}>
+                    <span className="text-[8px] font-black text-gray-400 uppercase tracking-widest">WBS - GRUPPI</span>
+                    {!isViewOnly && onAddVariant && (
+                        <button 
+                            onClick={(e) => { e.stopPropagation(); onAddVariant(); }}
+                            className="group flex items-center justify-center w-6 h-6 bg-orange-600 hover:bg-orange-700 rounded-full shadow-md transition-all active:scale-90"
+                            title="Aggiungi Variante"
+                        >
+                            <span className="text-white text-lg font-bold leading-none">+</span>
+                        </button>
+                    )}
+                </div>
+                <div className="flex-grow overflow-hidden relative" ref={horizontalHeaderRef}>
+                    <div className="relative h-[60px]" style={{ width: totalWidth }}>
+                         {monthHeaderIntervals.map((pos, i) => (
+                            <div key={`h-grid-l2-${i}`} className="absolute top-0 bottom-0 border-l-2 border-gray-200 dark:border-gray-700 z-0" style={{ left: pos.x }} />
+                         ))}
+                         <div className="absolute top-0 left-0 right-0 flex bg-gray-50 dark:bg-gray-900 h-[25px] border-b dark:border-gray-700 z-10">
+                            {monthHeaderIntervals.map(({ name, count, date, x }) => {
+                                const isHighlighted = simDate && (zoom === 'month' ? isSameYear(date, simDate) : isSameMonth(date, simDate));
+                                return (
+                                    <div key={name} className={`flex-shrink-0 text-center text-[9px] font-black uppercase flex items-center justify-center border-r dark:border-gray-700 transition-colors ${isHighlighted ? 'bg-yellow-300 text-gray-900' : 'text-gray-400'}`} style={{ width: count * UNIT_CONFIG[zoom].width }}>{name}</div>
+                                );
+                            })}
+                        </div>
+                        <div className="absolute top-[25px] left-0 right-0 flex bg-gray-50 dark:bg-gray-900 h-[35px] z-10">
+                            {headerIntervals.map((date, i) => {
+                                const highlighted = isIntervalHighlighted(date);
+                                return (
+                                    <div key={i} className={`flex-shrink-0 text-center border-r dark:border-gray-700 pt-0.5 transition-colors ${highlighted ? 'bg-yellow-300' : isHoliday(date) ? 'bg-red-50 dark:bg-red-900/10 opacity-50' : ''}`} style={{ width: UNIT_CONFIG[zoom].width }}>
+                                        {UNIT_CONFIG[zoom].subLabelFormat && <div className={`text-[8px] font-bold uppercase leading-none ${highlighted ? 'text-gray-900' : 'text-gray-400'}`}>{format(date, UNIT_CONFIG[zoom].subLabelFormat, { locale: it })}</div>}
+                                        <div className={`text-[10px] font-black ${highlighted ? 'text-gray-900' : 'text-gray-700 dark:text-gray-200'}`}>{format(date, UNIT_CONFIG[zoom].labelFormat, { locale: it })}</div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
-      </div>
-       {tooltipData && (
-        <div className="fixed z-50 p-3 bg-white dark:bg-gray-900/90 backdrop-blur-sm text-sm rounded-lg shadow-2xl pointer-events-none border border-gray-200 dark:border-gray-700" style={{ left: tooltipData.x + 20, top: tooltipData.y + 20, transform: 'translate(-50%, 0)', minWidth: '240px' }}>
-          <div className="absolute top-2 right-3 text-xl font-bold text-gray-800 dark:text-gray-100 opacity-90">{numberFormatter.format(tooltipData.group.progress)}%</div>
-          <h4 className="font-bold text-gray-900 dark:text-white mb-2 pr-16">{tooltipData.group.name}</h4>
-          <div className="text-gray-600 dark:text-gray-300 space-y-1">
-            <p><strong>Inizio:</strong> {format(parse(tooltipData.group.startDate, 'yyyy-MM-dd', new Date()), 'd MMM yyyy', {locale: it})}</p>
-            <p><strong>Fine:</strong> {format(parse(tooltipData.group.endDate, 'yyyy-MM-dd', new Date()), 'd MMM yyyy', {locale: it})}</p>
-            <p><strong>Durata:</strong> {numberFormatter.format(tooltipData.group.duration).split(',')[0]} giorni</p>
-             <div className="pt-1 mt-1 border-t border-gray-200 dark:border-gray-700" />
-            <p><strong>Valore Progetto:</strong> {currencyFormatter.format(tooltipData.group.value)}</p>
-            <p><strong>Avanzamento (SAL):</strong> {currencyFormatter.format(tooltipData.group.value * ((tooltipData.group.progress || 0) / 100))}</p>
-            {isEconomicViewVisible && (<><p><strong>Costi Sostenuti:</strong> {currencyFormatter.format(tooltipData.totalCost)}</p><p><strong>Margine:</strong> <span className={tooltipData.margin >= 0 ? 'font-bold text-green-600 dark:text-green-400' : 'font-bold text-red-500 dark:text-red-400'}>{currencyFormatter.format(tooltipData.margin)}</span></p></>)}
-          </div>
+
+        <div className="flex flex-grow overflow-hidden relative group/gantt min-h-0">
+            {/* Sidebar con Intestazioni Gerarchiche */}
+            <div className="flex-shrink-0 flex flex-col border-r dark:border-gray-700 shadow-lg z-10 bg-white dark:bg-gray-800 overflow-hidden h-full" style={{ width: WBS_TABLE_WIDTH }}>
+                <div className="flex-1 overflow-y-auto scrollbar-hide" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }} ref={scrollSyncRef} onScroll={handleSyncScroll}>
+                    <div className="flex flex-col" style={{ height: totalContentHeight }}>
+                        {displayItems.map((item, idx) => {
+                            if (item.type === 'header') {
+                                return (
+                                    <div key={`h-${item.label}`} className={`h-[56px] flex-shrink-0 border-b border-gray-200 dark:border-gray-700 flex items-center px-4 bg-gray-100 dark:bg-gray-900/50 sticky left-0 z-20`}>
+                                        <div className={`w-1 h-8 rounded-full mr-3 ${item.isVariant ? 'bg-orange-500' : 'bg-indigo-600'}`} />
+                                        <div className="flex flex-col">
+                                            <span className="text-[10px] font-black text-gray-500 uppercase tracking-tighter leading-none">
+                                                {item.isVariant ? 'VARIANTE' : 'ORIGINALE'}
+                                            </span>
+                                            <span className="text-[11px] font-black text-gray-900 dark:text-white uppercase truncate max-w-[240px]">
+                                                {item.label}
+                                            </span>
+                                        </div>
+                                    </div>
+                                );
+                            }
+
+                            const group = item.group;
+                            const isVariantGroup = documents.find(d => d.workGroups.some(wg => wg.id === group.id))?.fileName.toUpperCase().startsWith('VAR');
+
+                            return (
+                            <div key={group.id} className={`h-[56px] flex-shrink-0 border-b border-gray-50/50 dark:border-gray-700/30 flex flex-col justify-center px-4 cursor-pointer transition-colors relative ${selectedGroupId === group.id ? 'bg-indigo-50 dark:bg-indigo-900/30 ring-inset ring-2 ring-indigo-500' : 'hover:bg-gray-50 dark:hover:bg-gray-700/50'}`} onClick={() => { centerTaskInView(group); }}>
+                                <div className="flex justify-between items-center mb-0.5">
+                                    <div className="flex items-center gap-2 overflow-hidden pl-4">
+                                        {!isViewOnly && (<button onClick={(e) => { e.stopPropagation(); onBarDoubleClick(group); }} className="p-1 hover:bg-indigo-100 rounded text-gray-400 hover:text-indigo-600 transition-colors"><svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" /></svg></button>)}
+                                        <span className="text-[11px] font-bold text-gray-800 dark:text-white truncate uppercase max-w-[200px]">
+                                            WBS {item.index} - {group.name}
+                                        </span>
+                                    </div>
+                                    <span className="text-[10px] font-black bg-indigo-100 dark:bg-indigo-900 text-indigo-600 dark:text-indigo-300 px-1.5 rounded">{group.duration}gg</span>
+                                </div>
+                                <div className="flex justify-between items-center pl-4">
+                                    <span className="text-[10px] font-mono font-bold text-blue-600">{currencyFormatter.format(group.value)}</span>
+                                    <div className="w-12 h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                                        <div className="h-full rounded-full" style={{ width: `${group.progress}%`, backgroundColor: isVariantGroup ? '#F97316' : group.color }}></div>
+                                    </div>
+                                </div>
+                            </div>
+                        )})}
+                    </div>
+                </div>
+            </div>
+
+            {/* Grafico con Barre allineate alla gerarchia */}
+            <div className="flex-1 overflow-auto scrollbar-hide relative h-full min-h-0" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }} ref={chartContainerRef} onScroll={handleSyncScroll} onMouseMove={handleGanttMouseMove} onMouseDown={handleGanttMouseDown} onMouseLeave={() => { if(longPressTimerRef.current) { clearTimeout(longPressTimerRef.current); longPressTimerRef.current = null; } setSimX(null); }}>
+                <div className="absolute inset-0 pointer-events-none" style={{ width: totalWidth, height: totalContentHeight }}>
+                    {headerIntervals.map((_, i) => (
+                        <div key={`grid-l1-${i}`} className="absolute top-0 bottom-0 border-l border-gray-100 dark:border-gray-700/20" style={{ left: i * UNIT_CONFIG[zoom].width }} />
+                    ))}
+                    {monthHeaderIntervals.map((pos, i) => (
+                        <div key={`grid-l2-${i}`} className="absolute top-0 bottom-0 border-l-2 border-gray-300 dark:border-gray-600" style={{ left: pos.x }} />
+                    ))}
+                </div>
+
+                {simX !== null && (isEconomicViewVisible || isSimActive) && (
+                    <div className="absolute top-0 w-px border-l-2 border-red-600 shadow-[0_0_12px_rgba(220,38,38,0.6)] z-[70] pointer-events-none" style={{ left: simX, height: totalContentHeight }}>
+                        <div className="sticky top-0 z-[80]">
+                            <div className="bg-white border-2 border-red-600 text-black text-[10px] font-black px-4 py-2 rounded-b shadow-[0_4px_15px_rgba(0,0,0,0.4)] whitespace-nowrap border-x border-b min-w-[140px] text-center mx-auto" style={{ transform: 'translateX(-50%)' }}>
+                                <div className="text-red-600 mb-1 border-b border-gray-100 pb-1">{format(addDays(chartStart, simX / dayPixelWidth), 'dd MMM yyyy', { locale: it })}</div>
+                                <div className="text-black text-sm">{currencyFormatter.format(grandTotal * (simulatedProgress / 100))}</div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+                
+                <div className="relative" style={{ width: totalWidth, height: totalContentHeight }}>
+                    {displayItems.map((item, index) => {
+                        if (item.type === 'header') {
+                            return (
+                                <div key={`hb-${item.label}`} className="absolute border-b border-gray-200 dark:border-gray-700 bg-gray-100/30 dark:bg-gray-900/10 pointer-events-none" style={{ top: index * ROW_HEIGHT, height: ROW_HEIGHT, left: 0, width: '100%' }} />
+                            );
+                        }
+
+                        const group = item.group;
+                        const groupStart = parse(group.startDate, 'yyyy-MM-dd', new Date());
+                        const groupEnd = parse(group.endDate, 'yyyy-MM-dd', new Date());
+                        const left = differenceInDays(groupStart, chartStart) * dayPixelWidth;
+                        const width = (differenceInDays(groupEnd, groupStart) + 1) * dayPixelWidth;
+                        const isVariantGroup = documents.find(d => d.workGroups.some(wg => wg.id === group.id))?.fileName.toUpperCase().startsWith('VAR');
+                        
+                        const measurementDates = Array.from(new Set(group.items.flatMap(i => i.measurements || []).map(m => m.date)));
+
+                        return (
+                            <div key={group.id} className={`absolute border-b border-gray-50/50 dark:border-gray-700/30 transition-colors ${selectedGroupId === group.id ? 'bg-indigo-50/20' : ''}`} style={{top: index * ROW_HEIGHT, height: ROW_HEIGHT, left:0, width:'100%'}}>
+                                <div className={`absolute h-8 flex items-center my-3 group/task transition-all ${selectedGroupId === group.id ? 'scale-[1.02] z-30' : 'z-10'}`} style={{ left, width }} onDoubleClick={(e) => { e.stopPropagation(); onBarDoubleClick(group); }}>
+                                    <div className={`relative flex items-center rounded-lg shadow-sm w-full h-full overflow-hidden ${!isViewOnly && !group.officialStartDate ? 'cursor-pointer' : 'cursor-default'}`} style={{ backgroundColor: isVariantGroup ? '#F97316' : group.color }} onMouseDown={(e) => handleTaskMouseDown(e, group.id, 'move')}>
+                                        <div className="absolute left-0 top-0 h-full bg-black/20" style={{ width: `${group.progress}%` }} />
+                                        {measurementDates.map(mDate => {
+                                            const mPos = differenceInDays(parseISO(mDate), chartStart) * dayPixelWidth;
+                                            const relativeLeft = mPos - left;
+                                            if (relativeLeft >= 0 && relativeLeft <= width) {
+                                                return <div key={mDate} className="absolute top-0 bottom-0 w-px bg-white z-20 shadow-[0_0_2px_rgba(255,255,255,0.8)]" style={{ left: relativeLeft }} />;
+                                            }
+                                            return null;
+                                        })}
+                                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                                            <span className="text-[10px] font-black text-white drop-shadow-md">{group.duration}gg</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
         </div>
-      )}
-    </>
+        <style dangerouslySetInnerHTML={{ __html: ".scrollbar-hide::-webkit-scrollbar { display: none; }" }} />
+    </div>
   );
 };
 

@@ -55,7 +55,9 @@ const sanitizeDocuments = (documents: ProjectDocument[]): ProjectDocument[] => {
     salMarkers: index === 0 ? (doc.salMarkers ?? []) : undefined,
     workGroups: doc.workGroups.map(wg => ({
       ...wg,
+      id: wg.id || crypto.randomUUID(), // PATTO DI FERRO: Garantisce che ogni gruppo abbia un ID per il lookup nel Gantt
       progress: wg.progress ?? 0,
+      teamSize: wg.teamSize ?? 2,
       isSecurityCost: wg.isSecurityCost ?? false,
       accountingType: wg.accountingType ?? 'measure',
       items: wg.items.map(item => ({
@@ -68,7 +70,11 @@ const sanitizeDocuments = (documents: ProjectDocument[]): ProjectDocument[] => {
         variations: item.variations || [],
         laborRate: item.laborRate || 0,
         laborValue: item.laborValue || 0,
-        originalMeasurements: item.originalMeasurements || []
+        originalMeasurements: item.originalMeasurements?.map(om => ({
+            ...om,
+            id: om.id || crypto.randomUUID()
+        })) || [],
+        originalIndex: item.originalIndex
       }))
     }))
   }));
@@ -108,10 +114,16 @@ const App: React.FC = () => {
   const [isGeneratorModalOpen, setIsGeneratorModalOpen] = useState(false);
   const [shareableLink, setShareableLink] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const variantInputRef = useRef<HTMLInputElement>(null);
   const [selectedTask, setSelectedTask] = useState<WorkGroup | null>(null);
   const [isCurrentTaskLocked, setIsCurrentTaskLocked] = useState<boolean>(false);
   const [isEconomicViewVisible, setIsEconomicViewVisible] = useState<boolean>(false);
   
+  // PATTO DI FERRO: Gestione numero variante tramite dialogo custom e REF per accesso immediato
+  const pendingVariantNumRef = useRef<string | null>(null);
+  const [isVariantModalOpen, setIsVariantModalOpen] = useState(false);
+  const [variantInputVal, setVariantInputVal] = useState('1');
+
   useEffect(() => {
       const loadedProjects = localStorage.getItem('chronos_projects');
       if (loadedProjects) { try { const parsed = JSON.parse(loadedProjects); if (Array.isArray(parsed)) setSavedProjects(parsed); } catch (e) { console.error(e); } }
@@ -199,42 +211,53 @@ const App: React.FC = () => {
   const handleDeleteDocument = (fileName: string) => { if (window.confirm(`Eliminare "${fileName}"?`)) setProjectDocuments(prev => prev.filter(doc => doc.fileName !== fileName)); };
   const handleToggleGroupSecurity = useCallback((groupId: string) => { if (effectiveIsViewOnly) return; setProjectDocuments(prev => prev.map(doc => ({ ...doc, workGroups: doc.workGroups.map(wg => wg.id === groupId ? { ...wg, isSecurityCost: !wg.isSecurityCost } : wg) }))); }, [effectiveIsViewOnly]);
 
-  const handleFileUpload = useCallback(async (file: File) => {
+  const handleFileUpload = useCallback(async (file: File, isVariant: boolean = false) => {
     setIsLoading(true); setError(null);
     const reader = new FileReader();
     reader.onload = async (e) => {
       const content = e.target?.result as string;
       try {
         const jsonData = JSON.parse(content);
-        
+        const baseDocName = file.name.replace('.json', '');
+        const finalDocName = (isVariant && pendingVariantNumRef.current) 
+            ? `VAR ${pendingVariantNumRef.current} - ${baseDocName}` 
+            : baseDocName;
+
         if (isNewProjectFile(jsonData)) {
-            setProjectDocuments(sanitizeDocuments(jsonData.projectDocuments));
-            setExpenses(sanitizeExpenses(jsonData.expenses || []));
-            setProjectName(jsonData.projectName || file.name.replace('.json', ''));
-            if (jsonData.lastSavedTime) setLastSavedTime(jsonData.lastSavedTime);
-            if (jsonData.contractConfig) setContractConfig(jsonData.contractConfig);
-            if (jsonData.sals) setSals(jsonData.sals);
-            if (jsonData.teams) setTeams(prev => { const map = new Map(prev.map(t => [t.id, t])); jsonData.teams?.forEach((t:any) => map.set(t.id, t)); return Array.from(map.values()); });
-            if (jsonData.workers) setWorkers(prev => { const map = new Map(prev.map(w => [w.id, w])); jsonData.workers?.forEach((w:any) => map.set(w.id, w)); return Array.from(map.values()); });
-            setCurrentProjectId(jsonData.id || crypto.randomUUID());
+            const sanitized = sanitizeDocuments(jsonData.projectDocuments);
+            if (isVariant) {
+                setProjectDocuments(prev => [...prev, ...sanitized.map(d => ({ ...d, fileName: finalDocName }))]);
+            } else {
+                setProjectDocuments(sanitized);
+                setExpenses(sanitizeExpenses(jsonData.expenses || []));
+                setProjectName(jsonData.projectName || baseDocName);
+                if (jsonData.lastSavedTime) setLastSavedTime(jsonData.lastSavedTime);
+                if (jsonData.contractConfig) setContractConfig(jsonData.contractConfig);
+                if (jsonData.sals) setSals(jsonData.sals);
+                if (jsonData.teams) setTeams(prev => { const map = new Map(prev.map(t => [t.id, t])); jsonData.teams?.forEach((t:any) => map.set(t.id, t)); return Array.from(map.values()); });
+                if (jsonData.workers) setWorkers(prev => { const map = new Map(prev.map(w => [w.id, w])); jsonData.workers?.forEach((w:any) => map.set(w.id, w)); return Array.from(map.values()); });
+                setCurrentProjectId(jsonData.id || crypto.randomUUID());
+            }
         } 
         else if (isGecolaData(jsonData)) {
             const gecola = jsonData.gecolaData;
             let currentDate = new Date();
-            let globalItemCounter = 1; // RESET COUNTER PER GECOLA
+            let globalItemCounter = 1; 
             
             const mappedGroups: WorkGroup[] = gecola.categories.map((cat: any, idx: number) => {
                 const groupArticles = gecola.articles.filter((art: any) => art.categoryCode === cat.code);
                 const totalValue = groupArticles.reduce((acc: number, art: any) => acc + ((art.unitPrice || 0) * (art.quantity || 0)), 0);
-                const duration = Math.max(3, Math.ceil(totalValue / 1500));
+                const teamSize = 2;
+                const workingDays = Math.max(3, Math.ceil(totalValue / (240 * teamSize)));
                 const startDate = new Date(currentDate);
-                const endDate = addDays(startDate, duration - 1);
+                const endDate = addDays(startDate, workingDays - 1);
                 currentDate = addDays(endDate, 1);
 
                 return {
                     id: crypto.randomUUID(),
                     name: cat.name,
-                    duration,
+                    duration: workingDays,
+                    teamSize: teamSize,
                     value: totalValue,
                     color: colorPalette[idx % colorPalette.length],
                     startDate: format(startDate, 'yyyy-MM-dd'),
@@ -254,14 +277,14 @@ const App: React.FC = () => {
                         measurements: [],
                         annotations: [],
                         variations: [],
-                        originalMeasurements: art.measurements || [],
-                        originalIndex: globalItemCounter++ // MAPPING POSIZIONE
+                        originalMeasurements: art.measurements?.map((m: any) => ({ ...m, id: m.id || crypto.randomUUID() })) || [],
+                        originalIndex: globalItemCounter++ 
                     }))
                 };
             }).filter((g: WorkGroup) => g.items.length > 0);
 
             const newDoc: ProjectDocument = {
-                fileName: file.name,
+                fileName: finalDocName,
                 workGroups: mappedGroups,
                 totalValue: mappedGroups.reduce((acc, g) => acc + g.value, 0),
                 isVisible: true,
@@ -270,37 +293,42 @@ const App: React.FC = () => {
                 location: gecola.projectInfo?.location
             };
 
-            setProjectDocuments(sanitizeDocuments([newDoc]));
-            setExpenses([]);
-            setProjectName(gecola.projectInfo?.title || file.name.replace('.json', ''));
-            
-            setContractConfig({
-                discountPercent: 0,
-                withholdingTaxPercent: 0.5,
-                vatPercent: gecola.projectInfo?.vatRate || 22,
-                contractorName: gecola.projectInfo?.designer || '',
-                contractCode: '',
-                contractDate: gecola.projectInfo?.date || '',
-                advancePaymentPercent: 20,
-                excludeLaborFromDiscount: false
-            });
-
-            setCurrentProjectId(crypto.randomUUID());
+            const sanitized = sanitizeDocuments([newDoc]);
+            if (isVariant) {
+                setProjectDocuments(prev => [...prev, ...sanitized]);
+            } else {
+                setProjectDocuments(sanitized);
+                setExpenses([]);
+                setProjectName(gecola.projectInfo?.title || baseDocName);
+                setContractConfig({
+                    discountPercent: 0,
+                    withholdingTaxPercent: 0.5,
+                    vatPercent: gecola.projectInfo?.vatRate || 22,
+                    contractorName: gecola.projectInfo?.designer || '',
+                    contractCode: '',
+                    contractDate: gecola.projectInfo?.date || '',
+                    advancePaymentPercent: 20,
+                    excludeLaborFromDiscount: false
+                });
+                setCurrentProjectId(crypto.randomUUID());
+            }
         }
         else if (isRawJsonComputo(jsonData)) {
             let currentDate = new Date();
             let globalItemCounter = 1;
             const mappedGroups: WorkGroup[] = jsonData.map((g, idx) => {
                 const totalValue = g.items.reduce((acc: number, item: any) => acc + (item.total || 0), 0);
-                const duration = Math.max(5, Math.ceil(totalValue / 1500));
+                const teamSize = 2;
+                const workingDays = Math.max(5, Math.ceil(totalValue / (240 * teamSize)));
                 const startDate = new Date(currentDate);
-                const endDate = addDays(startDate, duration - 1);
+                const endDate = addDays(startDate, workingDays - 1);
                 currentDate = addDays(endDate, 2);
                 
                 return {
                     id: crypto.randomUUID(),
                     name: g.groupName,
-                    duration,
+                    duration: workingDays,
+                    teamSize: teamSize,
                     value: totalValue,
                     color: colorPalette[idx % colorPalette.length],
                     startDate: format(startDate, 'yyyy-MM-dd'),
@@ -320,14 +348,14 @@ const App: React.FC = () => {
                         measurements: [],
                         annotations: [],
                         variations: [],
-                        originalMeasurements: [],
+                        originalMeasurements: i.measurements?.map((m: any) => ({ ...m, id: m.id || crypto.randomUUID() })) || [],
                         originalIndex: globalItemCounter++
                     }))
                 };
             });
 
             const newDoc: ProjectDocument = {
-                fileName: file.name,
+                fileName: finalDocName,
                 workGroups: mappedGroups,
                 totalValue: mappedGroups.reduce((acc, g) => acc + g.value, 0),
                 isVisible: true,
@@ -335,20 +363,27 @@ const App: React.FC = () => {
                 isLocked: false
             };
 
-            setProjectDocuments(sanitizeDocuments([newDoc]));
-            setExpenses([]);
-            setProjectName(file.name.replace('.json', ''));
-            setCurrentProjectId(crypto.randomUUID());
+            const sanitized = sanitizeDocuments([newDoc]);
+            if (isVariant) {
+                setProjectDocuments(prev => [...prev, ...sanitized]);
+            } else {
+                setProjectDocuments(sanitized);
+                setExpenses([]);
+                setProjectName(baseDocName);
+                setCurrentProjectId(crypto.randomUUID());
+            }
         } else {
             alert("Il file JSON non è in un formato compatibile con Chronos.");
         }
         
-        setActiveView('dashboard');
+        setActiveView('timeline');
       } catch (err: any) { 
           alert(`Errore: Il file selezionato non è un JSON valido.`); 
       } finally { 
           setIsLoading(false); 
+          pendingVariantNumRef.current = null;
           if (fileInputRef.current) fileInputRef.current.value = '';
+          if (variantInputRef.current) variantInputRef.current.value = '';
       }
     };
     reader.readAsText(file);
@@ -430,6 +465,24 @@ const App: React.FC = () => {
       }
   };
 
+  const handleAddVariant = () => {
+      // PATTO DI FERRO: Apri il dialogo custom invece del prompt nativo
+      setIsVariantModalOpen(true);
+  };
+
+  const handleConfirmVariant = () => {
+      if (variantInputVal.trim() !== "") {
+          // PATTO DI FERRO: Uso del ref per garantire la persistenza immediata del valore
+          pendingVariantNumRef.current = variantInputVal.trim();
+          setIsVariantModalOpen(false);
+          // PATTO DI FERRO: Apertura immediata del file picker dopo la conferma
+          if (variantInputRef.current) {
+              variantInputRef.current.value = '';
+              variantInputRef.current.click();
+          }
+      }
+  };
+
   const handleDeleteProject = (id: string) => setSavedProjects(prev => { const updated = prev.filter(p => p.id !== id); localStorage.setItem('chronos_projects', JSON.stringify(updated)); return updated; });
   const handleArchiveProject = (id: string) => setSavedProjects(prev => { const updated = prev.map(p => p.id === id ? { ...p, status: 'archived' as const, lastModified: new Date().toISOString() } : p); localStorage.setItem('chronos_projects', JSON.stringify(updated)); return updated; });
   const handleRestoreProject = (id: string) => setSavedProjects(prev => { const updated = prev.map(p => p.id === id ? { ...p, status: 'active' as const, lastModified: new Date().toISOString() } : p); localStorage.setItem('chronos_projects', JSON.stringify(updated)); return updated; });
@@ -453,7 +506,7 @@ const App: React.FC = () => {
 
     switch(activeView) {
       case 'dashboard': return <Dashboard projectSummary={projectSummaryStats} onViewChange={setActiveView} documentCount={projectDocuments.length} onImport={handleCreateProject} isProjectLoaded={isProjectLoaded} isDemoMode={isDemoMode} />;
-      case 'timeline': return <GanttChart workGroups={projectDocuments.flatMap(d => d.workGroups)} dependencies={projectDocuments.flatMap(d => d.dependencies || [])} expenses={expenses} setWorkGroups={handleWorkGroupsUpdate} onDependenciesChange={handleDependenciesChange} isViewOnly={effectiveIsViewOnly} onBarDoubleClick={handleOpenTaskModal} isEconomicViewVisible={isEconomicViewVisible} onToggleEconomicView={() => setIsEconomicViewVisible(prev => !prev)} onUpdateExpenseSupplyDate={handleUpdateExpenseSupplyDate} projectName={projectName} />;
+      case 'timeline': return <GanttChart workGroups={projectDocuments.flatMap(d => d.workGroups)} dependencies={projectDocuments.flatMap(d => d.dependencies || [])} expenses={expenses} setWorkGroups={handleWorkGroupsUpdate} onDependenciesChange={handleDependenciesChange} isViewOnly={effectiveIsViewOnly} onBarDoubleClick={handleOpenTaskModal} isEconomicViewVisible={isEconomicViewVisible} onToggleEconomicView={() => setIsEconomicViewVisible(prev => !prev)} onUpdateExpenseSupplyDate={handleUpdateExpenseSupplyDate} projectName={projectName} documents={projectDocuments} salMarkers={projectDocuments[0]?.salMarkers ?? []} onSalMarkersChange={handleSetSalMarkers} onAddVariant={handleAddVariant} />;
       case 'summary': return <ComputoDetailView documents={projectDocuments.filter(d => d.isVisible ?? true)} onToggleGroupSecurity={handleToggleGroupSecurity} />;
       case 'measurements': return <MeasurementsView documents={projectDocuments.filter(d => d.isVisible ?? true)} projectName={projectName} teams={teams} workers={workers} />;
       case 'costs': return <CostsView expenses={expenses} workGroups={projectDocuments.flatMap(d => d.workGroups)} onAddExpense={handleAddExpense} onUpdateExpense={handleUpdateExpense} onDeleteExpense={handleDeleteExpense} isViewOnly={effectiveIsViewOnly} earnedValue={projectSummaryStats?.earnedValue ?? 0} />;
@@ -467,17 +520,18 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-sans">
-      <input type="file" ref={fileInputRef} onChange={e => e.target.files && handleFileUpload(e.target.files[0])} accept=".json" className="hidden" />
-      <div className="flex h-screen">
+      <input type="file" ref={fileInputRef} onChange={e => e.target.files && handleFileUpload(e.target.files[0], false)} accept=".json" className="hidden" />
+      <input type="file" ref={variantInputRef} onChange={e => e.target.files && handleFileUpload(e.target.files[0], true)} accept=".json" className="hidden" />
+      <div className="flex h-screen overflow-hidden">
           {currentProjectId || isShareMode ? (
             <>
               <Sidebar activeView={activeView} onViewChange={setActiveView} isProjectLoaded={isProjectLoaded} onLogout={handleReset} isViewOnly={effectiveIsViewOnly} onExitProject={handleExitProject} />
-              <div className="flex-1 flex flex-col ml-64">
+              <div className="flex-1 flex flex-col ml-64 min-w-0 h-full overflow-hidden">
                 <Header userEmail={userEmail} remainingDays={remainingDays} serverDate={serverDate} onImport={handleCreateProject} onExport={handleExport} onSaveToDrive={handleSaveToDrive} onShare={handleOpenShareModal} isProjectLoaded={isProjectLoaded} isAdmin={isAdmin} onGenerateLicense={() => setIsGeneratorModalOpen(true)} isViewOnly={effectiveIsViewOnly} isShareMode={isShareMode} isDemoMode={isDemoMode} isSessionExpired={isSessionExpired} sessionSecondsRemaining={sessionSecondsRemaining} projectName={projectName} onUpdateProjectName={setProjectName} lastSavedTime={lastSavedTime} />
-                <main className="flex-grow p-4 md:p-6 overflow-y-auto">
-                  <div className="max-w-7xl mx-auto">
-                    {(activeView === 'timeline' || activeView === 'summary') && isProjectLoaded && <ProjectSummary documents={projectDocuments} isViewOnly={effectiveIsViewOnly} salMarkers={projectDocuments[0]?.salMarkers ?? []} onSalMarkersChange={handleSetSalMarkers} onToggleDocumentVisibility={handleToggleDocumentVisibility} onToggleDocumentFreeze={handleToggleDocumentFreeze} onToggleDocumentLock={handleToggleDocumentLock} onRenameDocument={handleRenameDocument} onDeleteDocument={handleDeleteDocument} />}
-                      <div className="bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden min-h-[400px] flex flex-col mt-6">{renderContent()}</div>
+                <main className={`flex-1 min-h-0 flex flex-col p-4 md:p-6 overflow-hidden`}>
+                  <div className={`max-w-7xl mx-auto w-full flex-1 flex flex-col min-h-0`}>
+                    {(activeView === 'summary') && isProjectLoaded && <ProjectSummary documents={projectDocuments} isViewOnly={effectiveIsViewOnly} salMarkers={projectDocuments[0]?.salMarkers ?? []} onSalMarkersChange={handleSetSalMarkers} onToggleDocumentVisibility={handleToggleDocumentVisibility} onToggleDocumentFreeze={handleToggleDocumentFreeze} onToggleDocumentLock={handleToggleDocumentLock} onRenameDocument={handleRenameDocument} onDeleteDocument={handleDeleteDocument} />}
+                      <div className={`bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden min-h-[400px] flex-1 flex flex-col mt-6`}>{renderContent()}</div>
                   </div>
                 </main>
               </div>
@@ -486,6 +540,35 @@ const App: React.FC = () => {
             <div className="w-full">{renderContent()}</div>
           )}
       </div>
+      
+      {/* PATTO DI FERRO: Dialogo inserimento numero variante */}
+      {isVariantModalOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setIsVariantModalOpen(false)}>
+              <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 w-full max-w-sm border border-indigo-100 dark:border-gray-700 animate-fade-in" onClick={e => e.stopPropagation()}>
+                  <div className="flex items-center gap-3 mb-4 text-indigo-600 dark:text-indigo-400">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                      <h3 className="font-black text-lg uppercase tracking-tight">Nuova Variante</h3>
+                  </div>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mb-6 font-medium">Inserire il numero d'ordine della perizia di variante per attribuire correttamente il computo:</p>
+                  <div className="relative mb-6">
+                      <input 
+                        type="text" 
+                        value={variantInputVal} 
+                        onChange={e => setVariantInputVal(e.target.value)} 
+                        className="w-full p-4 pl-12 text-2xl font-black text-center bg-gray-50 dark:bg-gray-700 border-2 border-indigo-500 rounded-xl focus:ring-4 focus:ring-indigo-500/20 outline-none dark:text-white"
+                        autoFocus
+                        onKeyDown={e => e.key === 'Enter' && handleConfirmVariant()}
+                      />
+                      <span className="absolute left-4 top-1/2 -translate-y-1/2 text-indigo-400 font-bold">N.</span>
+                  </div>
+                  <div className="flex gap-3">
+                      <button onClick={() => setIsVariantModalOpen(false)} className="flex-1 py-3 text-sm font-bold text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">Annulla</button>
+                      <button onClick={handleConfirmVariant} className="flex-1 py-3 text-sm font-black text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg shadow-lg shadow-indigo-500/30 transition-all active:scale-95 uppercase tracking-widest">Conferma</button>
+                  </div>
+              </div>
+          </div>
+      )}
+
       <TaskModal 
         isOpen={!!selectedTask} 
         onClose={() => setSelectedTask(null)} 

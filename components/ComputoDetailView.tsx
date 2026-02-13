@@ -77,8 +77,8 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents, onTogg
   };
 
   return (
-    <div className="p-4 md:p-6 space-y-8">
-       <div className="flex justify-end -mb-4">
+    <div className="h-full flex flex-col overflow-hidden">
+       <div className="flex-shrink-0 flex justify-end p-4 bg-gray-50 dark:bg-gray-900 border-b dark:border-gray-700">
         <button
           onClick={handleSavePdf}
           disabled={isGeneratingPdf}
@@ -102,7 +102,7 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents, onTogg
           )}
         </button>
        </div>
-      <div ref={reportRef}>
+      <div className="flex-grow overflow-y-auto p-4 md:p-6 space-y-8" ref={reportRef}>
         {documents.map((doc, docIndex) => {
             const variationHeaders = Array.from(new Set<string>(
                 doc.workGroups.flatMap(wg => 
@@ -121,7 +121,7 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents, onTogg
             let itemCounter = 1;
 
             return (
-              <div key={docIndex} className="bg-gray-50 dark:bg-gray-800/50 p-6 rounded-xl shadow-md mb-6 overflow-x-auto">
+              <div key={docIndex} className="bg-gray-50 dark:bg-gray-800/50 p-6 rounded-xl shadow-md mb-6">
                 <div className="flex justify-between items-end border-b pb-2 border-gray-300 dark:border-gray-600 mb-4">
                     <h2 className="text-2xl font-bold text-gray-800 dark:text-gray-100">
                     File: <span className="text-indigo-600 dark:text-indigo-400">{doc.fileName}</span>
@@ -143,24 +143,19 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents, onTogg
                     <div key={groupIndex}>
                       <h3 className={`text-lg font-semibold mb-3 p-2 rounded-md flex justify-between items-center ${group.isSecurityCost ? 'bg-orange-100 dark:bg-orange-900/30 text-orange-800 dark:text-orange-100 border border-orange-300 dark:border-orange-700' : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-200'}`}>
                         <div className="flex items-center gap-3">
-                            <span>{group.name}</span>
+                            <span>WBS {groupIndex + 1} - {group.name}</span>
                             {onToggleGroupSecurity && (
                                 <button 
                                     onClick={() => onToggleGroupSecurity(group.id)}
                                     className={`p-1 rounded-lg transition-all flex items-center gap-1.5 shadow-sm border border-transparent ${group.isSecurityCost ? 'bg-orange-600 text-white hover:bg-orange-700' : 'bg-white text-gray-400 hover:text-indigo-600 hover:border-indigo-300'}`}
-                                    title={group.isSecurityCost ? "Disattiva Oneri Sicurezza (Rendi soggetto a ribasso)" : "Attiva Oneri Sicurezza (Rendi non soggetto a ribasso)"}
+                                    title={group.isSecurityCost ? "Disattiva Oneri Sicurezza" : "Attiva Oneri Sicurezza"}
                                 >
                                     <div className="relative">
                                         <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                                             <path fillRule="evenodd" d="M10 1.944A11.954 11.954 0 012.166 5C2.056 5.649 2 6.319 2 7c0 5.225 3.34 9.67 8 11.317C14.66 16.67 18 12.225 18 7c0-.682-.057-1.35-.166-2.001A11.954 11.954 0 0110 1.944zM11 14a1 1 0 11-2 0 1 1 0 012 0zm0-7a1 1 0 10-2 0v3a1 1 0 102 0V7z" clipRule="evenodd" />
                                         </svg>
-                                        <div className="absolute -top-1 -right-1 bg-white rounded-full p-0.5 shadow-xs">
-                                            <svg className={`w-2.5 h-2.5 ${group.isSecurityCost ? 'text-orange-600' : 'text-indigo-600'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={4}>
-                                                <path d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-                                            </svg>
-                                        </div>
                                     </div>
-                                    <span className="text-[10px] font-black uppercase px-1 hidden sm:inline">Switch</span>
+                                    <span className="text-[10px] font-black uppercase px-1 hidden sm:inline">Modifica Stato</span>
                                 </button>
                             )}
                             {group.isSecurityCost && <span className="text-xs font-bold px-2 py-0.5 bg-orange-200 text-orange-800 rounded-full border border-orange-300">SICUREZZA</span>}
@@ -169,7 +164,7 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents, onTogg
                           {currencyFormatter.format(groupTotalNewValue)}
                         </span>
                       </h3>
-                      <div className="overflow-auto relative max-h-96">
+                      <div className="overflow-x-auto relative">
                         <table className="w-full text-sm text-left text-gray-500 dark:text-gray-400">
                           <thead className="text-xs text-gray-700 uppercase bg-gray-100 dark:bg-gray-700 dark:text-gray-400 sticky top-0 z-10">
                             <tr>
@@ -186,12 +181,13 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents, onTogg
                               ))}
                               <th scope="col" className="px-4 py-3 w-24 text-right font-bold bg-green-50 dark:bg-green-900/10">Nuova Q.tà</th>
                               <th scope="col" className="px-4 py-3 w-32 text-right font-bold bg-green-50 dark:bg-green-900/10">Nuovo Totale</th>
-                              <th scope="col" className="px-4 py-3 w-24 text-right bg-blue-50 dark:bg-blue-900/10" title="Incidenza Manodopera">Inc. M.O. %</th>
-                              <th scope="col" className="px-4 py-3 w-24 text-right bg-blue-50 dark:bg-blue-900/10" title="Costo Manodopera">Costo M.O.</th>
+                              <th scope="col" className="px-4 py-3 w-24 text-right bg-blue-50 dark:bg-blue-900/10">Inc. M.O. %</th>
+                              <th scope="col" className="px-4 py-3 w-24 text-right bg-blue-50 dark:bg-blue-900/10">Costo M.O.</th>
                             </tr>
                           </thead>
                           <tbody>
                             {group.items.map((item, itemIndex) => {
+                                // Fixed error on line 190: changed 'vAcc' to 'acc' in reduce callback body.
                                 const varTotal = (item.variations || []).reduce((acc, v) => v.type === 'increase' ? acc + v.quantity : acc - v.quantity, 0);
                                 const newQuantity = item.quantity + varTotal;
                                 const newTotal = newQuantity * item.unitPrice;
