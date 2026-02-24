@@ -39,8 +39,6 @@ interface AccountingEntry {
     debit: number; 
     progressive: number; 
     groupName: string; 
-    wbsIndex: number; 
-    wbsSourceLabel: string; // PATTO DI FERRO: Identificatore Progetto/Variante
     docName: string;
     cumulativePercentage?: number; 
     factor?: number;
@@ -55,8 +53,6 @@ interface AccountingEntry {
 interface SummaryEntry {
     articleCode: string;
     wbsName: string; 
-    wbsIndex: number; 
-    wbsSourceLabel: string; // PATTO DI FERRO: Identificatore Progetto/Variante
     description: string;
     unit: string;
     unitPrice: number;
@@ -163,20 +159,11 @@ const AccountingView: React.FC<AccountingViewProps> = ({
   const contentRef = useRef<HTMLDivElement>(null);
   const certificateRef = useRef<HTMLDivElement>(null);
 
-  const hasAnyAccounting = useMemo(() => {
-      return documents.some(doc => 
-          doc.workGroups.some(wg => 
-              wg.items.some(item => (item.measurements?.length ?? 0) > 0)
-          )
-      );
-  }, [documents]);
-
+  // PATTO DI FERRO: Calcola il totale della manodopera progettuale ESCLUDENDO i gruppi di sicurezza
   const totalProjectLaborEstimate = useMemo(() => {
-      return documents
-        .filter(doc => !doc.fileName.toUpperCase().startsWith('VAR'))
-        .reduce((acc, doc) => 
+      return documents.reduce((acc, doc) => 
           acc + doc.workGroups
-            .filter(wg => !wg.isSecurityCost) 
+            .filter(wg => !wg.isSecurityCost) // Filtra oneri sicurezza
             .reduce((gAcc, wg) => 
               gAcc + wg.items.reduce((iAcc, item) => 
                   iAcc + (item.quantity * item.unitPrice * ((item.laborRate || 0) / 100))
@@ -211,19 +198,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
 
       documents.forEach(doc => {
           if (doc.isFrozen) return; 
-          
-          // PATTO DI FERRO: Determinazione etichetta documento
-          const isVariant = doc.fileName.toUpperCase().startsWith('VAR');
-          let sourceLabel = "PROGETTO";
-          if (isVariant) {
-              const varNumMatch = doc.fileName.match(/VAR\s*(\d+)/i);
-              sourceLabel = varNumMatch ? `VARIANTE N. ${varNumMatch[1]}` : "VARIANTE";
-          }
-
-          doc.workGroups.forEach((group, groupIndex) => { 
+          doc.workGroups.forEach(group => {
               const isBody = group.accountingType === 'body';
               const isSecurity = group.isSecurityCost || false;
-              const wbsIdx = groupIndex + 1;
 
               if (isBody) {
                   const groupMeasurements = group.items.flatMap(item => (item.measurements || []).map(m => ({
@@ -256,8 +233,6 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                           debit: data.totalValue, 
                           progressive: 0,
                           groupName: group.name,
-                          wbsIndex: wbsIdx,
-                          wbsSourceLabel: sourceLabel,
                           docName: doc.fileName,
                           isSecurityCost: isSecurity,
                           laborAmount: data.totalLabor,
@@ -286,8 +261,6 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                   debit: debit,
                                   progressive: 0, 
                                   groupName: group.name,
-                                  wbsIndex: wbsIdx,
-                                  wbsSourceLabel: sourceLabel,
                                   docName: doc.fileName,
                                   factor: m.factor, length: m.length, width: m.width, height: m.height,
                                   isSecurityCost: isSecurity,
@@ -325,20 +298,25 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           entry.date.localeCompare(targetDate) <= 0
       );
       
+      // Separazione entries per tipologia
       const securityEntries = relevantEntries.filter(e => e.isSecurityCost);
       const measureEntries = relevantEntries.filter(e => e.accountingType === 'measure' && !e.isSecurityCost);
       const bodyEntries = relevantEntries.filter(e => e.accountingType === 'body' && !e.isSecurityCost);
       
+      // Totali Lordi
       const security = round2(securityEntries.reduce((acc, curr) => acc + curr.debit, 0));
       const measureTotal = round2(measureEntries.reduce((acc, curr) => acc + curr.debit, 0));
       const bodyTotal = round2(bodyEntries.reduce((acc, curr) => acc + curr.debit, 0));
       
+      // Analisi Manodopera Progettuale (Analitica)
       const measureLaborProject = round2(measureEntries.reduce((acc, curr) => acc + curr.laborAmount, 0));
       const bodyLaborProject = round2(bodyEntries.reduce((acc, curr) => acc + curr.laborAmount, 0));
       
+      // Analisi Manodopera Impresa (Offerta K) - PATTO DI FERRO
       const measureLaborContractor = round2(measureLaborProject * laborProportionalityFactor);
       const bodyLaborContractor = round2(bodyLaborProject * laborProportionalityFactor);
 
+      // Calcolo Basi Netto da Ribassare - PATTO DI FERRO (Singolarmente per tipologia)
       const measureNetBase = round2(measureTotal - measureLaborContractor);
       const bodyNetBase = round2(bodyTotal - bodyLaborContractor);
       
@@ -346,6 +324,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       const discount = round2(worksBaseTotal * (localConfig.discountPercent / 100));
       const netWorksAfterDiscount = round2(worksBaseTotal - discount);
       
+      // Totale Netto Finale Pagamento
       const totalNet = round2(netWorksAfterDiscount + measureLaborContractor + bodyLaborContractor + security);
 
       const bodyGroupsTotalValue = documents.flatMap(d => d.workGroups)
@@ -430,8 +409,6 @@ const AccountingView: React.FC<AccountingViewProps> = ({
               summaryMap.set(entry.articleCode, { 
                   articleCode: entry.articleCode, 
                   wbsName: entry.groupName, 
-                  wbsIndex: entry.wbsIndex,
-                  wbsSourceLabel: entry.wbsSourceLabel,
                   description: entry.accountingType === 'body' ? entry.groupName : entry.description, 
                   unit: entry.unit, 
                   unitPrice: entry.unitPrice, 
@@ -503,7 +480,45 @@ const AccountingView: React.FC<AccountingViewProps> = ({
   };
 
   const generatePdfWithCover = async (title: string, contentElement: HTMLElement) => {
-      alert("Funzionalità stampa in elaborazione...");
+    setIsGeneratingPdf(true);
+    let originalOverflow = ''; // Declare outside try block
+    try {
+      originalOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'visible';
+
+      const canvas = await html2canvas(contentElement, { scale: 2 });
+      const imgData = canvas.toDataURL('image/png');
+
+      const pdf = new jspdf.jsPDF({ orientation: 'portrait', unit: 'px', format: 'a4' });
+      const imgWidth = pdf.internal.pageSize.getWidth();
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+
+      // Add Cover Page
+      pdf.setFontSize(24);
+      pdf.text(title, pdf.internal.pageSize.getWidth() / 2, pdf.internal.pageSize.getHeight() / 2, { align: 'center' });
+      pdf.addPage();
+
+      let heightLeft = imgHeight;
+      let position = 0;
+
+      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+      heightLeft -= pdf.internal.pageSize.getHeight();
+
+      while (heightLeft >= 0) {
+        position = heightLeft - imgHeight;
+        pdf.addPage();
+        pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+        heightLeft -= pdf.internal.pageSize.getHeight();
+      }
+
+      pdf.save(`${projectName?.replace(/[^a-z0-9]/gi, '_') || 'document'}_${title.replace(/[^a-z0-9]/gi, '_')}.pdf`);
+    } catch (error) {
+      console.error("Errore durante la generazione del PDF:", error);
+      alert("Errore durante la generazione del PDF.");
+    } finally {
+      document.body.style.overflow = originalOverflow;
+      setIsGeneratingPdf(false);
+    }
   };
 
   return (
@@ -587,23 +602,13 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                 <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Ribasso d'Asta (%)</label><input type="number" step="0.01" value={localConfig.discountPercent} onChange={e => setLocalConfig({...localConfig, discountPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right" /></div>
                                 <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Ritenuta Garanzia (%)</label><input type="number" step="0.1" value={localConfig.withholdingTaxPercent} onChange={e => setLocalConfig({...localConfig, withholdingTaxPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right" /></div>
                                 <div className="col-span-2 bg-indigo-100 dark:bg-indigo-900/40 p-4 rounded-xl border-4 border-indigo-600 dark:border-indigo-400 shadow-2xl scale-[1.02] transform transition-transform">
-                                    <label className="block text-md font-black text-indigo-900 dark:text-indigo-100 uppercase tracking-tighter mb-2 flex justify-between items-center">
-                                        <span>Manodopera Offerta Impresa (€)</span>
-                                        {hasAnyAccounting && <span className="text-[10px] bg-red-600 text-white px-2 py-0.5 rounded animate-pulse">🔒 BLOCCATA</span>}
-                                    </label>
-                                    <input 
-                                        type="number" 
-                                        step="0.01" 
-                                        value={localConfig.contractLaborAmount} 
-                                        onChange={e => setLocalConfig({...localConfig, contractLaborAmount: parseFloat(e.target.value) || 0})} 
-                                        disabled={hasAnyAccounting}
-                                        className={`mt-1 w-full p-3 border-4 border-indigo-500 rounded-xl font-black text-right text-3xl transition-all ${hasAnyAccounting ? 'bg-gray-100 dark:bg-gray-700 text-gray-500 cursor-not-allowed border-gray-300 opacity-80' : 'bg-white dark:bg-gray-800 text-indigo-600'}`} 
-                                    />
+                                    <label className="block text-md font-black text-indigo-900 dark:text-indigo-100 uppercase tracking-tighter mb-2">Manodopera Offerta Impresa (€)</label>
+                                    <input type="number" step="0.01" value={localConfig.contractLaborAmount} onChange={e => setLocalConfig({...localConfig, contractLaborAmount: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-3 border-4 border-indigo-500 rounded-xl font-black text-right text-3xl bg-white dark:bg-gray-800 text-indigo-600" />
                                     <div className="mt-5 p-4 bg-indigo-700 text-white rounded-xl shadow-lg border border-indigo-400 flex flex-col items-center">
-                                        <p className="text-xs text-indigo-100 uppercase font-black tracking-widest mb-1">Valore Stima Progetto (Solo Lavori di Gara)</p>
+                                        <p className="text-xs text-indigo-100 uppercase font-black tracking-widest mb-1">Valore Stima Progetto (Solo Lavori)</p>
                                         <p className="text-4xl font-black">{currencyFormatter.format(totalProjectLaborEstimate)}</p>
                                         <div className="mt-3 w-full border-t border-indigo-400 pt-2 flex justify-between items-center px-4">
-                                             <span className="text-[10px] font-bold uppercase text-indigo-100 italic">* Base per calcolo K (Invariabile)</span>
+                                             <span className="text-[10px] font-bold uppercase text-indigo-100 italic">* Base per calcolo K</span>
                                              <span className="text-xl font-black">K = {laborProportionalityFactor.toFixed(4)}</span>
                                         </div>
                                     </div>
@@ -646,7 +651,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                             </tbody>
                         </table>
                         <div className="p-2 border border-dashed border-gray-400 bg-gray-50 text-[9px] italic">
-                            Nota: In conformità al Patto di Ferro, il calcolo del netto da ribassare per ogni categoria (Misura e Corpo) è ottenuto sottraendo la manodopera d'impresa (offerta tramite K={laborProportionalityFactor.toFixed(4)}) dall'importo lordo specifico. La manodopera viene poi riaccreditata integralmente nella colonna dei totali per il pagamento. La manodopera di riferimento per K è determinata dai soli dati di progetto originali e di gara; eventuali varianti successive (documenti VAR) influenzano l'importo lordo ma non il coefficiente K.
+                            Nota: In conformità al Patto di Ferro, il calcolo del netto da ribassare per ogni categoria (Misura e Corpo) è ottenuto sottraendo la manodopera d'impresa (offerta tramite K={laborProportionalityFactor.toFixed(4)}) dall'importo lordo specifico. La manodopera viene poi riaccreditata integralmente nella colonna dei totali per il pagamento. La manodopera di riferimento per K esclude gli oneri della sicurezza.
                         </div>
                     </div>
                 </div>
@@ -657,7 +662,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                     <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-grow overflow-auto">
                          <table className="w-full text-xs text-left border-collapse">
                             <thead className="bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 font-bold border-b dark:border-gray-600 sticky top-0 z-10 shadow-sm">
-                                <tr><th className="p-3 w-16 text-center border-r dark:border-gray-600 align-top">N.</th><th className="p-3 w-24 border-r dark:border-gray-600 align-top">Data</th><th className="p-3 w-16 text-center border-r dark:border-gray-600 align-top text-indigo-600">Num. ord.</th><th className="p-3 w-48 border-r dark:border-gray-600 align-top">WBS / PROVENIENZA</th><th className="p-3 w-32 border-r dark:border-gray-600 align-top">Codice</th><th className="p-3 border-r dark:border-gray-600 align-top">Descrizione & Note</th><th className="p-3 w-12 text-center border-r dark:border-gray-600 bg-gray-50 align-top">U.M.</th><th className="p-3 w-24 text-right bg-indigo-50 align-top">Quantità</th></tr>
+                                <tr><th className="p-3 w-16 text-center border-r dark:border-gray-600 align-top">N.</th><th className="p-3 w-24 border-r dark:border-gray-600 align-top">Data</th><th className="p-3 w-16 text-center border-r dark:border-gray-600 align-top text-indigo-600">Num. ord.</th><th className="p-3 w-32 border-r dark:border-gray-600 align-top">WBS</th><th className="p-3 w-32 border-r dark:border-gray-600 align-top">Codice</th><th className="p-3 border-r dark:border-gray-600 align-top">Descrizione & Note</th><th className="p-3 w-12 text-center border-r dark:border-gray-600 bg-gray-50 align-top">U.M.</th><th className="p-3 w-24 text-right bg-indigo-50 align-top">Quantità</th></tr>
                             </thead>
                             <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
                                 {filteredLibretto.filter(applyFilters).map((entry) => (
@@ -665,10 +670,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                         <td className="p-3 text-center border-r dark:border-gray-600 bg-gray-50/50 align-top">{entry.progressiveIndex}</td>
                                         <td className="p-3 border-r dark:border-gray-600 align-top">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
                                         <td className="p-3 border-r dark:border-gray-600 align-top text-center font-bold text-indigo-700">{entry.originalIndex || '-'}</td>
-                                        <td className="p-3 border-r dark:border-gray-600 align-top text-[10px]">
-                                            <div className={`font-black uppercase tracking-tighter ${entry.wbsSourceLabel.includes('VAR') ? 'text-orange-600' : 'text-indigo-600'}`}>{entry.wbsSourceLabel}</div>
-                                            <div className="font-semibold text-gray-800 dark:text-white uppercase">WBS {entry.wbsIndex} - {entry.groupName}</div>
-                                        </td>
+                                        <td className="p-3 border-r dark:border-gray-600 align-top text-xs uppercase font-semibold">{entry.groupName}</td>
                                         <td className="p-3 border-r dark:border-gray-600 align-top font-mono text-xs">{entry.articleCode}</td>
                                         <td className="p-3 border-r dark:border-gray-600"><div className="text-xs mb-1">{entry.description}</div><div className="italic text-indigo-700">{entry.measurementNote || '-'}</div></td>
                                         <td className="p-3 text-center border-r dark:border-gray-600">{entry.unit}</td>
@@ -685,7 +687,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                 <div ref={contentRef} className="flex-grow overflow-auto p-4 md:p-6">
                     <table className="w-full text-sm text-left text-gray-600 dark:text-gray-300 border-collapse">
                         <thead className="text-xs text-gray-700 uppercase bg-gray-100 sticky top-0 z-10">
-                            <tr><th className="px-4 py-3 w-20 text-center border-r">Rif. M.</th><th className="px-4 py-3 w-24">Data</th><th className="px-4 py-3 w-20 text-center border-r">Num. ord.</th><th className="px-4 py-3 w-48">WBS / PROVENIENZA</th><th className="px-4 py-3">Descrizione</th><th className="px-4 py-3 w-16 text-center">U.M.</th><th className="px-4 py-3 text-right w-24">Q.tà</th><th className="px-4 py-3 text-right w-24">Prezzo</th><th className="px-4 py-3 text-right w-32 font-bold">Importo</th></tr>
+                            <tr><th className="px-4 py-3 w-20 text-center border-r">Rif. M.</th><th className="px-4 py-3 w-24">Data</th><th className="px-4 py-3 w-20 text-center border-r">Num. ord.</th><th className="px-4 py-3 w-32">WBS</th><th className="px-4 py-3">Descrizione</th><th className="px-4 py-3 w-16 text-center">U.M.</th><th className="px-4 py-3 text-right w-24">Q.tà</th><th className="px-4 py-3 text-right w-24">Prezzo</th><th className="px-4 py-3 text-right w-32 font-bold">Importo</th></tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
                             {filteredRegistry.filter(applyFilters).map((entry, idx) => (
@@ -693,10 +695,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                     <td className="px-4 py-2 text-center font-bold border-r">{entry.progressiveIndex}</td>
                                     <td className="px-4 py-2">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
                                     <td className="px-4 py-2 text-center font-bold text-indigo-700 border-r">{entry.originalIndex || '-'}</td>
-                                    <td className="px-4 py-2 text-[10px]">
-                                        <div className={`font-black uppercase tracking-tighter ${entry.wbsSourceLabel.includes('VAR') ? 'text-orange-600' : 'text-indigo-600'}`}>{entry.wbsSourceLabel}</div>
-                                        <div className="font-bold text-gray-900 dark:text-white uppercase">WBS {entry.wbsIndex} - {entry.groupName}</div>
-                                    </td>
+                                    <td className="px-4 py-2 text-xs uppercase font-bold">{entry.groupName}</td>
                                     <td className="px-4 py-2 truncate max-w-md">{entry.description}</td>
                                     <td className="px-4 py-2 text-center">{entry.unit}</td>
                                     <td className="px-4 py-2 text-right">{entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity)}</td>
@@ -715,7 +714,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                         <thead className="text-xs text-gray-700 uppercase bg-gray-100 sticky top-0 z-10 shadow-sm">
                             <tr>
                                 <th className="px-4 py-3 border-r">Codice Articolo</th>
-                                <th className="px-4 py-3 border-r w-48">WBS / PROVENIENZA</th>
+                                <th className="px-4 py-3 border-r">WBS</th>
                                 <th className="px-4 py-3">Descrizione</th>
                                 <th className="px-4 py-3 w-16 text-center">U.M.</th>
                                 <th className="px-4 py-3 text-right w-24">Prezzo</th>
@@ -729,10 +728,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                             {accountingSummary.filter(applyFilters).map((item, idx) => (
                                 <tr key={idx} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
                                     <td className="px-4 py-2 font-mono text-xs border-r dark:border-gray-700">{item.articleCode}</td>
-                                    <td className="px-4 py-2 border-r dark:border-gray-700 text-[10px]">
-                                        <div className={`font-black uppercase tracking-tighter ${item.wbsSourceLabel.includes('VAR') ? 'text-orange-600' : 'text-indigo-600'}`}>{item.wbsSourceLabel}</div>
-                                        <div className="font-bold text-gray-900 dark:text-white uppercase">WBS {item.wbsIndex} - {item.wbsName}</div>
-                                    </td>
+                                    <td className="px-4 py-2 text-xs uppercase font-bold border-r dark:border-gray-700">{item.wbsName}</td>
                                     <td className="px-4 py-2 truncate max-w-xs">{item.description}</td>
                                     <td className="px-4 py-2 text-center">{item.unit}</td>
                                     <td className="px-4 py-2 text-right">{currencyFormatter.format(item.unitPrice)}</td>

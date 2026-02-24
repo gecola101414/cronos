@@ -9,6 +9,9 @@ import Header from './components/Header';
 import ProjectSummary from './components/ProjectSummary';
 import ComputoDetailView from './components/ComputoDetailView';
 import { format, addDays, differenceInDays, parseISO, parse } from 'date-fns';
+
+declare const jspdf: any;
+declare const html2canvas: any;
 import { it } from 'date-fns/locale/it';
 import Login from './components/Registration';
 import ShareModal from './components/ShareModal';
@@ -55,7 +58,6 @@ const sanitizeDocuments = (documents: ProjectDocument[]): ProjectDocument[] => {
     salMarkers: index === 0 ? (doc.salMarkers ?? []) : undefined,
     workGroups: doc.workGroups.map(wg => ({
       ...wg,
-      id: wg.id || crypto.randomUUID(), // PATTO DI FERRO: Garantisce che ogni gruppo abbia un ID per il lookup nel Gantt
       progress: wg.progress ?? 0,
       teamSize: wg.teamSize ?? 2,
       isSecurityCost: wg.isSecurityCost ?? false,
@@ -119,8 +121,8 @@ const App: React.FC = () => {
   const [isCurrentTaskLocked, setIsCurrentTaskLocked] = useState<boolean>(false);
   const [isEconomicViewVisible, setIsEconomicViewVisible] = useState<boolean>(false);
   
-  // PATTO DI FERRO: Gestione numero variante tramite dialogo custom e REF per accesso immediato
-  const pendingVariantNumRef = useRef<string | null>(null);
+  // PATTO DI FERRO: Gestione numero variante tramite dialogo custom
+  const [pendingVariantNum, setPendingVariantNum] = useState<string | null>(null);
   const [isVariantModalOpen, setIsVariantModalOpen] = useState(false);
   const [variantInputVal, setVariantInputVal] = useState('1');
 
@@ -219,8 +221,8 @@ const App: React.FC = () => {
       try {
         const jsonData = JSON.parse(content);
         const baseDocName = file.name.replace('.json', '');
-        const finalDocName = (isVariant && pendingVariantNumRef.current) 
-            ? `VAR ${pendingVariantNumRef.current} - ${baseDocName}` 
+        const finalDocName = (isVariant && pendingVariantNum) 
+            ? `VAR ${pendingVariantNum} - ${baseDocName}` 
             : baseDocName;
 
         if (isNewProjectFile(jsonData)) {
@@ -381,13 +383,13 @@ const App: React.FC = () => {
           alert(`Errore: Il file selezionato non è un JSON valido.`); 
       } finally { 
           setIsLoading(false); 
-          pendingVariantNumRef.current = null;
+          setPendingVariantNum(null);
           if (fileInputRef.current) fileInputRef.current.value = '';
           if (variantInputRef.current) variantInputRef.current.value = '';
       }
     };
     reader.readAsText(file);
-  }, []);
+  }, [pendingVariantNum]);
   
   const handleToggleDocumentVisibility = (fn: string) => setProjectDocuments(prev => prev.map(doc => doc.fileName === fn ? { ...doc, isVisible: !(doc.isVisible ?? true) } : doc));
   const handleToggleDocumentFreeze = (fn: string) => setProjectDocuments(prev => prev.map(doc => doc.fileName === fn ? { ...doc, isFrozen: !(doc.isFrozen ?? false) } : doc));
@@ -433,6 +435,51 @@ const App: React.FC = () => {
 
   const handleOpenShareModal = () => { setShareableLink(`${window.location.origin}${window.location.pathname}?mode=view&data=${btoa(JSON.stringify({ projectDocuments, expenses, projectName, teams, workers, contractConfig, sals }))}`); setIsShareModalOpen(true); };
   
+  const handleExportPdf = async () => {
+    if (!currentProjectId) {
+      alert("Nessun progetto caricato per l'esportazione PDF.");
+      return;
+    }
+
+    setIsLoading(true);
+    const input = document.getElementById('printable-content');
+    if (input) {
+      const originalOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'visible';
+
+      try {
+        const canvas = await html2canvas(input, { scale: 2 });
+        const imgData = canvas.toDataURL('image/png');
+        const pdf = new jspdf.jsPDF({ orientation: 'landscape', unit: 'px', format: 'a4' });
+        const imgWidth = pdf.internal.pageSize.getWidth();
+        const imgHeight = (canvas.height * imgWidth) / canvas.width;
+        let heightLeft = imgHeight;
+        let position = 0;
+
+        pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+        heightLeft -= pdf.internal.pageSize.getHeight();
+
+        while (heightLeft >= 0) {
+          position = heightLeft - imgHeight;
+          pdf.addPage();
+          pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+          heightLeft -= pdf.internal.pageSize.getHeight();
+        }
+
+        pdf.save(`${projectName.replace(/[^a-z0-9]/gi, '_')}.pdf`);
+      } catch (error) {
+        console.error("Errore durante la generazione del PDF:", error);
+        alert("Errore durante la generazione del PDF.");
+      } finally {
+        document.body.style.overflow = originalOverflow;
+        setIsLoading(false);
+      }
+    } else {
+      alert("Contenuto stampabile non trovato.");
+      setIsLoading(false);
+    }
+  };
+
   const handleExport = async () => {
     const projectData = { id: currentProjectId, projectDocuments, expenses, projectName, teams, workers, contractConfig, sals, lastSavedTime: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(projectData, null, 2)], { type: 'application/json' });
@@ -472,8 +519,7 @@ const App: React.FC = () => {
 
   const handleConfirmVariant = () => {
       if (variantInputVal.trim() !== "") {
-          // PATTO DI FERRO: Uso del ref per garantire la persistenza immediata del valore
-          pendingVariantNumRef.current = variantInputVal.trim();
+          setPendingVariantNum(variantInputVal.trim());
           setIsVariantModalOpen(false);
           // PATTO DI FERRO: Apertura immediata del file picker dopo la conferma
           if (variantInputRef.current) {
@@ -527,11 +573,11 @@ const App: React.FC = () => {
             <>
               <Sidebar activeView={activeView} onViewChange={setActiveView} isProjectLoaded={isProjectLoaded} onLogout={handleReset} isViewOnly={effectiveIsViewOnly} onExitProject={handleExitProject} />
               <div className="flex-1 flex flex-col ml-64 min-w-0 h-full overflow-hidden">
-                <Header userEmail={userEmail} remainingDays={remainingDays} serverDate={serverDate} onImport={handleCreateProject} onExport={handleExport} onSaveToDrive={handleSaveToDrive} onShare={handleOpenShareModal} isProjectLoaded={isProjectLoaded} isAdmin={isAdmin} onGenerateLicense={() => setIsGeneratorModalOpen(true)} isViewOnly={effectiveIsViewOnly} isShareMode={isShareMode} isDemoMode={isDemoMode} isSessionExpired={isSessionExpired} sessionSecondsRemaining={sessionSecondsRemaining} projectName={projectName} onUpdateProjectName={setProjectName} lastSavedTime={lastSavedTime} />
+                <Header userEmail={userEmail} remainingDays={remainingDays} serverDate={serverDate} onImport={handleCreateProject} onExport={handleExport} onSaveToDrive={handleSaveToDrive} onShare={handleOpenShareModal} onExportPdf={handleExportPdf} isProjectLoaded={isProjectLoaded} isAdmin={isAdmin} onGenerateLicense={() => setIsGeneratorModalOpen(true)} isViewOnly={effectiveIsViewOnly} isShareMode={isShareMode} isDemoMode={isDemoMode} isSessionExpired={isSessionExpired} sessionSecondsRemaining={sessionSecondsRemaining} projectName={projectName} onUpdateProjectName={setProjectName} lastSavedTime={lastSavedTime} />
                 <main className={`flex-1 min-h-0 flex flex-col p-4 md:p-6 overflow-hidden`}>
                   <div className={`max-w-7xl mx-auto w-full flex-1 flex flex-col min-h-0`}>
                     {(activeView === 'summary') && isProjectLoaded && <ProjectSummary documents={projectDocuments} isViewOnly={effectiveIsViewOnly} salMarkers={projectDocuments[0]?.salMarkers ?? []} onSalMarkersChange={handleSetSalMarkers} onToggleDocumentVisibility={handleToggleDocumentVisibility} onToggleDocumentFreeze={handleToggleDocumentFreeze} onToggleDocumentLock={handleToggleDocumentLock} onRenameDocument={handleRenameDocument} onDeleteDocument={handleDeleteDocument} />}
-                      <div className={`bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden min-h-[400px] flex-1 flex flex-col mt-6`}>{renderContent()}</div>
+                      <div id="printable-content" className={`bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden min-h-[400px] flex-1 flex flex-col mt-6`}>{renderContent()}</div>
                   </div>
                 </main>
               </div>

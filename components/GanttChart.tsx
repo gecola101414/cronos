@@ -112,6 +112,15 @@ const GanttChart: React.FC<GanttChartProps> = ({
   const WBS_TABLE_WIDTH = 340;
   const BOTTOM_SPACER = 500;
 
+  const getGroupVariantInfo = useCallback((groupId: string) => {
+      const doc = documents.find(d => d.workGroups.some(wg => wg.id === groupId));
+      if (!doc) return null;
+      const match = doc.fileName.match(/^VAR\s+(\d+)/i);
+      if (match) return match[1];
+      const docIndex = documents.indexOf(doc);
+      return docIndex > 0 ? docIndex.toString() : null;
+  }, [documents]);
+
   const enrichedWorkGroups = useMemo(() => {
       return workGroups.map(g => {
           const teamSize = g.teamSize || 1;
@@ -147,37 +156,11 @@ const GanttChart: React.FC<GanttChartProps> = ({
       });
   }, [workGroups]);
 
-  // PATTO DI FERRO: Creazione lista gerarchica per intestazioni Progetto/Varianti
-  const displayItems = useMemo(() => {
-    const items: ({ type: 'header', label: string, isVariant: boolean, docId: string } | { type: 'group', group: any, index: number })[] = [];
-    documents.forEach((doc, docIdx) => {
-        const isVariant = doc.fileName.toUpperCase().startsWith('VAR');
-        // Se è il primo documento e non è variante, chiamalo PROGETTO
-        const headerLabel = (docIdx === 0 && !isVariant) ? `PROGETTO: ${doc.fileName}` : doc.fileName;
-        
-        items.push({ 
-            type: 'header', 
-            label: headerLabel, 
-            isVariant, 
-            docId: doc.fileName 
-        });
-        
-        doc.workGroups.forEach((wg, wgIdx) => {
-            // PATTO DI FERRO: Lookup basato su ID per garantire visibilità dopo sanificazione in App.tsx
-            const enriched = enrichedWorkGroups.find(eg => eg.id === wg.id);
-            if (enriched) {
-                items.push({ type: 'group', group: enriched, index: wgIdx + 1 });
-            }
-        });
-    });
-    return items;
-  }, [documents, enrichedWorkGroups]);
-
   const totalContentHeight = useMemo(() => {
-      return (displayItems.length * ROW_HEIGHT) + BOTTOM_SPACER;
-  }, [displayItems.length]);
+      return (enrichedWorkGroups.length * ROW_HEIGHT) + BOTTOM_SPACER;
+  }, [enrichedWorkGroups.length]);
 
-  const { grandTotal, earnedValue } = useMemo(() => {
+  const { grandTotal, earnedValue, overallProgress } = useMemo(() => {
     const total = documents.reduce((acc, doc) => acc + doc.workGroups.reduce((gAcc, group) => {
         const groupTotal = group.items.reduce((iAcc, item) => {
             const varTotal = (item.variations || []).reduce((vAcc, v) => v.type === 'increase' ? vAcc + v.quantity : vAcc - v.quantity, 0);
@@ -189,7 +172,7 @@ const GanttChart: React.FC<GanttChartProps> = ({
     return { grandTotal: total, earnedValue: ev, overallProgress: total > 0 ? (ev / total) * 100 : 0 };
   }, [documents]);
 
-  const { chartStart, headerIntervals, monthHeaderIntervals, totalWidth, dayPixelWidth } = useMemo(() => {
+  const { chartStart, chartEnd, headerIntervals, monthHeaderIntervals, totalWidth, dayPixelWidth } = useMemo(() => {
     let minDate: Date;
     let maxDate: Date;
     
@@ -268,11 +251,11 @@ const GanttChart: React.FC<GanttChartProps> = ({
     const groupStart = parse(group.startDate, 'yyyy-MM-dd', new Date());
     const left = differenceInDays(groupStart, chartStart) * dayPixelWidth;
     const targetX = Math.max(0, left - 150); 
-    const index = displayItems.findIndex(item => item.type === 'group' && item.group.id === group.id);
+    const index = enrichedWorkGroups.findIndex(g => g.id === group.id);
     const targetY = Math.max(0, index * ROW_HEIGHT - 20);
     chartContainerRef.current.scrollTo({ left: targetX, top: targetY, behavior: 'smooth' });
     setSelectedGroupId(group.id);
-  }, [chartStart, dayPixelWidth, displayItems]);
+  }, [chartStart, dayPixelWidth, enrichedWorkGroups]);
 
   const handleStartHoverScroll = (dir: 'left' | 'right') => {
       if (hoverScrollRef.current) return;
@@ -398,17 +381,20 @@ const GanttChart: React.FC<GanttChartProps> = ({
     return (plannedValue / grandTotal) * 100;
   }, [simDate, enrichedWorkGroups, grandTotal]);
 
-  const handleTaskMouseDown = (e: ReactMouseEvent<HTMLDivElement>, id: string, type: 'move' | 'resize-end') => {
+  // FIX: Moved handleTaskMouseDown before return statement to ensure correct scope resolution and avoid hoisting-related issues.
+  function handleTaskMouseDown(e: ReactMouseEvent<HTMLDivElement>, id: string, type: 'move' | 'resize-end') {
     if (isViewOnly || e.button !== 0) return;
     const group = enrichedWorkGroups.find(g => g.id === id);
     if (!group) return;
-    if (type === 'move' && group.officialStartDate) return;
+
+    if (type === 'move' && group.officialStartDate) {
+        return;
+    }
+
     e.preventDefault(); e.stopPropagation();
     setSelectedGroupId(id);
     setDragging({ id, type, initialX: e.clientX, initialStartDate: parse(group.startDate, 'yyyy-MM-dd', new Date()), initialDuration: group.duration });
-  };
-
-  const overallProgress = grandTotal > 0 ? (earnedValue / grandTotal) * 100 : 0;
+  }
 
   return (
     <div className="flex flex-col h-full bg-white dark:bg-gray-800 relative overflow-hidden min-h-0">
@@ -447,12 +433,12 @@ const GanttChart: React.FC<GanttChartProps> = ({
 
             <div className="flex bg-gray-50 dark:bg-gray-900 overflow-hidden">
                 <div className="flex-shrink-0 border-r dark:border-gray-700 p-2 flex flex-col items-center justify-center gap-1" style={{ width: WBS_TABLE_WIDTH }}>
-                    <span className="text-[8px] font-black text-gray-400 uppercase tracking-widest">WBS - GRUPPI</span>
+                    <span className="text-[8px] font-black text-gray-400 uppercase tracking-widest">VARIANTI</span>
                     {!isViewOnly && onAddVariant && (
                         <button 
                             onClick={(e) => { e.stopPropagation(); onAddVariant(); }}
-                            className="group flex items-center justify-center w-6 h-6 bg-orange-600 hover:bg-orange-700 rounded-full shadow-md transition-all active:scale-90"
-                            title="Aggiungi Variante"
+                            className="group flex items-center justify-center w-6 h-6 bg-indigo-600 hover:bg-indigo-700 rounded-full shadow-md transition-all active:scale-90"
+                            title="Carica Computo Esterno / Variante"
                         >
                             <span className="text-white text-lg font-bold leading-none">+</span>
                         </button>
@@ -488,46 +474,47 @@ const GanttChart: React.FC<GanttChartProps> = ({
         </div>
 
         <div className="flex flex-grow overflow-hidden relative group/gantt min-h-0">
-            {/* Sidebar con Intestazioni Gerarchiche */}
+            <button 
+                onMouseEnter={() => handleStartHoverScroll('left')} 
+                onMouseLeave={handleStopHoverScroll}
+                onMouseDown={() => { isMouseDownOnScrollRef.current = true; }}
+                onMouseUp={() => { isMouseDownOnScrollRef.current = false; }}
+                className="absolute left-[340px] top-1/2 -translate-y-1/2 z-[20] p-4 bg-white/40 dark:bg-gray-800/40 backdrop-blur-xl rounded-r-3xl shadow-2xl opacity-0 hover:opacity-100 transition-opacity text-indigo-600 border border-l-0 cursor-pointer active:scale-95"
+            >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={4} d="M15 19l-7-7 7-7" /></svg>
+            </button>
+            <button 
+                onMouseEnter={() => handleStartHoverScroll('right')} 
+                onMouseLeave={handleStopHoverScroll}
+                onMouseDown={() => { isMouseDownOnScrollRef.current = true; }}
+                onMouseUp={() => { isMouseDownOnScrollRef.current = false; }}
+                className="absolute right-0 top-1/2 -translate-y-1/2 z-[20] p-4 bg-white/40 dark:bg-gray-800/40 backdrop-blur-xl rounded-l-3xl shadow-2xl opacity-0 hover:opacity-100 transition-opacity text-indigo-600 border border-r-0 cursor-pointer active:scale-95"
+            >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={4} d="M9 5l7 7-7 7" /></svg>
+            </button>
+
             <div className="flex-shrink-0 flex flex-col border-r dark:border-gray-700 shadow-lg z-10 bg-white dark:bg-gray-800 overflow-hidden h-full" style={{ width: WBS_TABLE_WIDTH }}>
                 <div className="flex-1 overflow-y-auto scrollbar-hide" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }} ref={scrollSyncRef} onScroll={handleSyncScroll}>
                     <div className="flex flex-col" style={{ height: totalContentHeight }}>
-                        {displayItems.map((item, idx) => {
-                            if (item.type === 'header') {
-                                return (
-                                    <div key={`h-${item.label}`} className={`h-[56px] flex-shrink-0 border-b border-gray-200 dark:border-gray-700 flex items-center px-4 bg-gray-100 dark:bg-gray-900/50 sticky left-0 z-20`}>
-                                        <div className={`w-1 h-8 rounded-full mr-3 ${item.isVariant ? 'bg-orange-500' : 'bg-indigo-600'}`} />
-                                        <div className="flex flex-col">
-                                            <span className="text-[10px] font-black text-gray-500 uppercase tracking-tighter leading-none">
-                                                {item.isVariant ? 'VARIANTE' : 'ORIGINALE'}
-                                            </span>
-                                            <span className="text-[11px] font-black text-gray-900 dark:text-white uppercase truncate max-w-[240px]">
-                                                {item.label}
-                                            </span>
-                                        </div>
-                                    </div>
-                                );
-                            }
-
-                            const group = item.group;
-                            const isVariantGroup = documents.find(d => d.workGroups.some(wg => wg.id === group.id))?.fileName.toUpperCase().startsWith('VAR');
-
+                        {enrichedWorkGroups.map((group, idx) => {
+                            const variantNum = getGroupVariantInfo(group.id);
                             return (
                             <div key={group.id} className={`h-[56px] flex-shrink-0 border-b border-gray-50/50 dark:border-gray-700/30 flex flex-col justify-center px-4 cursor-pointer transition-colors relative ${selectedGroupId === group.id ? 'bg-indigo-50 dark:bg-indigo-900/30 ring-inset ring-2 ring-indigo-500' : 'hover:bg-gray-50 dark:hover:bg-gray-700/50'}`} onClick={() => { centerTaskInView(group); }}>
+                                {variantNum && (
+                                    <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-orange-500 shadow-[2px_0_4px_rgba(249,115,22,0.3)]" title={`Variante n. ${variantNum}`} />
+                                )}
                                 <div className="flex justify-between items-center mb-0.5">
-                                    <div className="flex items-center gap-2 overflow-hidden pl-4">
+                                    <div className="flex items-center gap-2 overflow-hidden">
                                         {!isViewOnly && (<button onClick={(e) => { e.stopPropagation(); onBarDoubleClick(group); }} className="p-1 hover:bg-indigo-100 rounded text-gray-400 hover:text-indigo-600 transition-colors"><svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" /></svg></button>)}
-                                        <span className="text-[11px] font-bold text-gray-800 dark:text-white truncate uppercase max-w-[200px]">
-                                            WBS {item.index} - {group.name}
+                                        <span className="text-[11px] font-bold text-gray-800 dark:text-white truncate uppercase max-w-[160px]">
+                                            {variantNum ? `VAR ${variantNum}` : `WBS ${idx + 1}`} - {group.name}
                                         </span>
                                     </div>
                                     <span className="text-[10px] font-black bg-indigo-100 dark:bg-indigo-900 text-indigo-600 dark:text-indigo-300 px-1.5 rounded">{group.duration}gg</span>
                                 </div>
-                                <div className="flex justify-between items-center pl-4">
+                                <div className="flex justify-between items-center">
                                     <span className="text-[10px] font-mono font-bold text-blue-600">{currencyFormatter.format(group.value)}</span>
-                                    <div className="w-12 h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                                        <div className="h-full rounded-full" style={{ width: `${group.progress}%`, backgroundColor: isVariantGroup ? '#F97316' : group.color }}></div>
-                                    </div>
+                                    <div className="w-12 h-1 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden"><div className="h-full rounded-full" style={{ width: `${group.progress}%`, backgroundColor: variantNum ? '#F97316' : group.color }}></div></div>
                                 </div>
                             </div>
                         )})}
@@ -535,7 +522,6 @@ const GanttChart: React.FC<GanttChartProps> = ({
                 </div>
             </div>
 
-            {/* Grafico con Barre allineate alla gerarchia */}
             <div className="flex-1 overflow-auto scrollbar-hide relative h-full min-h-0" style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }} ref={chartContainerRef} onScroll={handleSyncScroll} onMouseMove={handleGanttMouseMove} onMouseDown={handleGanttMouseDown} onMouseLeave={() => { if(longPressTimerRef.current) { clearTimeout(longPressTimerRef.current); longPressTimerRef.current = null; } setSimX(null); }}>
                 <div className="absolute inset-0 pointer-events-none" style={{ width: totalWidth, height: totalContentHeight }}>
                     {headerIntervals.map((_, i) => (
@@ -558,27 +544,22 @@ const GanttChart: React.FC<GanttChartProps> = ({
                 )}
                 
                 <div className="relative" style={{ width: totalWidth, height: totalContentHeight }}>
-                    {displayItems.map((item, index) => {
-                        if (item.type === 'header') {
-                            return (
-                                <div key={`hb-${item.label}`} className="absolute border-b border-gray-200 dark:border-gray-700 bg-gray-100/30 dark:bg-gray-900/10 pointer-events-none" style={{ top: index * ROW_HEIGHT, height: ROW_HEIGHT, left: 0, width: '100%' }} />
-                            );
-                        }
-
-                        const group = item.group;
+                    {enrichedWorkGroups.map((group, index) => {
                         const groupStart = parse(group.startDate, 'yyyy-MM-dd', new Date());
                         const groupEnd = parse(group.endDate, 'yyyy-MM-dd', new Date());
                         const left = differenceInDays(groupStart, chartStart) * dayPixelWidth;
                         const width = (differenceInDays(groupEnd, groupStart) + 1) * dayPixelWidth;
-                        const isVariantGroup = documents.find(d => d.workGroups.some(wg => wg.id === group.id))?.fileName.toUpperCase().startsWith('VAR');
+                        const variantNum = getGroupVariantInfo(group.id);
                         
                         const measurementDates = Array.from(new Set(group.items.flatMap(i => i.measurements || []).map(m => m.date)));
 
                         return (
                             <div key={group.id} className={`absolute border-b border-gray-50/50 dark:border-gray-700/30 transition-colors ${selectedGroupId === group.id ? 'bg-indigo-50/20' : ''}`} style={{top: index * ROW_HEIGHT, height: ROW_HEIGHT, left:0, width:'100%'}}>
+                                {/* FIX: Correctly wrap scale class and z-index in strings within the ternary expression to resolve scope and find name errors */}
                                 <div className={`absolute h-8 flex items-center my-3 group/task transition-all ${selectedGroupId === group.id ? 'scale-[1.02] z-30' : 'z-10'}`} style={{ left, width }} onDoubleClick={(e) => { e.stopPropagation(); onBarDoubleClick(group); }}>
-                                    <div className={`relative flex items-center rounded-lg shadow-sm w-full h-full overflow-hidden ${!isViewOnly && !group.officialStartDate ? 'cursor-pointer' : 'cursor-default'}`} style={{ backgroundColor: isVariantGroup ? '#F97316' : group.color }} onMouseDown={(e) => handleTaskMouseDown(e, group.id, 'move')}>
+                                    <div className={`relative flex items-center rounded-lg shadow-sm w-full h-full overflow-hidden ${!isViewOnly && !group.officialStartDate ? 'cursor-pointer' : 'cursor-default'}`} style={{ backgroundColor: variantNum ? '#F97316' : group.color }} onMouseDown={(e) => handleTaskMouseDown(e, group.id, 'move')}>
                                         <div className="absolute left-0 top-0 h-full bg-black/20" style={{ width: `${group.progress}%` }} />
+                                        
                                         {measurementDates.map(mDate => {
                                             const mPos = differenceInDays(parseISO(mDate), chartStart) * dayPixelWidth;
                                             const relativeLeft = mPos - left;
@@ -587,6 +568,7 @@ const GanttChart: React.FC<GanttChartProps> = ({
                                             }
                                             return null;
                                         })}
+
                                         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                                             <span className="text-[10px] font-black text-white drop-shadow-md">{group.duration}gg</span>
                                         </div>
