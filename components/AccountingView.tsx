@@ -46,7 +46,6 @@ interface AccountingEntry {
     width?: number;
     height?: number;
     isSecurityCost: boolean; 
-    laborAmount: number; 
     accountingType: 'measure' | 'body';
 }
 
@@ -57,6 +56,8 @@ interface SummaryEntry {
     unit: string;
     unitPrice: number;
     estimatedQuantity: number; 
+    previousQuantity: number;
+    currentQuantity: number;
     totalQuantity: number; 
     totalAmount: number;
     progressPercent: number; 
@@ -159,25 +160,22 @@ const AccountingView: React.FC<AccountingViewProps> = ({
   const contentRef = useRef<HTMLDivElement>(null);
   const certificateRef = useRef<HTMLDivElement>(null);
 
-  // PATTO DI FERRO: Calcola il totale della manodopera progettuale ESCLUDENDO i gruppi di sicurezza
-  const totalProjectLaborEstimate = useMemo(() => {
-      return documents.reduce((acc, doc) => 
-          acc + doc.workGroups
-            .filter(wg => !wg.isSecurityCost) // Filtra oneri sicurezza
-            .reduce((gAcc, wg) => 
-              gAcc + wg.items.reduce((iAcc, item) => 
-                  iAcc + (item.quantity * item.unitPrice * ((item.laborRate || 0) / 100))
-              , 0)
-          , 0)
-      , 0);
+  // Quadro economico del progetto (Totale Lavori di Computo vs Oneri Sicurezza)
+  const projectTotals = useMemo(() => {
+      let works = 0;
+      let security = 0;
+      documents.forEach(doc => {
+          doc.workGroups.forEach(wg => {
+              const val = wg.items.reduce((acc, i) => acc + (i.quantity * i.unitPrice), 0);
+              if (wg.isSecurityCost) {
+                  security += val;
+              } else {
+                  works += val;
+              }
+          });
+      });
+      return { works, security, total: works + security };
   }, [documents]);
-
-  const laborProportionalityFactor = useMemo(() => {
-      if (localConfig.contractLaborAmount && localConfig.contractLaborAmount > 0 && totalProjectLaborEstimate > 0) {
-          return localConfig.contractLaborAmount / totalProjectLaborEstimate;
-      }
-      return 1;
-  }, [localConfig.contractLaborAmount, totalProjectLaborEstimate]);
 
   const boqTotals = useMemo(() => {
       const map = new Map<string, number>();
@@ -205,15 +203,13 @@ const AccountingView: React.FC<AccountingViewProps> = ({
               if (isBody) {
                   const groupMeasurements = group.items.flatMap(item => (item.measurements || []).map(m => ({
                       ...m,
-                      monetaryValue: m.quantity * item.unitPrice,
-                      laborValue: (m.quantity * item.unitPrice) * ((item.laborRate || 0) / 100)
+                      monetaryValue: m.quantity * item.unitPrice
                   })));
 
-                  const byDate: Record<string, { totalValue: number, totalLabor: number, ids: string[] }> = {};
+                  const byDate: Record<string, { totalValue: number, ids: string[] }> = {};
                   groupMeasurements.forEach(m => {
-                      if (!byDate[m.date]) byDate[m.date] = { totalValue: 0, totalLabor: 0, ids: [] };
+                      if (!byDate[m.date]) byDate[m.date] = { totalValue: 0, ids: [] };
                       byDate[m.date].totalValue += m.monetaryValue;
-                      byDate[m.date].totalLabor += m.laborValue;
                       byDate[m.date].ids.push(m.id);
                   });
 
@@ -235,7 +231,6 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                           groupName: group.name,
                           docName: doc.fileName,
                           isSecurityCost: isSecurity,
-                          laborAmount: data.totalLabor,
                           accountingType: 'body'
                       });
                   });
@@ -245,7 +240,6 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                       if (item.measurements) {
                           item.measurements.forEach(m => {
                               const debit = m.quantity * item.unitPrice;
-                              const laborAmt = debit * ((item.laborRate || 0) / 100);
 
                               entries.push({
                                   id: m.id,
@@ -264,7 +258,6 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                   docName: doc.fileName,
                                   factor: m.factor, length: m.length, width: m.width, height: m.height,
                                   isSecurityCost: isSecurity,
-                                  laborAmount: laborAmt,
                                   accountingType: 'measure'
                               });
                           });
@@ -303,29 +296,19 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       const measureEntries = relevantEntries.filter(e => e.accountingType === 'measure' && !e.isSecurityCost);
       const bodyEntries = relevantEntries.filter(e => e.accountingType === 'body' && !e.isSecurityCost);
       
-      // Totali Lordi
+      // Totali per contabilità
       const security = round2(securityEntries.reduce((acc, curr) => acc + curr.debit, 0));
       const measureTotal = round2(measureEntries.reduce((acc, curr) => acc + curr.debit, 0));
       const bodyTotal = round2(bodyEntries.reduce((acc, curr) => acc + curr.debit, 0));
       
-      // Analisi Manodopera Progettuale (Analitica)
-      const measureLaborProject = round2(measureEntries.reduce((acc, curr) => acc + curr.laborAmount, 0));
-      const bodyLaborProject = round2(bodyEntries.reduce((acc, curr) => acc + curr.laborAmount, 0));
-      
-      // Analisi Manodopera Impresa (Offerta K) - PATTO DI FERRO
-      const measureLaborContractor = round2(measureLaborProject * laborProportionalityFactor);
-      const bodyLaborContractor = round2(bodyLaborProject * laborProportionalityFactor);
-
-      // Calcolo Basi Netto da Ribassare - PATTO DI FERRO (Singolarmente per tipologia)
-      const measureNetBase = round2(measureTotal - measureLaborContractor);
-      const bodyNetBase = round2(bodyTotal - bodyLaborContractor);
-      
-      const worksBaseTotal = round2(measureNetBase + bodyNetBase);
+      // In contabilità la manodopera è trattata ordinariamente nei lavori
+      // I lavori soggetti a ribasso sono la somma di Lavori a Misura e Lavori a Corpo
+      const worksBaseTotal = round2(measureTotal + bodyTotal);
       const discount = round2(worksBaseTotal * (localConfig.discountPercent / 100));
       const netWorksAfterDiscount = round2(worksBaseTotal - discount);
       
-      // Totale Netto Finale Pagamento
-      const totalNet = round2(netWorksAfterDiscount + measureLaborContractor + bodyLaborContractor + security);
+      // Totale Netto Finale Pagamento SAL (Lavori al netto del ribasso + Oneri Sicurezza non soggetti a ribasso)
+      const totalNet = round2(netWorksAfterDiscount + security);
 
       const bodyGroupsTotalValue = documents.flatMap(d => d.workGroups)
           .filter(g => g.accountingType === 'body' && !g.isSecurityCost)
@@ -333,16 +316,11 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       const bodyPercentage = bodyGroupsTotalValue > 0 ? (bodyTotal / bodyGroupsTotalValue) * 100 : 0;
 
       return { 
-          totalGross: round2(measureTotal + bodyTotal + security), 
+          totalGross: round2(worksBaseTotal + security), 
           measureTotal, 
-          bodyTotal, bodyPercentage,
+          bodyTotal, 
+          bodyPercentage,
           security, 
-          measureLaborProject,
-          bodyLaborProject,
-          measureLaborContractor,
-          bodyLaborContractor,
-          measureNetBase,
-          bodyNetBase,
           worksBase: worksBaseTotal, 
           discount, 
           netWorksAfterDiscount,
@@ -351,7 +329,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       };
   };
 
-  const currentSalData = useMemo(() => calculateTotalsAtDate(salReferenceDate), [salReferenceDate, accountingRegistry, localConfig, documents, laborProportionalityFactor]);
+  const currentSalData = useMemo(() => calculateTotalsAtDate(salReferenceDate), [salReferenceDate, accountingRegistry, localConfig, documents]);
   const filteredRegistry = currentSalData.entries;
 
   const salCumulativeValuesMap = useMemo(() => {
@@ -361,7 +339,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           map.set(sal.id, totals.totalNet); 
       });
       return map;
-  }, [sals, accountingRegistry, localConfig, documents, laborProportionalityFactor]);
+  }, [sals, accountingRegistry, localConfig, documents]);
 
   const previousSalObject = useMemo(() => {
       if (!activeSalId || sals.length === 0) return null;
@@ -370,6 +348,11 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       if (activeIndex > 0) return sortedSals[activeIndex - 1];
       return null;
   }, [activeSalId, sals]);
+
+  const previousSalDate = useMemo(() => {
+      if (!previousSalObject) return '0000-01-01';
+      return previousSalObject.date;
+  }, [previousSalObject]);
 
   const paymentCertData = useMemo(() => {
       const currentNet = currentSalData.totalNet;
@@ -387,7 +370,10 @@ const AccountingView: React.FC<AccountingViewProps> = ({
 
   const filteredLibretto = useMemo(() => {
       const runningQuantities = new Map<string, number>();
-      return filteredRegistry.map(entry => {
+      // D.Lgs 36/2023: Il libretto deve mostrare le misure del periodo corrente del SAL
+      return accountingRegistry
+        .filter(e => e.date.localeCompare(salReferenceDate) <= 0)
+        .map(entry => {
           let currentTotal = 0;
           let estimatedTotal = 0;
           if (entry.accountingType === 'body') {
@@ -399,12 +385,17 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           }
           runningQuantities.set(entry.articleCode, currentTotal);
           return { ...entry, cumulativePercentage: estimatedTotal > 0 ? (currentTotal / estimatedTotal) * 100 : 0 };
-      });
-  }, [filteredRegistry, boqTotals]);
+        })
+        .filter(entry => entry.date.localeCompare(previousSalDate) > 0);
+  }, [accountingRegistry, salReferenceDate, previousSalDate, boqTotals]);
 
   const accountingSummary = useMemo(() => {
       const summaryMap = new Map<string, SummaryEntry>();
-      filteredRegistry.forEach(entry => {
+      
+      // Calcoliamo su tutto lo storico fino al SAL corrente
+      accountingRegistry
+        .filter(e => e.date.localeCompare(salReferenceDate) <= 0)
+        .forEach(entry => {
           if (!summaryMap.has(entry.articleCode)) {
               summaryMap.set(entry.articleCode, { 
                   articleCode: entry.articleCode, 
@@ -413,6 +404,8 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                   unit: entry.unit, 
                   unitPrice: entry.unitPrice, 
                   estimatedQuantity: 0, 
+                  previousQuantity: 0,
+                  currentQuantity: 0,
                   totalQuantity: 0, 
                   totalAmount: 0, 
                   progressPercent: 0, 
@@ -420,9 +413,18 @@ const AccountingView: React.FC<AccountingViewProps> = ({
               });
           }
           const current = summaryMap.get(entry.articleCode)!;
+          const isCurrentPeriod = entry.date.localeCompare(previousSalDate) > 0;
+          
+          if (isCurrentPeriod) {
+              current.currentQuantity += entry.quantity;
+          } else {
+              current.previousQuantity += entry.quantity;
+          }
+          
           current.totalQuantity += entry.quantity;
           current.totalAmount += entry.debit;
       });
+
       return Array.from(summaryMap.values()).map(item => {
           if (item.accountingType === 'body') {
               return { ...item, estimatedQuantity: 1, progressPercent: item.totalQuantity * 100 };
@@ -431,7 +433,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
               return { ...item, estimatedQuantity: estimated, progressPercent: estimated > 0 ? (item.totalQuantity / estimated) * 100 : 0 };
           }
       }).sort((a, b) => a.articleCode.localeCompare(b.articleCode));
-  }, [filteredRegistry, boqTotals]);
+  }, [accountingRegistry, salReferenceDate, previousSalDate, boqTotals]);
 
   const applyFilters = (entry: any) => {
       const codeMatch = entry.articleCode.toLowerCase().includes(filters.code.toLowerCase());
@@ -477,6 +479,163 @@ const AccountingView: React.FC<AccountingViewProps> = ({
 
   const handleToggleSalLock = (id: string) => {
       onUpdateSals(sals.map(s => s.id === id ? { ...s, isLocked: !s.isLocked } : s));
+  };
+
+  const generateAccountingPdf = (type: 'libretto' | 'register' | 'summary') => {
+    setIsGeneratingPdf(true);
+    try {
+      const doc = new jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+
+      // Cover Page
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(24);
+      doc.text(projectName || 'Progetto', pageWidth / 2, 60, { align: 'center' });
+      
+      doc.setFontSize(18);
+      const titles = {
+        libretto: 'Libretto delle Misure',
+        register: 'Registro di Contabilità',
+        summary: 'Sommario del Registro'
+      };
+      doc.text(titles[type], pageWidth / 2, 80, { align: 'center' });
+      
+      const sal = sals.find(s => s.id === activeSalId);
+      if (sal) {
+        doc.setFontSize(14);
+        doc.setFont('helvetica', 'normal');
+        doc.text(`Stato Avanzamento Lavori N. ${sal.number}`, pageWidth / 2, 100, { align: 'center' });
+        doc.text(`Situazione contabile a tutto il ${format(parseISO(sal.date), 'dd/MM/yyyy')}`, pageWidth / 2, 110, { align: 'center' });
+      }
+
+      if (localConfig.contractorName) {
+        doc.setFontSize(12);
+        doc.text(`Impresa Appaltatrice: ${localConfig.contractorName}`, pageWidth / 2, 130, { align: 'center' });
+      }
+      
+      if (localConfig.contractCode) {
+        doc.text(`CIG/CUP: ${localConfig.contractCode}`, pageWidth / 2, 140, { align: 'center' });
+      }
+
+      // Footer cover
+      doc.setFontSize(10);
+      doc.text("Generato con Chronos AI", pageWidth / 2, pageHeight - 20, { align: 'center' });
+
+      doc.addPage();
+
+      // Table generation
+      let columns: any[] = [];
+      let rows: any[] = [];
+
+      if (type === 'libretto') {
+        columns = [
+          { header: 'N.', dataKey: 'idx' },
+          { header: 'Data', dataKey: 'date' },
+          { header: 'Codice', dataKey: 'code' },
+          { header: 'Descrizione e Note', dataKey: 'desc' },
+          { header: 'U.M.', dataKey: 'um' },
+          { header: 'Quantità', dataKey: 'qty' }
+        ];
+        rows = filteredLibretto.filter(applyFilters).map(e => ({
+          idx: e.progressiveIndex,
+          date: format(parseISO(e.date), 'dd/MM/yy'),
+          code: e.articleCode,
+          desc: `${e.description}${e.measurementNote ? '\nNote: ' + e.measurementNote : ''}`,
+          um: e.unit,
+          qty: e.accountingType === 'body' ? percentFormatter.format(e.quantity) : numberFormatter.format(e.quantity)
+        }));
+      } else if (type === 'register') {
+        columns = [
+          { header: 'N.', dataKey: 'idx' },
+          { header: 'Data', dataKey: 'date' },
+          { header: 'Descrizione', dataKey: 'desc' },
+          { header: 'U.M.', dataKey: 'um' },
+          { header: 'Q.tà', dataKey: 'qty' },
+          { header: 'Prezzo', dataKey: 'price' },
+          { header: 'Importo', dataKey: 'total' }
+        ];
+        rows = filteredRegistry.filter(applyFilters).map(e => ({
+          idx: e.progressiveIndex,
+          date: format(parseISO(e.date), 'dd/MM/yy'),
+          desc: e.description,
+          um: e.unit,
+          qty: e.accountingType === 'body' ? percentFormatter.format(e.quantity) : numberFormatter.format(e.quantity),
+          price: currencyFormatter.format(e.unitPrice),
+          total: currencyFormatter.format(e.debit)
+        }));
+      } else if (type === 'summary') {
+        columns = [
+          { header: 'Codice', dataKey: 'code' },
+          { header: 'Descrizione', dataKey: 'desc' },
+          { header: 'U.M.', dataKey: 'um' },
+          { header: 'Prezzo', dataKey: 'price' },
+          { header: 'Q.tà Prec.', dataKey: 'qPrev' },
+          { header: 'Q.tà Att.', dataKey: 'qCurr' },
+          { header: 'Q.tà Tot.', dataKey: 'qTotal' },
+          { header: 'Importo', dataKey: 'total' }
+        ];
+        rows = accountingSummary.filter(applyFilters).map(e => ({
+          code: e.articleCode,
+          desc: e.description,
+          um: e.unit,
+          price: currencyFormatter.format(e.unitPrice),
+          qPrev: e.accountingType === 'body' ? percentFormatter.format(e.previousQuantity) : numberFormatter.format(e.previousQuantity),
+          qCurr: e.accountingType === 'body' ? percentFormatter.format(e.currentQuantity) : numberFormatter.format(e.currentQuantity),
+          qTotal: e.accountingType === 'body' ? percentFormatter.format(e.totalQuantity) : numberFormatter.format(e.totalQuantity),
+          total: currencyFormatter.format(e.totalAmount)
+        }));
+      }
+
+      (doc as any).autoTable({
+        columns: columns,
+        body: rows,
+        startY: 25,
+        margin: { top: 30, bottom: 20, left: 15, right: 15 },
+        styles: { fontSize: 8, cellPadding: 2, overflow: 'linebreak', font: 'helvetica' },
+        headStyles: { fillColor: [40, 40, 40], textColor: 255, fontStyle: 'bold', halign: 'center' },
+        columnStyles: {
+          idx: { halign: 'center', cellWidth: 10 },
+          date: { halign: 'center', cellWidth: 20 },
+          code: { fontStyle: 'bold', cellWidth: 25 },
+          um: { halign: 'center', cellWidth: 12 },
+          qty: { halign: 'right', cellWidth: 20 },
+          price: { halign: 'right', cellWidth: 25 },
+          total: { halign: 'right', cellWidth: 30, fontStyle: 'bold' },
+          qPrev: { halign: 'right', cellWidth: 18 },
+          qCurr: { halign: 'right', cellWidth: 18 },
+          qTotal: { halign: 'right', cellWidth: 18, fontStyle: 'bold' }
+        },
+        alternateRowStyles: { fillColor: [245, 245, 245] },
+        didDrawPage: (data: any) => {
+          // Header on every page
+          doc.setFontSize(9);
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(40);
+          doc.text(`${projectName}`, 15, 15);
+          doc.setFont('helvetica', 'normal');
+          doc.text(`${titles[type]} - SAL N. ${sal?.number || ''}`, 15, 20);
+          
+          doc.setDrawColor(0);
+          doc.setLineWidth(0.5);
+          doc.line(15, 22, pageWidth - 15, 22);
+
+          // Footer
+          const str = "Pagina " + doc.internal.getNumberOfPages();
+          doc.setFontSize(8);
+          doc.setTextColor(100);
+          doc.text(str, pageWidth - 25, pageHeight - 10);
+          doc.text(`Data stampa: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 15, pageHeight - 10);
+        }
+      });
+
+      doc.save(`${projectName?.replace(/[^a-z0-9]/gi, '_') || 'document'}_${titles[type].replace(/[^a-z0-9]/gi, '_')}.pdf`);
+    } catch (err) {
+      console.error(err);
+      alert("Errore durante la generazione del PDF professionale.");
+    } finally {
+      setIsGeneratingPdf(false);
+    }
   };
 
   const generatePdfWithCover = async (title: string, contentElement: HTMLElement) => {
@@ -572,7 +731,18 @@ const AccountingView: React.FC<AccountingViewProps> = ({
         <div className="flex-grow bg-white dark:bg-gray-800 rounded-xl shadow-lg overflow-hidden flex flex-col relative">
             {['libretto', 'register', 'summary', 'sal_technical', 'payment_cert'].includes(activeTab) && (
                 <div className="absolute top-4 right-4 z-20">
-                    <button onClick={() => { if (activeTab === 'sal_technical' && certificateRef.current) generatePdfWithCover('Stato Avanzamento Lavori', certificateRef.current); else if (activeTab === 'payment_cert' && certificateRef.current) generatePdfWithCover('Certificato di Pagamento', certificateRef.current); else if (contentRef.current) generatePdfWithCover(activeTab === 'libretto' ? 'Libretto delle Misure' : activeTab === 'register' ? 'Registro di Contabilità' : 'Sommario del Registro', contentRef.current); }} disabled={isGeneratingPdf} className="bg-indigo-600 text-white px-3 py-1.5 rounded-md text-xs font-bold shadow hover:bg-indigo-700 disabled:bg-gray-400 flex items-center gap-2">{isGeneratingPdf ? 'Generazione...' : 'Scarica PDF'} <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg></button>
+                    <button 
+                        onClick={() => { 
+                            if (activeTab === 'sal_technical' && certificateRef.current) generatePdfWithCover('Stato Avanzamento Lavori', certificateRef.current); 
+                            else if (activeTab === 'payment_cert' && certificateRef.current) generatePdfWithCover('Certificato di Pagamento', certificateRef.current); 
+                            else if (['libretto', 'register', 'summary'].includes(activeTab)) generateAccountingPdf(activeTab as any);
+                        }} 
+                        disabled={isGeneratingPdf} 
+                        className="bg-indigo-600 text-white px-3 py-1.5 rounded-md text-xs font-bold shadow hover:bg-indigo-700 disabled:bg-gray-400 flex items-center gap-2"
+                    >
+                        {isGeneratingPdf ? 'Generazione...' : 'Scarica PDF'} 
+                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                    </button>
                 </div>
             )}
 
@@ -596,21 +766,29 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                         <div className="bg-gray-50 dark:bg-gray-700/30 p-6 rounded-xl border border-gray-200 dark:border-gray-600">
                             <h3 className="text-lg font-bold text-gray-800 dark:text-gray-200 mb-4 border-b pb-2 dark:border-gray-600 flex items-center">
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v.01" /></svg>
-                                Parametri Economici & Manodopera
+                                Parametri Economici Contratto
                             </h3>
                             <div className="grid grid-cols-2 gap-4 mb-4">
-                                <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Ribasso d'Asta (%)</label><input type="number" step="0.01" value={localConfig.discountPercent} onChange={e => setLocalConfig({...localConfig, discountPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right" /></div>
-                                <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Ritenuta Garanzia (%)</label><input type="number" step="0.1" value={localConfig.withholdingTaxPercent} onChange={e => setLocalConfig({...localConfig, withholdingTaxPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right" /></div>
-                                <div className="col-span-2 bg-indigo-100 dark:bg-indigo-900/40 p-4 rounded-xl border-4 border-indigo-600 dark:border-indigo-400 shadow-2xl scale-[1.02] transform transition-transform">
-                                    <label className="block text-md font-black text-indigo-900 dark:text-indigo-100 uppercase tracking-tighter mb-2">Manodopera Offerta Impresa (€)</label>
-                                    <input type="number" step="0.01" value={localConfig.contractLaborAmount} onChange={e => setLocalConfig({...localConfig, contractLaborAmount: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-3 border-4 border-indigo-500 rounded-xl font-black text-right text-3xl bg-white dark:bg-gray-800 text-indigo-600" />
-                                    <div className="mt-5 p-4 bg-indigo-700 text-white rounded-xl shadow-lg border border-indigo-400 flex flex-col items-center">
-                                        <p className="text-xs text-indigo-100 uppercase font-black tracking-widest mb-1">Valore Stima Progetto (Solo Lavori)</p>
-                                        <p className="text-4xl font-black">{currencyFormatter.format(totalProjectLaborEstimate)}</p>
-                                        <div className="mt-3 w-full border-t border-indigo-400 pt-2 flex justify-between items-center px-4">
-                                             <span className="text-[10px] font-bold uppercase text-indigo-100 italic">* Base per calcolo K</span>
-                                             <span className="text-xl font-black">K = {laborProportionalityFactor.toFixed(4)}</span>
-                                        </div>
+                                <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Ribasso d'Asta (%)</label><input type="number" step="0.01" value={localConfig.discountPercent} onChange={e => setLocalConfig({...localConfig, discountPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" /></div>
+                                <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Ritenuta Garanzia (%)</label><input type="number" step="0.1" value={localConfig.withholdingTaxPercent} onChange={e => setLocalConfig({...localConfig, withholdingTaxPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" /></div>
+                                <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Recupero Anticipazione (%)</label><input type="number" step="0.1" value={localConfig.advancePaymentPercent ?? 20} onChange={e => setLocalConfig({...localConfig, advancePaymentPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" /></div>
+                                <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Aliquota I.V.A. (%)</label><input type="number" step="1" value={localConfig.vatPercent} onChange={e => setLocalConfig({...localConfig, vatPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" /></div>
+                            </div>
+
+                            <div className="mt-4 p-4 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600">
+                                <p className="text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">Quadro Economico di Progetto</p>
+                                <div className="space-y-1.5 text-xs">
+                                    <div className="flex justify-between">
+                                        <span className="text-gray-600 dark:text-gray-300">Totale Lavori di Computo:</span>
+                                        <span className="font-bold text-gray-900 dark:text-white">{currencyFormatter.format(projectTotals.works)}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span className="text-gray-600 dark:text-gray-300">Oneri Sicurezza (non soggetti a ribasso):</span>
+                                        <span className="font-bold text-orange-600">{currencyFormatter.format(projectTotals.security)}</span>
+                                    </div>
+                                    <div className="flex justify-between pt-1 border-t border-gray-200 dark:border-gray-700 font-bold">
+                                        <span className="text-gray-800 dark:text-gray-200">Importo Complessivo Appalto:</span>
+                                        <span className="text-indigo-600 dark:text-indigo-400">{currencyFormatter.format(projectTotals.total)}</span>
                                     </div>
                                 </div>
                             </div>
@@ -629,29 +807,26 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                             <thead><tr className="bg-gray-200 uppercase"><th className="border border-black p-1.5 text-left font-bold">Descrizione</th><th className="border border-black p-1.5 text-right w-28 font-bold">Parziali/Calcoli</th><th className="border border-black p-1.5 text-right w-28 font-bold">Totali/Netti</th></tr></thead>
                             <tbody>
                                 <tr><td className="border border-black p-1.5 font-bold bg-gray-100" colSpan={3}>A) LAVORI A MISURA</td></tr>
-                                <tr><td className="border border-black p-1.5 pl-4">Totale Lavori a Misura (Lordo)</td><td className="border border-black p-1.5 text-right font-medium">{currencyFormatter.format(currentSalData.measureTotal)}</td><td className="border border-black p-1.5 bg-gray-50"></td></tr>
-                                <tr><td className="border border-black p-1.5 pl-8 italic">Mano d'opera Impresa A (Progetto {currencyFormatter.format(currentSalData.measureLaborProject)} * K={laborProportionalityFactor.toFixed(4)})</td><td className="border border-black p-1.5 text-right font-bold text-indigo-700">{currencyFormatter.format(currentSalData.measureLaborContractor)}</td><td className="border border-black p-1.5 text-right font-bold bg-indigo-50">{currencyFormatter.format(currentSalData.measureLaborContractor)}</td></tr>
-                                <tr className="bg-blue-50/30"><td className="border border-black p-1.5 pl-4 font-semibold">= Importo Lavori a Misura (Netto da ribassare)</td><td className="border border-black p-1.5 text-right font-bold">{currencyFormatter.format(currentSalData.measureNetBase)}</td><td className="border border-black p-1.5 bg-gray-50"></td></tr>
+                                <tr><td className="border border-black p-1.5 pl-4">Totale Lavori a Misura eseguiti (a tariffa contrattuale)</td><td className="border border-black p-1.5 text-right font-medium">{currencyFormatter.format(currentSalData.measureTotal)}</td><td className="border border-black p-1.5 text-right font-bold bg-gray-50">{currencyFormatter.format(currentSalData.measureTotal)}</td></tr>
                                 
                                 <tr><td className="border border-black p-1.5 font-bold bg-gray-100" colSpan={3}>B) LAVORI A CORPO</td></tr>
-                                <tr><td className="border border-black p-1.5 pl-4">Totale Lavori a Corpo (Lordo)</td><td className="border border-black p-1.5 text-right font-medium">{currencyFormatter.format(currentSalData.bodyTotal)}</td><td className="border border-black p-1.5 bg-gray-50"></td></tr>
-                                <tr><td className="border border-black p-1.5 pl-8 italic">Mano d'opera Impresa B (Progetto {currencyFormatter.format(currentSalData.bodyLaborProject)} * K={laborProportionalityFactor.toFixed(4)})</td><td className="border border-black p-1.5 text-right font-bold text-indigo-700">{currencyFormatter.format(currentSalData.bodyLaborContractor)}</td><td className="border border-black p-1.5 text-right font-bold bg-indigo-50">{currencyFormatter.format(currentSalData.bodyLaborContractor)}</td></tr>
-                                <tr className="bg-blue-50/30"><td className="border border-black p-1.5 pl-4 font-semibold">= Importo Lavori a Corpo (Netto da ribassare)</td><td className="border border-black p-1.5 text-right font-bold">{currencyFormatter.format(currentSalData.bodyNetBase)}</td><td className="border border-black p-1.5 bg-gray-50"></td></tr>
+                                <tr><td className="border border-black p-1.5 pl-4">Totale Lavori a Corpo maturati ({numberFormatter.format(currentSalData.bodyPercentage)}% su WBS a corpo)</td><td className="border border-black p-1.5 text-right font-medium">{currencyFormatter.format(currentSalData.bodyTotal)}</td><td className="border border-black p-1.5 text-right font-bold bg-gray-50">{currencyFormatter.format(currentSalData.bodyTotal)}</td></tr>
 
-                                <tr><td className="border border-black p-1.5 font-bold bg-gray-100" colSpan={3}>C) ONERI SICUREZZA</td></tr>
-                                <tr><td className="border border-black p-1.5 pl-4">Totale Oneri Sicurezza (non soggetti a ribasso)</td><td className="border border-black p-1.5 bg-gray-50"></td><td className="border border-black p-1.5 text-right font-bold">{currencyFormatter.format(currentSalData.security)}</td></tr>
+                                <tr><td className="border border-black p-1.5 font-bold bg-gray-100" colSpan={3}>C) ONERI DELLA SICUREZZA</td></tr>
+                                <tr><td className="border border-black p-1.5 pl-4">Totale Oneri Sicurezza maturati (non soggetti a ribasso d'asta)</td><td className="border border-black p-1.5 bg-gray-50"></td><td className="border border-black p-1.5 text-right font-bold text-orange-700 bg-orange-50">{currencyFormatter.format(currentSalData.security)}</td></tr>
                                 
-                                <tr><td className="border border-black p-1.5 font-bold bg-gray-100" colSpan={3}>D) RIEPILOGO GENERALE RIBASSO</td></tr>
-                                <tr><td className="border border-black p-1.5 pl-4">Sommano Lavori soggetti a ribasso (A + B netti)</td><td className="border border-black p-1.5 text-right font-bold">{currencyFormatter.format(currentSalData.worksBase)}</td><td className="border border-black p-1.5 bg-gray-50"></td></tr>
-                                <tr><td className="border border-black p-1.5 pl-4 italic">- Ribasso d'Asta del {localConfig.discountPercent}%</td><td className="border border-black p-1.5 text-right text-red-600">- {currencyFormatter.format(currentSalData.discount)}</td><td className="border border-black p-1.5 bg-gray-50"></td></tr>
-                                <tr className="font-bold bg-indigo-50"><td className="border border-black p-1.5 pl-4 uppercase">= Totale Lavori Netto (Ribassato)</td><td className="border border-black p-1.5 text-right">{currencyFormatter.format(currentSalData.netWorksAfterDiscount)}</td><td className="border border-black p-1.5 text-right">{currencyFormatter.format(currentSalData.netWorksAfterDiscount)}</td></tr>
-                                
+                                <tr><td className="border border-black p-1.5 font-bold bg-gray-100" colSpan={3}>D) RIEPILOGO GENERALE E APPLICAZIONE DEL RIBASSO</td></tr>
+                                <tr><td className="border border-black p-1.5 pl-4 font-semibold">Sommano Lavori soggetti a ribasso d'asta (A + B)</td><td className="border border-black p-1.5 text-right font-bold">{currencyFormatter.format(currentSalData.worksBase)}</td><td className="border border-black p-1.5 bg-gray-50"></td></tr>
+                                <tr><td className="border border-black p-1.5 pl-6 italic">- Ribasso d'Asta contrattuale del {localConfig.discountPercent}%</td><td className="border border-black p-1.5 text-right text-red-600 font-medium">- {currencyFormatter.format(currentSalData.discount)}</td><td className="border border-black p-1.5 bg-gray-50"></td></tr>
+                                <tr className="font-bold bg-blue-50/50"><td className="border border-black p-1.5 pl-4 uppercase">= Importo Netto Lavori (A + B al netto del ribasso)</td><td className="border border-black p-1.5 text-right font-bold text-blue-800">{currencyFormatter.format(currentSalData.netWorksAfterDiscount)}</td><td className="border border-black p-1.5 text-right font-bold text-blue-900 bg-blue-50">{currencyFormatter.format(currentSalData.netWorksAfterDiscount)}</td></tr>
+                                <tr><td className="border border-black p-1.5 pl-4">+ Oneri di Sicurezza (C, non soggetti a ribasso)</td><td className="border border-black p-1.5 text-right">{currencyFormatter.format(currentSalData.security)}</td><td className="border border-black p-1.5 text-right font-bold text-orange-700 bg-orange-50">{currencyFormatter.format(currentSalData.security)}</td></tr>
+
                                 <tr><td className="border border-black p-1.5 font-bold bg-gray-100" colSpan={3}>E) TOTALE GENERALE NETTO</td></tr>
-                                <tr className="font-bold text-sm"><td className="border border-black p-2 uppercase">TOTALE NETTO SAL CUMULATIVO (Somma colonna Totali)</td><td className="border border-black p-2 bg-gray-50"></td><td className="border border-black p-2 text-right bg-green-100 border-green-500 border-2">{currencyFormatter.format(currentSalData.totalNet)}</td></tr>
+                                <tr className="font-bold text-sm"><td className="border border-black p-2 uppercase">TOTALE NETTO SAL CUMULATIVO (Lavori netti + Oneri Sicurezza)</td><td className="border border-black p-2 bg-gray-50"></td><td className="border border-black p-2 text-right bg-green-100 border-green-600 border-2 text-green-900 text-sm font-black">{currencyFormatter.format(currentSalData.totalNet)}</td></tr>
                             </tbody>
                         </table>
-                        <div className="p-2 border border-dashed border-gray-400 bg-gray-50 text-[9px] italic">
-                            Nota: In conformità al Patto di Ferro, il calcolo del netto da ribassare per ogni categoria (Misura e Corpo) è ottenuto sottraendo la manodopera d'impresa (offerta tramite K={laborProportionalityFactor.toFixed(4)}) dall'importo lordo specifico. La manodopera viene poi riaccreditata integralmente nella colonna dei totali per il pagamento. La manodopera di riferimento per K esclude gli oneri della sicurezza.
+                        <div className="p-3 border border-dashed border-gray-400 bg-gray-50 text-[10px] text-gray-700 leading-relaxed rounded">
+                            <strong>Note di contabilità (D.Lgs. 36/2023):</strong> La contabilità dei lavori riflette le quantità regolarmente eseguite e registrate nel Libretto delle Misure e nel Registro di Contabilità. Il ribasso d'asta contrattuale si applica sull'intero importo delle lavorazioni a misura e a corpo. In contabilità la manodopera è contabilizzata ordinariamente nell'ambito dei prezzi di elenco dei lavori. Gli Oneri della Sicurezza sono liquidati integralmente senza applicazione del ribasso.
                         </div>
                     </div>
                 </div>
@@ -659,6 +834,17 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             
             {activeTab === 'libretto' && (
                 <div className="flex-grow p-4 md:p-6 overflow-hidden flex flex-col">
+                    <div className="mb-4 flex justify-between items-end">
+                        <div>
+                            <h3 className="text-lg font-bold text-gray-800 dark:text-white uppercase tracking-tight">Libretto delle Misure</h3>
+                            <p className="text-xs font-bold text-indigo-600 uppercase">
+                                Periodo: {previousSalObject ? `dal ${format(parseISO(previousSalDate), 'dd/MM/yyyy')}` : 'dall\'inizio lavori'} al {format(parseISO(salReferenceDate), 'dd/MM/yyyy')}
+                            </p>
+                        </div>
+                        <div className="text-right">
+                            <span className="text-[10px] font-black text-gray-400 uppercase">D.Lgs 36/2023 - Art. 114</span>
+                        </div>
+                    </div>
                     <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-grow overflow-auto">
                          <table className="w-full text-xs text-left border-collapse">
                             <thead className="bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 font-bold border-b dark:border-gray-600 sticky top-0 z-10 shadow-sm">
@@ -684,33 +870,64 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             )}
             
             {activeTab === 'register' && (
-                <div ref={contentRef} className="flex-grow overflow-auto p-4 md:p-6">
-                    <table className="w-full text-sm text-left text-gray-600 dark:text-gray-300 border-collapse">
+                <div className="flex-grow p-4 md:p-6 overflow-hidden flex flex-col">
+                    <div className="mb-4 flex justify-between items-end">
+                        <div>
+                            <h3 className="text-lg font-bold text-gray-800 dark:text-white uppercase tracking-tight">Registro di Contabilità</h3>
+                            <p className="text-xs font-bold text-indigo-600 uppercase">
+                                Situazione cumulativa al {format(parseISO(salReferenceDate), 'dd/MM/yyyy')}
+                            </p>
+                        </div>
+                        <div className="text-right">
+                            <span className="text-[10px] font-black text-gray-400 uppercase">Documento Fiscale - Registro Cronologico</span>
+                        </div>
+                    </div>
+                    <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-grow overflow-auto">
+                        <table className="w-full text-sm text-left text-gray-600 dark:text-gray-300 border-collapse">
                         <thead className="text-xs text-gray-700 uppercase bg-gray-100 sticky top-0 z-10">
                             <tr><th className="px-4 py-3 w-20 text-center border-r">Rif. M.</th><th className="px-4 py-3 w-24">Data</th><th className="px-4 py-3 w-20 text-center border-r">Num. ord.</th><th className="px-4 py-3 w-32">WBS</th><th className="px-4 py-3">Descrizione</th><th className="px-4 py-3 w-16 text-center">U.M.</th><th className="px-4 py-3 text-right w-24">Q.tà</th><th className="px-4 py-3 text-right w-24">Prezzo</th><th className="px-4 py-3 text-right w-32 font-bold">Importo</th></tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
-                            {filteredRegistry.filter(applyFilters).map((entry, idx) => (
-                                <tr key={idx} className={`hover:bg-gray-50 ${entry.isSecurityCost ? 'bg-green-50' : entry.accountingType === 'body' ? 'bg-purple-50/50' : ''}`}>
-                                    <td className="px-4 py-2 text-center font-bold border-r">{entry.progressiveIndex}</td>
-                                    <td className="px-4 py-2">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
-                                    <td className="px-4 py-2 text-center font-bold text-indigo-700 border-r">{entry.originalIndex || '-'}</td>
-                                    <td className="px-4 py-2 text-xs uppercase font-bold">{entry.groupName}</td>
-                                    <td className="px-4 py-2 truncate max-w-md">{entry.description}</td>
-                                    <td className="px-4 py-2 text-center">{entry.unit}</td>
-                                    <td className="px-4 py-2 text-right">{entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity)}</td>
-                                    <td className="px-4 py-2 text-right">{currencyFormatter.format(entry.unitPrice)}</td>
-                                    <td className="px-4 py-2 text-right font-bold">{currencyFormatter.format(entry.debit)}</td>
-                                </tr>
-                            ))}
+                            {filteredRegistry.filter(applyFilters).map((entry, idx) => {
+                                const isCurrentPeriod = entry.date.localeCompare(previousSalDate) > 0;
+                                return (
+                                    <tr key={idx} className={`hover:bg-gray-50 ${entry.isSecurityCost ? 'bg-green-50' : entry.accountingType === 'body' ? 'bg-purple-50/50' : ''} ${isCurrentPeriod ? 'border-l-4 border-l-indigo-500' : 'opacity-75'}`}>
+                                        <td className="px-4 py-2 text-center font-bold border-r">{entry.progressiveIndex}</td>
+                                        <td className="px-4 py-2">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
+                                        <td className="px-4 py-2 text-center font-bold text-indigo-700 border-r">{entry.originalIndex || '-'}</td>
+                                        <td className="px-4 py-2 text-xs uppercase font-bold">{entry.groupName}</td>
+                                        <td className="px-4 py-2 truncate max-w-md">
+                                            {entry.description}
+                                            {isCurrentPeriod && <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-700 uppercase tracking-tighter">Nuovo</span>}
+                                        </td>
+                                        <td className="px-4 py-2 text-center">{entry.unit}</td>
+                                        <td className="px-4 py-2 text-right">{entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity)}</td>
+                                        <td className="px-4 py-2 text-right">{currencyFormatter.format(entry.unitPrice)}</td>
+                                        <td className="px-4 py-2 text-right font-bold">{currencyFormatter.format(entry.debit)}</td>
+                                    </tr>
+                                );
+                            })}
                         </tbody>
                     </table>
                 </div>
-            )}
+            </div>
+        )}
 
             {activeTab === 'summary' && (
-                <div ref={contentRef} className="flex-grow overflow-auto p-4 md:p-6">
-                    <table className="w-full text-sm text-left text-gray-600 dark:text-gray-300 border-collapse">
+                <div className="flex-grow p-4 md:p-6 overflow-hidden flex flex-col">
+                    <div className="mb-4 flex justify-between items-end">
+                        <div>
+                            <h3 className="text-lg font-bold text-gray-800 dark:text-white uppercase tracking-tight">Sommario del Registro</h3>
+                            <p className="text-xs font-bold text-indigo-600 uppercase">
+                                Riepilogo per articolo - SAL N. {sals.find(s => s.id === activeSalId)?.number || 'Bozza'}
+                            </p>
+                        </div>
+                        <div className="text-right">
+                            <span className="text-[10px] font-black text-gray-400 uppercase">Analisi Avanzamento per Categoria</span>
+                        </div>
+                    </div>
+                    <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-grow overflow-auto">
+                        <table className="w-full text-sm text-left text-gray-600 dark:text-gray-300 border-collapse">
                         <thead className="text-xs text-gray-700 uppercase bg-gray-100 sticky top-0 z-10 shadow-sm">
                             <tr>
                                 <th className="px-4 py-3 border-r">Codice Articolo</th>
@@ -718,8 +935,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                 <th className="px-4 py-3">Descrizione</th>
                                 <th className="px-4 py-3 w-16 text-center">U.M.</th>
                                 <th className="px-4 py-3 text-right w-24">Prezzo</th>
-                                <th className="px-4 py-3 text-right w-24">Q.tà Contr.</th>
-                                <th className="px-4 py-3 text-right w-24">Q.tà Real.</th>
+                                <th className="px-4 py-3 text-right w-24 bg-gray-50">Q.tà Prec.</th>
+                                <th className="px-4 py-3 text-right w-24 bg-indigo-50">Q.tà Att.</th>
+                                <th className="px-4 py-3 text-right w-24 font-bold">Q.tà Tot.</th>
                                 <th className="px-4 py-3 text-right w-32 font-bold">Importo</th>
                                 <th className="px-4 py-3 text-center w-28">%</th>
                             </tr>
@@ -732,8 +950,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                     <td className="px-4 py-2 truncate max-w-xs">{item.description}</td>
                                     <td className="px-4 py-2 text-center">{item.unit}</td>
                                     <td className="px-4 py-2 text-right">{currencyFormatter.format(item.unitPrice)}</td>
-                                    <td className="px-4 py-2 text-right">{item.accountingType === 'body' ? '-' : numberFormatter.format(item.estimatedQuantity)}</td>
-                                    <td className="px-4 py-2 text-right font-bold text-indigo-700 dark:text-indigo-400">{item.accountingType === 'body' ? percentFormatter.format(item.totalQuantity) : numberFormatter.format(item.totalQuantity)}</td>
+                                    <td className="px-4 py-2 text-right bg-gray-50">{item.accountingType === 'body' ? percentFormatter.format(item.previousQuantity) : numberFormatter.format(item.previousQuantity)}</td>
+                                    <td className="px-4 py-2 text-right bg-indigo-50 font-semibold">{item.accountingType === 'body' ? percentFormatter.format(item.currentQuantity) : numberFormatter.format(item.currentQuantity)}</td>
+                                    <td className="px-4 py-2 text-right font-bold">{item.accountingType === 'body' ? percentFormatter.format(item.totalQuantity) : numberFormatter.format(item.totalQuantity)}</td>
                                     <td className="px-4 py-2 text-right font-bold">{currencyFormatter.format(item.totalAmount)}</td>
                                     <td className="px-4 py-2 text-center">
                                         <div className="flex items-center gap-2">
@@ -748,7 +967,8 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                         </tbody>
                     </table>
                 </div>
-            )}
+            </div>
+        )}
 
             {activeTab === 'payment_cert' && (
                 <div className="flex-grow overflow-auto bg-gray-100 dark:bg-gray-900 p-4 md:p-8 flex justify-center">

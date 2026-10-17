@@ -551,7 +551,7 @@ const GanttChart: React.FC<GanttChartProps> = ({
                         const width = (differenceInDays(groupEnd, groupStart) + 1) * dayPixelWidth;
                         const variantNum = getGroupVariantInfo(group.id);
                         
-                        const measurementDates = Array.from(new Set(group.items.flatMap(i => i.measurements || []).map(m => m.date)));
+                        const measurementDates = Array.from(new Set(group.items.flatMap(i => i.measurements || []).map(m => m.date))) as string[];
 
                         return (
                             <div key={group.id} className={`absolute border-b border-gray-50/50 dark:border-gray-700/30 transition-colors ${selectedGroupId === group.id ? 'bg-indigo-50/20' : ''}`} style={{top: index * ROW_HEIGHT, height: ROW_HEIGHT, left:0, width:'100%'}}>

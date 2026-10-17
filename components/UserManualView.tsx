@@ -153,20 +153,19 @@ const UserManualView: React.FC = () => {
             
             <div className="space-y-4">
                 <div>
-                    <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-200">Filosofia del Dato Analitico (Fondamentale!)</h3>
+                    <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-200">Disciplina Contabile dei Lavori e della Manodopera (D.Lgs. 36/2023)</h3>
                     <p className="text-sm bg-blue-50 dark:bg-blue-900/30 p-3 rounded border-l-4 border-blue-500">
-                        Chronos AI adotta un approccio rigoroso: <strong>anche per i lavori "A Corpo", la misura deve essere analitica.</strong>
-                        Perché? Perché solo inserendo le misure (metri, pezzi, kg) il sistema può calcolare l'esatta incidenza della manodopera per ogni singola voce.
+                        <strong>Principio normativo:</strong> La quantificazione dell'incidenza della manodopera attiene specificamente alla <em>fase di gara e offerta (ribasso d'asta)</em> per la verifica di congruità.
+                        <strong> In fase di contabilità lavori</strong> (Libretto Misure, Registro di Contabilità, Sommario e SAL), le lavorazioni sono contabilizzate a tariffa contrattuale e la manodopera è trattata ordinariamente nei lavori eseguiti.
                     </p>
-                    <p className="text-sm mt-2">
-                        Se attivata l'opzione <strong>"Scorpora Costo Manodopera"</strong> nelle Impostazioni, il sistema esegue questo calcolo nel SAL:
+                    <p className="text-sm mt-2 text-gray-600 dark:text-gray-400">
+                        Nel calcolo dello Stato Avanzamento Lavori (SAL):
                         <ol className="list-decimal pl-5 mt-1 space-y-1">
-                            <li>Calcola il Totale Lordo prodotto.</li>
-                            <li>Sottrae l'importo della Sicurezza e della Manodopera analitica.</li>
-                            <li>Applica il ribasso d'asta solo sulla parte rimanente ("Lavori").</li>
-                            <li>Riaccredita Sicurezza e Manodopera al netto (senza ribasso).</li>
+                            <li>Viene calcolato il totale dei lavori a misura e a corpo maturati al taglio SAL.</li>
+                            <li>Viene applicato il ribasso d'asta contrattuale sull'importo complessivo dei lavori.</li>
+                            <li>Gli <strong>Oneri della Sicurezza</strong> vengono sommati integralmente senza alcuna applicazione di ribasso.</li>
+                            <li>Il totale netto ottenuto costituisce la base per il rilascio del Certificato di Pagamento.</li>
                         </ol>
-                        Questo garantisce la massima precisione fiscale e il rispetto del Codice degli Appalti.
                     </p>
                 </div>
                 <div>
