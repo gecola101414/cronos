@@ -147,6 +147,25 @@ const TaskModal: React.FC<TaskModalProps> = ({
   const [isDirty, setIsDirty] = useState(false);
   const [expandedVariations, setExpandedVariations] = useState<Set<string>>(new Set());
 
+  // Stato per modifica inline delle misurazioni prima del salvataggio
+  const [editingMeasurementId, setEditingMeasurementId] = useState<string | null>(null);
+  const [editMeasureDraft, setEditMeasureDraft] = useState<{
+    articleCode: string;
+    date: string;
+    note: string;
+    factor: string;
+    length: string;
+    width: string;
+    height: string;
+    quantity: string;
+    sourceBoqId?: string;
+  } | null>(null);
+
+  // Stato per modali di conferma (Salvataggio e Chiusura con modifiche non salvate)
+  const [showSaveConfirmModal, setShowSaveConfirmModal] = useState(false);
+  const [showCloseConfirmModal, setShowCloseConfirmModal] = useState(false);
+  const [validationNotice, setValidationNotice] = useState<string | null>(null);
+
   const [newVariation, setNewVariation] = useState<{ number: string, quantity: string, type: 'increase' | 'decrease' }>({
       number: '', quantity: '', type: 'increase'
   });
@@ -217,17 +236,37 @@ const TaskModal: React.FC<TaskModalProps> = ({
         setActiveTab(initialTab || 'measurements');
         setExpandedVariations(new Set()); 
         setIsCustomNoteMode({});
+        setEditingMeasurementId(null);
+        setEditMeasureDraft(null);
+        setShowSaveConfirmModal(false);
+        setShowCloseConfirmModal(false);
+        setValidationNotice(null);
 
         let migratedGroup = { ...group } as ExtendedWorkGroup;
         if (!migratedGroup.accountingType) migratedGroup.accountingType = 'measure';
 
-        const itemsWithFlags = migratedGroup.items.map(item => ({
-            ...item,
-            measurements: item.measurements?.map(m => ({ ...m, _isCommitted: true, id: m.id || crypto.randomUUID() })) || [],
-            annotations: item.annotations || [],
-            variations: item.variations || [],
-            originalMeasurements: item.originalMeasurements || []
-        }));
+        const itemsWithFlags = migratedGroup.items.map(item => {
+            const rawMeasurements = (item.measurements || []).map(m => ({
+              ...m,
+              _isCommitted: true,
+              id: m.id || crypto.randomUUID()
+            }));
+            // Assicura la coerenza del flag isReversed se esiste già una riga di storno collegata
+            const syncedMeasurements = rawMeasurements.map(m => {
+              const reversingRow = rawMeasurements.find(other => other.reversesMeasurementId === m.id);
+              if (reversingRow) {
+                return { ...m, isReversed: true, reversedById: reversingRow.id };
+              }
+              return m;
+            });
+            return {
+              ...item,
+              measurements: syncedMeasurements,
+              annotations: item.annotations || [],
+              variations: item.variations || [],
+              originalMeasurements: item.originalMeasurements || []
+            };
+        });
 
         migratedGroup.items = itemsWithFlags;
         setActiveGroup(migratedGroup);
@@ -238,10 +277,10 @@ const TaskModal: React.FC<TaskModalProps> = ({
         const initialDeductions: Record<string, boolean> = {};
         
         migratedGroup.items.forEach(item => {
-            // Data congruente: tra ultima misura e oggi
-            const itemMeasures = item.measurements || [];
-            const latestItemDate = itemMeasures.length > 0 
-              ? itemMeasures.reduce((max, m) => m.date > max ? m.date : max, itemMeasures[0].date)
+            // Data congruente: tra ultima misura attiva (non stornata) e oggi
+            const activeItemMeasures = (item.measurements || []).filter(m => !m.isReversed && !m.reversesMeasurementId && m.quantity > 0);
+            const latestItemDate = activeItemMeasures.length > 0 
+              ? activeItemMeasures.reduce((max, m) => m.date > max ? m.date : max, activeItemMeasures[0].date)
               : null;
             const wbsStart = group.officialStartDate || group.startDate;
             const defaultDate = latestItemDate && latestItemDate <= todayStr ? latestItemDate : (wbsStart <= todayStr ? wbsStart : todayStr);
@@ -267,7 +306,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
   
   const handleAttemptClose = useCallback(() => {
     if (isDirty && !(isViewOnly || isLocked)) { 
-      if (window.confirm('Modifiche non salvate. Uscire comunque?')) onClose(); 
+      setShowCloseConfirmModal(true);
     } else {
       onClose();
     }
@@ -295,14 +334,14 @@ const TaskModal: React.FC<TaskModalProps> = ({
     }));
   };
 
-  const calculateAnalyticQuantity = (input: MeasurementInputState | undefined): number | null => {
+  const calculateAnalyticQuantity = (input: { factor?: string; length?: string; width?: string; height?: string } | undefined): number | null => {
       if (!input) return null;
       const f = parseFloat(input.factor?.replace(',', '.') || '') || null;
       const l = parseFloat(input.length?.replace(',', '.') || '') || null;
       const w = parseFloat(input.width?.replace(',', '.') || '') || null;
       const h = parseFloat(input.height?.replace(',', '.') || '') || null;
       if (f !== null || l !== null || w !== null || h !== null) {
-          return (f || 1) * (l || 1) * (w || 1) * (h || 1);
+          return Math.round(((f || 1) * (l || 1) * (w || 1) * (h || 1)) * 1000) / 1000;
       }
       return null;
   };
@@ -329,8 +368,6 @@ const TaskModal: React.FC<TaskModalProps> = ({
   }, [allWorkGroups, activeGroup]);
 
   // QUANDO L'UTENTE SCEGLIE LA MISURA DAL MENU A TENDINA DELLA CASELLA
-  // "poi quando richiami la misura gia parzialemnte contabilizzata....lascia libero i cambi delle misure imponi solo il massimo residuo suggerito in grigio..."
-  // "inoltre se carichi una misura con una data la successiva puo essere tra quella data e oggi"
   const handleSelectComputoMeasure = (articleCode: string, boqMeasureId: string) => {
     const item = activeGroup?.items.find(i => i.articleCode === articleCode);
     if (!item) return;
@@ -340,16 +377,15 @@ const TaskModal: React.FC<TaskModalProps> = ({
     if (!sm) return;
 
     const existingInputDate = newMeasurements[articleCode]?.date;
-    const itemMeasures = item.measurements || [];
-    const latestItemMeasureDate = itemMeasures.length > 0
-      ? itemMeasures.reduce((max, m) => m.date > max ? m.date : max, itemMeasures[0].date)
+    const activeItemMeasures = (item.measurements || []).filter(m => !m.isReversed && !m.reversesMeasurementId && m.quantity > 0);
+    const latestItemMeasureDate = activeItemMeasures.length > 0
+      ? activeItemMeasures.reduce((max, m) => m.date > max ? m.date : max, activeItemMeasures[0].date)
       : null;
 
     const wbsStart = activeGroup.officialStartDate || activeGroup.startDate || projectInizioLavori;
     const inizioLavoriVoice = projectInizioLavori < wbsStart ? projectInizioLavori : wbsStart;
     const todayStr = format(new Date(), 'yyyy-MM-dd');
     
-    // Mantieni la data già impostata, oppure l'ultima data registrata nell'articolo, oppure inizio lavori
     const targetDate = existingInputDate 
       ? existingInputDate 
       : (latestItemMeasureDate && latestItemMeasureDate <= todayStr 
@@ -462,12 +498,12 @@ const TaskModal: React.FC<TaskModalProps> = ({
     const measuredTotal = (item.measurements || []).reduce((acc, m) => acc + m.quantity, 0);
     const itemResidual = Math.max(0, Math.round(((item.quantity + varTotal) - measuredTotal) * 1000) / 1000);
 
-    // Verifica rigorosa: la misura deve sempre agganciarsi al computo del progettista (testo libero rimosso)
+    // Verifica rigorosa: la misura deve sempre agganciarsi al computo del progettista
     const singleMeasures = getSingleBoqMeasuresForItem(item);
     const openBoqMeasures = singleMeasures.filter(sm => sm.missingToClose > 0.0001);
 
     if (openBoqMeasures.length > 0 && !measurementInput?.sourceBoqId) {
-      alert('⛔ MISURA OBBLIGATORIA DAL COMPUTO: Per mantenere l\'allineamento con il computo metrico, devi selezionare una misura dal menu a tendina.');
+      setValidationNotice('⛔ MISURA OBBLIGATORIA DAL COMPUTO: Seleziona prima una misura dal menu a tendina della voce per registrarla a libretto.');
       return;
     }
 
@@ -484,27 +520,26 @@ const TaskModal: React.FC<TaskModalProps> = ({
         quantity = analyticQty;
     } else {
         let quantityStr = (measurementInput?.quantity || '').replace(',', '.');
-        // Se lasciato vuoto, assume il massimo residuo suggerito in grigio
         quantity = quantityStr.trim() === '' ? maxAllowed : (parseFloat(quantityStr) || 0);
     }
     
     // PATTO DI FERRO: "se la supero mi blocca e la chiude con il residuo"
     if (quantity > (maxAllowed + 0.001) && quantity > 0) { 
-      alert(`⛔ MISURA BLOCCATA: Stai inserendo ${numberFormatter.format(quantity)} ${item.unit}, ma il residuo massimo disponibile è di ${numberFormatter.format(maxAllowed)} ${item.unit}.\n\nLa quantità è stata bloccata e impostata esattamente al residuo (${numberFormatter.format(maxAllowed)} ${item.unit}) per chiuderla.`);
+      setValidationNotice(`⚠️ Quantità (${numberFormatter.format(quantity)} ${item.unit}) superiore al residuo disponibile: è stata allineata automaticamente al residuo massimo (${numberFormatter.format(maxAllowed)} ${item.unit}).`);
       quantity = maxAllowed;
     }
     
     if (deductionModes[itemArticleCode]) quantity = -Math.abs(quantity);
     if (quantity === 0) return; 
 
-    // Calcolo data congruente per ogni voce o misura:
-    // "date che vanno dall'inizio lavori fino a oggi... inoltre se carichi una misura con una data la successiva puo essere tra quella data e oggi"
-    const measuresForCurrent = linkedBoq
+    // Calcolo data congruente (considerando solo le misure attive non stornate)
+    const activeMeasuresForCurrent = (linkedBoq
       ? (item.measurements || []).filter(m => m.sourceBoqId === linkedBoq.id)
-      : (item.measurements || []);
+      : (item.measurements || [])
+    ).filter(m => !m.isReversed && !m.reversesMeasurementId && m.quantity > 0);
 
-    const latestRelevantDate = measuresForCurrent.length > 0 
-      ? measuresForCurrent.reduce((max, m) => m.date > max ? m.date : max, measuresForCurrent[0].date)
+    const latestRelevantDate = activeMeasuresForCurrent.length > 0 
+      ? activeMeasuresForCurrent.reduce((max, m) => m.date > max ? m.date : max, activeMeasuresForCurrent[0].date)
       : null;
 
     const wbsStart = activeGroup.officialStartDate || activeGroup.startDate || projectInizioLavori;
@@ -517,11 +552,11 @@ const TaskModal: React.FC<TaskModalProps> = ({
     let measureDate = measurementInput?.date || (latestRelevantDate && latestRelevantDate <= todayStr ? latestRelevantDate : (inizioLavoriVoice <= todayStr ? inizioLavoriVoice : todayStr));
     
     if (measureDate < minAllowedDate) {
-      alert(`⛔ DATA NON CONGRUENTE: La data inserita (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere anteriore a ${format(parseISO(minAllowedDate), 'dd/MM/yyyy')}.\n\nLe misurazioni successive devono essere comprese tra l'ultima data registrata e oggi.`);
+      setValidationNotice(`⛔ DATA NON CONGRUENTE: La data (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere anteriore a ${format(parseISO(minAllowedDate), 'dd/MM/yyyy')}.`);
       return;
     }
     if (measureDate > todayStr) {
-      alert(`⛔ DATA NON CONGRUENTE: La data inserita (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere futura rispetto a oggi (${format(parseISO(todayStr), 'dd/MM/yyyy')}).`);
+      setValidationNotice(`⛔ DATA NON CONGRUENTE: La data (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere successiva a oggi (${format(parseISO(todayStr), 'dd/MM/yyyy')}).`);
       return;
     }
 
@@ -562,19 +597,249 @@ const TaskModal: React.FC<TaskModalProps> = ({
     setIsDirty(true);
   };
 
+  // STORNO CONTABILE: genera la riga negativa di storno, nasconde l'icona storno dalla voce originale
+  // e precompila il rigo di inserimento per permettere di ricaricare la voce modificata/completa prima del salvataggio
   const handleReverseMeasurement = (e: React.MouseEvent, itemArticleCode: string, mIndex: number) => {
     e.preventDefault(); e.stopPropagation();
     if (isViewOnly || isLocked || !activeGroup) return;
     const item = activeGroup.items.find(i => i.articleCode === itemArticleCode);
     const m = item?.measurements?.[mIndex];
     if (!m || m.quantity < 0) return;
+
+    // Impedisce storni multipli sulla stessa misurazione
+    const alreadyReversed = Boolean(
+      m.isReversed ||
+      m.reversedById ||
+      (item?.measurements || []).some(other => other.reversesMeasurementId === m.id)
+    );
+    if (alreadyReversed) return;
+
     const todayStr = format(new Date(), 'yyyy-MM-dd');
-    const rev: ExtendedMeasurement = { id: crypto.randomUUID(), date: todayStr, quantity: -m.quantity, note: `STORNO: ${m.note || ''}`, sourceBoqId: m.sourceBoqId, _isCommitted: false };
-    setActiveGroup(prev => prev ? ({ ...prev, items: prev.items.map(i => i.articleCode === itemArticleCode ? { ...i, measurements: [...(i.measurements || []), rev] } : i) }) : null);
+    const revId = crypto.randomUUID();
+    const rev: ExtendedMeasurement = {
+      id: revId,
+      date: todayStr,
+      quantity: -m.quantity,
+      note: `STORNO: ${m.note || ''}`,
+      factor: m.factor,
+      length: m.length,
+      width: m.width,
+      height: m.height,
+      sourceBoqId: m.sourceBoqId,
+      reversesMeasurementId: m.id,
+      _isCommitted: false
+    };
+
+    setActiveGroup(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        items: prev.items.map(i => {
+          if (i.articleCode !== itemArticleCode) return i;
+          const updatedMeasurements = (i.measurements || []).map((existing, idx) =>
+            idx === mIndex ? { ...existing, isReversed: true, reversedById: revId } : existing
+          );
+          return { ...i, measurements: [...updatedMeasurements, rev] };
+        })
+      };
+    });
+
+    // Precompila il rigo inferiore con i dati della misura stornata per agevolare il ricaricamento modificato
+    setNewMeasurements(prev => ({
+      ...prev,
+      [itemArticleCode]: {
+        date: m.date && m.date <= todayStr ? m.date : todayStr,
+        note: m.note || '',
+        factor: m.factor !== undefined ? String(m.factor) : '',
+        length: m.length !== undefined ? String(m.length) : '',
+        width: m.width !== undefined ? String(m.width) : '',
+        height: m.height !== undefined ? String(m.height) : '',
+        quantity: String(Math.abs(m.quantity)),
+        sourceBoqId: m.sourceBoqId
+      }
+    }));
+
     setIsDirty(true);
   };
 
-  const handleSaveChanges = () => { 
+  // ANNULLA STORNO: rimuove la voce di storno generata e ripristina l'icona Storno sulla voce originale
+  const handleUndoReverseMeasurement = (e: React.MouseEvent, itemArticleCode: string, stornoMeasurement: ExtendedMeasurement, stornoIndex: number) => {
+    e.preventDefault(); e.stopPropagation();
+    if (isViewOnly || isLocked || !activeGroup) return;
+
+    setActiveGroup(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        items: prev.items.map(i => {
+          if (i.articleCode !== itemArticleCode) return i;
+          const remaining = (i.measurements || []).filter((_, idx) => idx !== stornoIndex);
+          let restoredLegacy = false;
+          const updated = remaining.map(m => {
+            if (
+              (stornoMeasurement.reversesMeasurementId && m.id === stornoMeasurement.reversesMeasurementId) ||
+              (m.reversedById && m.reversedById === stornoMeasurement.id)
+            ) {
+              return { ...m, isReversed: false, reversedById: undefined };
+            }
+            // Fallback per eventuali storni creati prima del tracciamento ID
+            if (
+              !stornoMeasurement.reversesMeasurementId &&
+              !restoredLegacy &&
+              m.quantity === Math.abs(stornoMeasurement.quantity) &&
+              m.sourceBoqId === stornoMeasurement.sourceBoqId &&
+              m.isReversed
+            ) {
+              restoredLegacy = true;
+              return { ...m, isReversed: false, reversedById: undefined };
+            }
+            return m;
+          });
+          return { ...i, measurements: updated };
+        })
+      };
+    });
+
+    if (editingMeasurementId === stornoMeasurement.id) {
+      setEditingMeasurementId(null);
+      setEditMeasureDraft(null);
+    }
+    setIsDirty(true);
+  };
+
+  // AVVIA MODIFICA INLINE DI UNA MISURAZIONE PRIMA DEL SALVATAGGIO
+  const handleStartEditMeasurement = (articleCode: string, m: ExtendedMeasurement) => {
+    if (isViewOnly || isLocked) return;
+    setEditingMeasurementId(m.id);
+    setEditMeasureDraft({
+      articleCode,
+      date: m.date,
+      note: m.note || '',
+      factor: m.factor !== undefined ? String(m.factor) : '',
+      length: m.length !== undefined ? String(m.length) : '',
+      width: m.width !== undefined ? String(m.width) : '',
+      height: m.height !== undefined ? String(m.height) : '',
+      quantity: String(Math.abs(m.quantity)),
+      sourceBoqId: m.sourceBoqId
+    });
+  };
+
+  // SALVA MODIFICA INLINE DELLA RIGA DI MISURAZIONE
+  const handleCommitEditMeasurement = (item: ExtendedWorkItem, m: ExtendedMeasurement) => {
+    if (!editMeasureDraft || !activeGroup) return;
+
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const isStornoRow = Boolean(m.reversesMeasurementId || (m.quantity < 0 && m.note?.toUpperCase().startsWith('STORNO')));
+
+    if (isStornoRow) {
+      // Per una riga di storno consente di aggiornare data e nota prima del salvataggio
+      const validDate = editMeasureDraft.date <= todayStr ? editMeasureDraft.date : todayStr;
+      setActiveGroup(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          items: prev.items.map(i =>
+            i.articleCode === item.articleCode
+              ? {
+                  ...i,
+                  measurements: (i.measurements || []).map(row =>
+                    row.id === m.id
+                      ? { ...row, date: validDate, note: editMeasureDraft.note.startsWith('STORNO') ? editMeasureDraft.note : `STORNO: ${editMeasureDraft.note}` }
+                      : row
+                  )
+                }
+              : i
+          )
+        };
+      });
+      setEditingMeasurementId(null);
+      setEditMeasureDraft(null);
+      setIsDirty(true);
+      return;
+    }
+
+    // Calcolo residuo escludendo la quantità corrente della riga in modifica
+    const varTotal = (item.variations || []).reduce((acc, v) => v.type === 'increase' ? acc + v.quantity : acc - v.quantity, 0);
+    const otherMeasuredTotal = (item.measurements || [])
+      .filter(row => row.id !== m.id)
+      .reduce((acc, row) => acc + row.quantity, 0);
+    const itemResidualForEdit = Math.max(0, Math.round(((item.quantity + varTotal) - otherMeasuredTotal) * 1000) / 1000);
+
+    const singleMeasures = getSingleBoqMeasuresForItem({
+      ...item,
+      measurements: (item.measurements || []).filter(row => row.id !== m.id)
+    });
+    const linkedBoq = editMeasureDraft.sourceBoqId
+      ? singleMeasures.find(sm => sm.id === editMeasureDraft.sourceBoqId)
+      : null;
+    const maxAllowed = linkedBoq ? Math.min(linkedBoq.missingToClose, itemResidualForEdit) : itemResidualForEdit;
+
+    const analyticQty = calculateAnalyticQuantity(editMeasureDraft);
+    let newQty = analyticQty !== null
+      ? analyticQty
+      : (parseFloat(editMeasureDraft.quantity.replace(',', '.')) || 0);
+
+    if (newQty > (maxAllowed + 0.001) && newQty > 0) {
+      setValidationNotice(`⚠️ Quantità modificata (${numberFormatter.format(newQty)} ${item.unit}) superiore al residuo massimo disponibile (${numberFormatter.format(maxAllowed)} ${item.unit}): impostata al residuo.`);
+      newQty = maxAllowed;
+    }
+
+    if (newQty <= 0) {
+      setValidationNotice('⛔ Inserisci una quantità valida maggiore di zero oppure elimina la riga.');
+      return;
+    }
+
+    const validDate = editMeasureDraft.date <= todayStr ? editMeasureDraft.date : todayStr;
+
+    setActiveGroup(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        items: prev.items.map(i =>
+          i.articleCode === item.articleCode
+            ? {
+                ...i,
+                measurements: (i.measurements || []).map(row =>
+                  row.id === m.id
+                    ? {
+                        ...row,
+                        date: validDate,
+                        note: editMeasureDraft.note || linkedBoq?.description || row.note,
+                        factor: editMeasureDraft.factor ? parseFloat(editMeasureDraft.factor.replace(',', '.')) : undefined,
+                        length: editMeasureDraft.length ? parseFloat(editMeasureDraft.length.replace(',', '.')) : undefined,
+                        width: editMeasureDraft.width ? parseFloat(editMeasureDraft.width.replace(',', '.')) : undefined,
+                        height: editMeasureDraft.height ? parseFloat(editMeasureDraft.height.replace(',', '.')) : undefined,
+                        quantity: m.quantity < 0 ? -Math.abs(newQty) : newQty,
+                        sourceBoqId: editMeasureDraft.sourceBoqId || row.sourceBoqId
+                      }
+                    : row
+                )
+              }
+            : i
+        )
+      };
+    });
+
+    setEditingMeasurementId(null);
+    setEditMeasureDraft(null);
+    setIsDirty(true);
+  };
+
+  // Richiede sempre conferma prima di salvare
+  const handleRequestSaveChanges = () => {
+    if (!activeGroup || isViewOnly || isLocked) return;
+    // Se c'è una modifica inline aperta, la chiude/applica prima di mostrare la conferma
+    if (editingMeasurementId && editMeasureDraft) {
+      const targetItem = activeGroup.items.find(i => i.articleCode === editMeasureDraft.articleCode);
+      const targetMeasure = targetItem?.measurements?.find(m => m.id === editingMeasurementId);
+      if (targetItem && targetMeasure) {
+        handleCommitEditMeasurement(targetItem, targetMeasure);
+      }
+    }
+    setShowSaveConfirmModal(true);
+  };
+
+  const executeSaveChanges = () => { 
       if (!activeGroup || isViewOnly || isLocked) return; 
       
       const totalMeasuredVal = activeGroup.items.reduce((total, i) => 
@@ -609,6 +874,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
               measurements: item.measurements?.map(m => { const { _isCommitted, ...rest } = m; return rest; }) 
           })) 
       }; 
+      setShowSaveConfirmModal(false);
       setWorkGroups(prev => prev.map(g => g.id === activeGroup.id ? cleanGroup : g)); 
       onClose(); 
   };
@@ -632,6 +898,16 @@ const TaskModal: React.FC<TaskModalProps> = ({
   }, 0);
   const currentProgress = groupTotalValue > 0 ? (totalMeasuredValue / groupTotalValue) * 100 : 0;
   const groupResidualValue = Math.max(0, groupTotalValue - totalMeasuredValue);
+
+  // Statistiche modifiche della sessione corrente per il messaggio di conferma salvataggio
+  const uncommittedMeasurementsCount = activeGroup.items.reduce(
+    (acc, i) => acc + (i.measurements || []).filter(m => !m._isCommitted && !m.reversesMeasurementId && m.quantity > 0).length,
+    0
+  );
+  const uncommittedStorniCount = activeGroup.items.reduce(
+    (acc, i) => acc + (i.measurements || []).filter(m => !m._isCommitted && (m.reversesMeasurementId || m.quantity < 0)).length,
+    0
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={handleAttemptClose}>
@@ -718,6 +994,19 @@ const TaskModal: React.FC<TaskModalProps> = ({
         {/* Corpo principale */}
         <div className="flex-grow p-4 flex flex-col overflow-hidden relative bg-gray-50/30 dark:bg-gray-900/30">
           
+          {validationNotice && (
+            <div className="mb-3 p-3 bg-amber-50 dark:bg-amber-950/60 border border-amber-400 dark:border-amber-700 text-amber-900 dark:text-amber-200 rounded-xl text-xs font-bold flex items-center justify-between shadow-sm animate-fade-in">
+              <span>{validationNotice}</span>
+              <button
+                type="button"
+                onClick={() => setValidationNotice(null)}
+                className="ml-3 px-2 py-0.5 bg-amber-200/70 dark:bg-amber-800 hover:bg-amber-300 rounded text-[10px] font-black uppercase"
+              >
+                Chiudi
+              </button>
+            </div>
+          )}
+
           {/* TAB 1: LIBRETTO CONTABILITÀ - VOCI UNA DOPO L'ALTRA */}
           {activeTab === 'measurements' && (
             <div className="flex-grow flex flex-col overflow-hidden space-y-4">
@@ -763,11 +1052,10 @@ const TaskModal: React.FC<TaskModalProps> = ({
                       const isExceeded = previewQty > (maxAllowed + 0.001);
                       const previewVal = (previewQty > 0 ? previewQty : 0) * item.unitPrice;
 
-                      // CONGRUITA CALENDARIO PER OGNI VOCE O MISURA:
-                      // "date che vanno dall'inizio lavori fino a oggi... inoltre se carichi una misura con una data la successiva puo essere tra quella data e oggi"
-                      const itemMeasures = item.measurements || [];
-                      const latestItemMeasureDate = itemMeasures.length > 0 
-                        ? itemMeasures.reduce((max, m) => m.date > max ? m.date : max, itemMeasures[0].date)
+                      // CONGRUITA CALENDARIO PER OGNI VOCE O MISURA (considerando solo le misure attive non stornate)
+                      const activeItemMeasures = (item.measurements || []).filter(m => !m.isReversed && !m.reversesMeasurementId && m.quantity > 0);
+                      const latestItemMeasureDate = activeItemMeasures.length > 0 
+                        ? activeItemMeasures.reduce((max, m) => m.date > max ? m.date : max, activeItemMeasures[0].date)
                         : null;
 
                       const wbsStart = activeGroup.officialStartDate || activeGroup.startDate || projectInizioLavori;
@@ -886,15 +1174,15 @@ const TaskModal: React.FC<TaskModalProps> = ({
                               <thead className="text-gray-600 bg-gray-100 dark:bg-gray-700/80 dark:text-gray-300 sticky top-0 z-10 shadow-sm text-[11px] uppercase font-bold">
                                   <tr>
                                     <th className="px-2 py-1.5 w-[11%]">Data</th>
-                                    <th className="px-2 py-1.5 w-[24%]">Rilievo a Libretto</th>
+                                    <th className="px-2 py-1.5 w-[23%]">Rilievo a Libretto</th>
                                     <th className="px-1 py-1.5 w-[5%] text-center">U.M.</th>
                                     <th className="px-1 py-1.5 w-[6%] text-center">Parti</th>
                                     <th className="px-1 py-1.5 w-[6%] text-center">Lung.</th>
                                     <th className="px-1 py-1.5 w-[6%] text-center">Larg.</th>
                                     <th className="px-1 py-1.5 w-[6%] text-center">Alt/P</th>
-                                    <th className="px-2 py-1.5 w-[12%] text-right">Quantità</th>
-                                    <th className="px-2 py-1.5 w-[14%] text-right">Importo</th>
-                                    <th className="px-1 py-1.5 w-[10%] text-center">Azioni</th>
+                                    <th className="px-2 py-1.5 w-[11%] text-right">Quantità</th>
+                                    <th className="px-2 py-1.5 w-[13%] text-right">Importo</th>
+                                    <th className="px-1 py-1.5 w-[13%] text-center">Azioni</th>
                                   </tr>
                               </thead>
                               <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
@@ -908,14 +1196,131 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                     item.measurements.map((m, mIdx) => {
                                       const isNeg = m.quantity < 0; 
                                       const isCom = m._isCommitted ?? false;
+                                      const isStornoRow = Boolean(m.reversesMeasurementId || (isNeg && m.note?.toUpperCase().startsWith('STORNO')));
+                                      const isAlreadyReversed = Boolean(
+                                        m.isReversed ||
+                                        m.reversedById ||
+                                        (item.measurements || []).some(other => other.reversesMeasurementId === m.id)
+                                      );
+                                      const isEditingThisRow = editingMeasurementId === m.id && editMeasureDraft !== null;
                                       const matchedBoq = boqMeasures.find(sm => sm.id === m.sourceBoqId);
+
+                                      if (isEditingThisRow && editMeasureDraft) {
+                                        const draftAnalyticQty = calculateAnalyticQuantity(editMeasureDraft);
+                                        const draftQtyNum = draftAnalyticQty !== null
+                                          ? draftAnalyticQty
+                                          : (parseFloat(editMeasureDraft.quantity.replace(',', '.')) || 0);
+                                        const signedDraftQty = isNeg ? -Math.abs(draftQtyNum) : draftQtyNum;
+
+                                        return (
+                                          <tr key={m.id || mIdx} className="bg-amber-50/70 dark:bg-amber-950/30 border-l-4 border-amber-500">
+                                            <td className="p-1 align-middle">
+                                              <EuropeanDateInput
+                                                value={editMeasureDraft.date}
+                                                min={inizioLavoriVoice}
+                                                max={itemMaxDate}
+                                                onChange={val => setEditMeasureDraft(prev => prev ? { ...prev, date: val } : null)}
+                                                className="w-full p-1 text-[11px] font-mono font-bold bg-white dark:bg-gray-700 border border-amber-400 rounded text-gray-900 dark:text-white"
+                                              />
+                                            </td>
+                                            <td className="p-1 align-middle">
+                                              <input
+                                                type="text"
+                                                value={editMeasureDraft.note}
+                                                onChange={e => setEditMeasureDraft(prev => prev ? { ...prev, note: e.target.value } : null)}
+                                                className="w-full p-1 text-xs bg-white dark:bg-gray-700 border border-amber-400 rounded text-gray-900 dark:text-white"
+                                                placeholder="Descrizione / nota..."
+                                              />
+                                            </td>
+                                            <td className="p-1 text-center text-gray-400">{item.unit}</td>
+                                            <td className="p-1 align-middle">
+                                              <input
+                                                type="text"
+                                                disabled={isStornoRow}
+                                                value={editMeasureDraft.factor}
+                                                onChange={e => setEditMeasureDraft(prev => prev ? { ...prev, factor: e.target.value } : null)}
+                                                className="w-full p-1 text-center text-xs bg-white dark:bg-gray-700 border border-amber-400 rounded disabled:opacity-50"
+                                                placeholder="-"
+                                              />
+                                            </td>
+                                            <td className="p-1 align-middle">
+                                              <input
+                                                type="text"
+                                                disabled={isStornoRow}
+                                                value={editMeasureDraft.length}
+                                                onChange={e => setEditMeasureDraft(prev => prev ? { ...prev, length: e.target.value } : null)}
+                                                className="w-full p-1 text-center text-xs bg-white dark:bg-gray-700 border border-amber-400 rounded disabled:opacity-50"
+                                                placeholder="-"
+                                              />
+                                            </td>
+                                            <td className="p-1 align-middle">
+                                              <input
+                                                type="text"
+                                                disabled={isStornoRow}
+                                                value={editMeasureDraft.width}
+                                                onChange={e => setEditMeasureDraft(prev => prev ? { ...prev, width: e.target.value } : null)}
+                                                className="w-full p-1 text-center text-xs bg-white dark:bg-gray-700 border border-amber-400 rounded disabled:opacity-50"
+                                                placeholder="-"
+                                              />
+                                            </td>
+                                            <td className="p-1 align-middle">
+                                              <input
+                                                type="text"
+                                                disabled={isStornoRow}
+                                                value={editMeasureDraft.height}
+                                                onChange={e => setEditMeasureDraft(prev => prev ? { ...prev, height: e.target.value } : null)}
+                                                className="w-full p-1 text-center text-xs bg-white dark:bg-gray-700 border border-amber-400 rounded disabled:opacity-50"
+                                                placeholder="-"
+                                              />
+                                            </td>
+                                            <td className="p-1 align-middle">
+                                              <input
+                                                type="text"
+                                                disabled={isStornoRow || draftAnalyticQty !== null}
+                                                value={draftAnalyticQty !== null ? numberFormatter.format(draftAnalyticQty) : editMeasureDraft.quantity}
+                                                onChange={e => setEditMeasureDraft(prev => prev ? { ...prev, quantity: e.target.value } : null)}
+                                                className="w-full p-1 text-right font-bold text-xs bg-white dark:bg-gray-700 border border-amber-400 rounded disabled:opacity-60"
+                                              />
+                                            </td>
+                                            <td className="px-2 py-1.5 text-right font-semibold text-indigo-600 dark:text-indigo-400">
+                                              {currencyFormatter.format(signedDraftQty * item.unitPrice)}
+                                            </td>
+                                            <td className="p-1 text-center align-middle">
+                                              <div className="flex items-center justify-center gap-1">
+                                                <button
+                                                  type="button"
+                                                  onClick={() => handleCommitEditMeasurement(item, m)}
+                                                  className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-black"
+                                                  title="Conferma modifica riga"
+                                                >
+                                                  ✓ Ok
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => { setEditingMeasurementId(null); setEditMeasureDraft(null); }}
+                                                  className="px-1.5 py-1 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 text-gray-700 dark:text-gray-200 rounded text-[10px] font-bold"
+                                                  title="Annulla modifica"
+                                                >
+                                                  ✕
+                                                </button>
+                                              </div>
+                                            </td>
+                                          </tr>
+                                        );
+                                      }
+
                                       return (
-                                          <tr key={m.id || mIdx} className={`bg-white dark:bg-gray-800 ${isNeg ? 'text-red-600 dark:text-red-400' : 'text-gray-800 dark:text-gray-200'}`}>
+                                          <tr key={m.id || mIdx} className={`bg-white dark:bg-gray-800 ${isNeg ? 'text-red-600 dark:text-red-400 bg-red-50/20 dark:bg-red-950/10' : isAlreadyReversed ? 'text-gray-400 dark:text-gray-500 line-through decoration-gray-300' : 'text-gray-800 dark:text-gray-200'}`}>
                                             <td className="px-2 py-1.5 font-mono">{format(parseISO(m.date), 'dd/MM/yyyy')}</td>
                                             <td className="px-2 py-1.5 truncate italic" title={m.note}>
                                               {matchedBoq && (
                                                 <span className="mr-1.5 px-1 py-0.2 bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-300 rounded font-mono font-bold text-[9px] not-italic">
                                                   #{matchedBoq.index}
+                                                </span>
+                                              )}
+                                              {!isCom && !isStornoRow && (
+                                                <span className="mr-1.5 px-1 py-0.2 bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 rounded font-bold text-[9px] not-italic">
+                                                  Da salvare
                                                 </span>
                                               )}
                                               {m.note}
@@ -932,16 +1337,74 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                               {currencyFormatter.format(m.quantity * item.unitPrice)}
                                             </td>
                                             <td className="px-1 py-1.5 text-center">
-                                              {!(isViewOnly || isLocked) && !isNeg && (
-                                                isCom ? (
-                                                  <button onClick={(e) => handleReverseMeasurement(e, item.articleCode, mIdx)} className="text-orange-500 hover:text-orange-700 p-1 font-bold text-[10px]" title="Storno">
-                                                    ↩ Storno
-                                                  </button>
-                                                ) : (
-                                                  <button onClick={() => { setActiveGroup(p => p ? ({ ...p, items: p.items.map(i => i.articleCode === item.articleCode ? ({ ...i, measurements: i.measurements?.filter((_, idx) => idx !== mIdx) }) : i) }) : null); setIsDirty(true); }} className="text-gray-400 hover:text-red-500 p-1" title="Elimina">
-                                                    🗑️
-                                                  </button>
-                                                )
+                                              {!(isViewOnly || isLocked) && (
+                                                isStornoRow ? (
+                                                  <div className="flex items-center justify-center gap-1">
+                                                    {!isCom && (
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => handleStartEditMeasurement(item.articleCode, m)}
+                                                        className="text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 p-1 text-[10px] font-bold"
+                                                        title="Modifica data o nota dello storno prima di salvare"
+                                                      >
+                                                        ✏️
+                                                      </button>
+                                                    )}
+                                                    <button
+                                                      type="button"
+                                                      onClick={(e) => handleUndoReverseMeasurement(e, item.articleCode, m, mIdx)}
+                                                      className="px-1.5 py-0.5 bg-red-100 hover:bg-red-200 dark:bg-red-900/50 dark:hover:bg-red-800 text-red-700 dark:text-red-200 rounded font-bold text-[10px] transition-colors whitespace-nowrap"
+                                                      title="Annulla questo storno e ripristina l'icona Storno sulla voce originale"
+                                                    >
+                                                      ↶ Annulla Storno
+                                                    </button>
+                                                  </div>
+                                                ) : !isNeg ? (
+                                                  isCom ? (
+                                                    isAlreadyReversed ? (
+                                                      <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 italic select-none" title="Misurazione già stornata">
+                                                        Stornata
+                                                      </span>
+                                                    ) : (
+                                                      <button
+                                                        type="button"
+                                                        onClick={(e) => handleReverseMeasurement(e, item.articleCode, mIdx)}
+                                                        className="text-orange-500 hover:text-orange-700 hover:bg-orange-50 dark:hover:bg-orange-950/40 px-1.5 py-0.5 rounded font-bold text-[10px] transition-colors"
+                                                        title="Storna questa misurazione per azzerarla e ricaricarla corretta"
+                                                      >
+                                                        ↩ Storno
+                                                      </button>
+                                                    )
+                                                  ) : (
+                                                    <div className="flex items-center justify-center gap-1">
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => handleStartEditMeasurement(item.articleCode, m)}
+                                                        className="px-1.5 py-0.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900 text-indigo-600 dark:text-indigo-300 rounded font-bold text-[10px] transition-colors"
+                                                        title="Modifica questa misurazione prima di salvare"
+                                                      >
+                                                        ✏️ Modifica
+                                                      </button>
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                          setActiveGroup(p => p ? ({
+                                                            ...p,
+                                                            items: p.items.map(i => i.articleCode === item.articleCode ? ({
+                                                              ...i,
+                                                              measurements: i.measurements?.filter((_, idx) => idx !== mIdx)
+                                                            }) : i)
+                                                          }) : null);
+                                                          setIsDirty(true);
+                                                        }}
+                                                        className="text-gray-400 hover:text-red-500 p-1"
+                                                        title="Elimina riga non ancora salvata"
+                                                      >
+                                                        🗑️
+                                                      </button>
+                                                    </div>
+                                                  )
+                                                ) : null
                                               )}
                                             </td>
                                           </tr>
@@ -1362,13 +1825,104 @@ const TaskModal: React.FC<TaskModalProps> = ({
           {!(isViewOnly || isLocked) && (
             <button 
               type="button" 
-              onClick={handleSaveChanges} 
+              onClick={handleRequestSaveChanges} 
               className="px-8 py-2.5 text-xs font-black uppercase tracking-widest text-white bg-indigo-600 rounded-xl shadow-lg shadow-indigo-500/20 hover:bg-indigo-700 transition-all active:scale-95 flex items-center gap-2"
             >
               <span>💾 Salva e Applica Modifiche</span>
             </button>
           )}
         </div>
+
+        {/* MODALE DI CONFERMA SALVATAGGIO */}
+        {showSaveConfirmModal && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-xs p-4" onClick={() => setShowSaveConfirmModal(false)}>
+            <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 max-w-md w-full p-6 space-y-4 animate-fade-in" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-xl bg-indigo-100 dark:bg-indigo-900/60 text-indigo-600 dark:text-indigo-300 text-xl">
+                  💾
+                </div>
+                <div>
+                  <h4 className="text-base font-black text-gray-900 dark:text-white uppercase tracking-tight">
+                    Conferma Salvataggio Contabilità
+                  </h4>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    {activeGroup.name}
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-3.5 bg-gray-50 dark:bg-gray-700/50 rounded-xl border border-gray-200 dark:border-gray-600 space-y-2 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-gray-500 dark:text-gray-400">Nuove misurazioni inserite:</span>
+                  <span className="font-black text-indigo-600 dark:text-indigo-400">{uncommittedMeasurementsCount}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500 dark:text-gray-400">Storni effettuati nella sessione:</span>
+                  <span className="font-black text-red-600 dark:text-red-400">{uncommittedStorniCount}</span>
+                </div>
+                <div className="border-t border-gray-200 dark:border-gray-600 pt-2 flex justify-between">
+                  <span className="text-gray-600 dark:text-gray-300 font-bold">Totale Contabilizzato Gruppo:</span>
+                  <span className="font-black text-gray-900 dark:text-white">{currencyFormatter.format(totalMeasuredValue)} ({numberFormatter.format(currentProgress)}%)</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-600 dark:text-gray-300 font-bold">Residuo di Gruppo:</span>
+                  <span className="font-black text-emerald-600 dark:text-emerald-400">{currencyFormatter.format(groupResidualValue)}</span>
+                </div>
+              </div>
+
+              <p className="text-xs text-gray-600 dark:text-gray-300 leading-relaxed">
+                Confermi il salvataggio delle modifiche a libretto? Una volta confermato, le righe registrate diventeranno consolidate in contabilità.
+              </p>
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowSaveConfirmModal(false)}
+                  className="px-4 py-2 text-xs font-bold text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-xl transition-colors"
+                >
+                  Torna alle Modifiche
+                </button>
+                <button
+                  type="button"
+                  onClick={executeSaveChanges}
+                  className="px-5 py-2 text-xs font-black uppercase tracking-wider text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-md transition-all active:scale-95"
+                >
+                  ✓ Conferma e Salva
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* MODALE DI CONFERMA USCITA CON MODIFICHE NON SALVATE */}
+        {showCloseConfirmModal && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-xs p-4" onClick={() => setShowCloseConfirmModal(false)}>
+            <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 max-w-sm w-full p-6 space-y-4 animate-fade-in" onClick={e => e.stopPropagation()}>
+              <h4 className="text-base font-black text-gray-900 dark:text-white uppercase tracking-tight">
+                Modifiche non salvate
+              </h4>
+              <p className="text-xs text-gray-600 dark:text-gray-300 leading-relaxed">
+                Ci sono modifiche o storni non ancora salvati. Vuoi uscire senza salvare e perdere le modifiche effettuate?
+              </p>
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowCloseConfirmModal(false)}
+                  className="px-4 py-2 text-xs font-bold text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 rounded-xl"
+                >
+                  Resta e Modifica
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setShowCloseConfirmModal(false); onClose(); }}
+                  className="px-4 py-2 text-xs font-black uppercase text-white bg-red-600 hover:bg-red-700 rounded-xl"
+                >
+                  Esci senza Salvare
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

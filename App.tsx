@@ -26,7 +26,7 @@ import TeamManagementView from './components/TeamManagementView';
 import ReportsView from './components/ReportsView';
 import PortfolioView from './components/PortfolioView';
 import UserManualView from './components/UserManualView';
-import AccountingView from './components/AccountingView';
+import AccountingView, { AccountingTab } from './components/AccountingView';
 
 export type View = 'dashboard' | 'timeline' | 'summary' | 'measurements' | 'sal-report' | 'costs' | 'teams' | 'reports' | 'help' | 'accounting';
 
@@ -111,6 +111,7 @@ const App: React.FC = () => {
   const [teams, setTeams] = useState<Team[]>([]);
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [activeView, setActiveView] = useState<View>('dashboard');
+  const [accountingTab, setAccountingTab] = useState<AccountingTab>('libretto');
   const [isShareMode, setIsShareMode] = useState<boolean>(false);
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [isGeneratorModalOpen, setIsGeneratorModalOpen] = useState(false);
@@ -557,6 +558,7 @@ const App: React.FC = () => {
     }
 
     switch(activeView) {
+      case 'dashboard': return <Dashboard projectSummary={projectSummaryStats} onViewChange={setActiveView} documentCount={projectDocuments.length} onImport={handleCreateProject} isProjectLoaded={isProjectLoaded} isDemoMode={isDemoMode} />;
       case 'timeline': return (
         <GanttChart 
           workGroups={projectDocuments.flatMap(d => d.workGroups)} 
@@ -583,7 +585,7 @@ const App: React.FC = () => {
       case 'costs': return <CostsView expenses={expenses} workGroups={projectDocuments.flatMap(d => d.workGroups)} onAddExpense={handleAddExpense} onUpdateExpense={handleUpdateExpense} onDeleteExpense={handleDeleteExpense} isViewOnly={effectiveIsViewOnly} earnedValue={projectSummaryStats?.earnedValue ?? 0} />;
       case 'teams': return <TeamManagementView teams={teams} workers={workers} onAddTeam={handleAddTeam} onUpdateTeam={handleUpdateTeam} onDeleteTeam={handleDeleteTeam} onAddWorker={handleAddWorker} onUpdateWorker={handleUpdateWorker} onDeleteWorker={handleDeleteWorker} isViewOnly={effectiveIsViewOnly} />;
       case 'reports': return <ReportsView documents={projectDocuments} teams={teams} workers={workers} />;
-      case 'accounting': return <AccountingView documents={projectDocuments} projectName={projectName} contractConfig={contractConfig} onUpdateContractConfig={setContractConfig} sals={sals} onUpdateSals={setSals} />;
+      case 'accounting': return <AccountingView documents={projectDocuments} projectName={projectName} contractConfig={contractConfig} onUpdateContractConfig={setContractConfig} sals={sals} onUpdateSals={setSals} activeTab={accountingTab} onTabChange={setAccountingTab} />;
       case 'help': return <UserManualView />;
       default: return null;
     }
@@ -596,13 +598,13 @@ const App: React.FC = () => {
       <div className="flex h-screen overflow-hidden">
           {currentProjectId || isShareMode ? (
             <>
-              <Sidebar activeView={activeView} onViewChange={setActiveView} isProjectLoaded={isProjectLoaded} onLogout={handleReset} isViewOnly={effectiveIsViewOnly} onExitProject={handleExitProject} />
+              <Sidebar activeView={activeView} onViewChange={setActiveView} accountingTab={accountingTab} onAccountingTabChange={setAccountingTab} isProjectLoaded={isProjectLoaded} onLogout={handleReset} isViewOnly={effectiveIsViewOnly} onExitProject={handleExitProject} />
               <div className="flex-1 flex flex-col ml-64 min-w-0 h-full overflow-hidden">
                 <Header userEmail={userEmail} remainingDays={remainingDays} serverDate={serverDate} onImport={handleCreateProject} onExport={handleExport} onSaveToDrive={handleSaveToDrive} onShare={handleOpenShareModal} onExportPdf={handleExportPdf} isProjectLoaded={isProjectLoaded} isAdmin={isAdmin} onGenerateLicense={() => setIsGeneratorModalOpen(true)} isViewOnly={effectiveIsViewOnly} isShareMode={isShareMode} isDemoMode={isDemoMode} isSessionExpired={isSessionExpired} sessionSecondsRemaining={sessionSecondsRemaining} projectName={projectName} onUpdateProjectName={setProjectName} lastSavedTime={lastSavedTime} />
-                <main className={`flex-1 min-h-0 flex flex-col p-4 md:p-6 overflow-hidden`}>
-                  <div className={`max-w-7xl mx-auto w-full flex-1 flex flex-col min-h-0`}>
+                <main className={`flex-1 min-h-0 flex flex-col ${activeView === 'accounting' || activeView === 'measurements' ? 'p-1.5 md:p-2' : 'p-3 md:p-4'} overflow-hidden`}>
+                  <div className={`${activeView === 'accounting' || activeView === 'measurements' ? 'max-w-full' : 'max-w-7xl'} mx-auto w-full flex-1 flex flex-col min-h-0`}>
                     {(activeView === 'summary') && isProjectLoaded && <ProjectSummary documents={projectDocuments} isViewOnly={effectiveIsViewOnly} salMarkers={projectDocuments[0]?.salMarkers ?? []} onSalMarkersChange={handleSetSalMarkers} onToggleDocumentVisibility={handleToggleDocumentVisibility} onToggleDocumentFreeze={handleToggleDocumentFreeze} onToggleDocumentLock={handleToggleDocumentLock} onRenameDocument={handleRenameDocument} onDeleteDocument={handleDeleteDocument} />}
-                      <div id="printable-content" className={`bg-white dark:bg-gray-800 shadow-xl rounded-2xl overflow-hidden min-h-[400px] flex-1 flex flex-col mt-6`}>{renderContent()}</div>
+                      <div id="printable-content" className={`bg-white dark:bg-gray-800 shadow-xl rounded-xl overflow-hidden min-h-[400px] flex-1 flex flex-col ${(activeView === 'summary') && isProjectLoaded ? 'mt-3' : 'mt-0'}`}>{renderContent()}</div>
                   </div>
                 </main>
               </div>

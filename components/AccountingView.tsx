@@ -9,6 +9,8 @@ import { EuropeanDateInput } from './EuropeanDateInput';
 declare const jspdf: any;
 declare const html2canvas: any;
 
+export type AccountingTab = 'libretto' | 'register' | 'summary' | 'sal_technical' | 'payment_cert' | 'settings';
+
 interface AccountingViewProps {
   documents: ProjectDocument[];
   projectName?: string;
@@ -17,6 +19,8 @@ interface AccountingViewProps {
   sals?: SalEntry[];
   onUpdateSals: (sals: SalEntry[]) => void;
   onToggleGroupSecurity?: (groupId: string) => void; 
+  activeTab?: AccountingTab;
+  onTabChange?: (tab: AccountingTab) => void;
 }
 
 const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
@@ -127,9 +131,16 @@ const AccountingView: React.FC<AccountingViewProps> = ({
     onUpdateContractConfig, 
     sals = [], 
     onUpdateSals,
-    onToggleGroupSecurity 
+    onToggleGroupSecurity,
+    activeTab: externalActiveTab,
+    onTabChange
 }) => {
-  const [activeTab, setActiveTab] = useState<'libretto' | 'register' | 'summary' | 'sal_technical' | 'payment_cert' | 'settings'>('libretto');
+  const [internalTab, setInternalTab] = useState<AccountingTab>('libretto');
+  const activeTab = externalActiveTab ?? internalTab;
+  const setActiveTab = (tab: AccountingTab) => {
+      setInternalTab(tab);
+      onTabChange?.(tab);
+  };
   
   const [localConfig, setLocalConfig] = useState<ContractConfig>(contractConfig || { 
       discountPercent: 0, 
@@ -691,25 +702,64 @@ const AccountingView: React.FC<AccountingViewProps> = ({
     }
   };
 
+  const tabMeta: Record<AccountingTab, { title: string; subtitle: string; badge: string }> = {
+      libretto: {
+          title: 'Libretto delle Misure',
+          subtitle: `Periodo: ${previousSalObject ? `dal ${format(parseISO(previousSalDate), 'dd/MM/yyyy')}` : "dall'inizio lavori"} al ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')}`,
+          badge: 'D.Lgs 36/2023 - Art. 114'
+      },
+      register: {
+          title: 'Registro di Contabilità',
+          subtitle: `Situazione cumulativa al ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')}`,
+          badge: 'Documento Fiscale - Registro Cronologico'
+      },
+      summary: {
+          title: 'Sommario del Registro',
+          subtitle: `Riepilogo per articolo - SAL N. ${sals.find(s => s.id === activeSalId)?.number || 'Bozza'}`,
+          badge: 'Analisi Avanzamento per Categoria'
+      },
+      sal_technical: {
+          title: 'Stato Avanzamento Lavori (Riepilogo)',
+          subtitle: activeSalId ? `SAL N. ${sals.find(s => s.id === activeSalId)?.number} al ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')}` : 'Visualizzazione completa',
+          badge: 'Quadro Tecnico Contabile'
+      },
+      payment_cert: {
+          title: 'Certificato di Pagamento',
+          subtitle: activeSalId ? `Rata di Acconto N. ${sals.find(s => s.id === activeSalId)?.number} al ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')}` : 'Bozza Certificato',
+          badge: 'Liquidazione Rata'
+      },
+      settings: {
+          title: 'Impostazioni Contratto & Gestione SAL',
+          subtitle: activeSalId ? `SAL attivo: N. ${sals.find(s => s.id === activeSalId)?.number} (${format(parseISO(salReferenceDate), 'dd/MM/yyyy')})` : 'Configurazione parametri contrattuali',
+          badge: 'Configurazione Contabile'
+      }
+  };
+
+  const currentMeta = tabMeta[activeTab];
+
   return (
-    <div className="p-4 md:p-6 h-[calc(100vh-100px)] flex flex-col">
-        <div className="flex justify-between items-center mb-6 bg-white dark:bg-gray-800 p-4 rounded-xl shadow-sm">
-            <div>
-                <h2 className="text-xl font-bold text-gray-800 dark:text-white">Contabilità Lavori</h2>
-                <p className="text-sm text-gray-500 dark:text-gray-400">
-                    {activeSalId 
-                        ? `Analisi corrente: SAL N. ${sals.find(s => s.id === activeSalId)?.number} al ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')}`
-                        : "Nessun SAL selezionato. Visualizzazione completa."
-                    }
-                </p>
+    <div className="h-full flex-1 min-h-0 flex flex-col overflow-hidden">
+        {/* Barra superiore compatta unificata (senza fascia menu contabilità) per massimizzare lo spazio verticale */}
+        <div className="flex flex-wrap justify-between items-center gap-2 px-3 py-2 bg-gray-50 dark:bg-gray-800/90 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
+            <div className="flex items-center gap-3 min-w-0">
+                <h2 className="text-sm md:text-base font-black text-gray-800 dark:text-white uppercase tracking-tight truncate">
+                    {currentMeta.title}
+                </h2>
+                <span className="hidden sm:inline-block text-gray-300 dark:text-gray-600">|</span>
+                <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400 truncate">
+                    {currentMeta.subtitle}
+                </span>
+                <span className="hidden xl:inline-block text-[10px] font-black text-gray-400 dark:text-gray-500 uppercase bg-gray-200/70 dark:bg-gray-700 px-2 py-0.5 rounded">
+                    {currentMeta.badge}
+                </span>
             </div>
             
-            <div className="flex items-center space-x-3">
-                <span className="text-sm font-medium text-gray-600 dark:text-gray-300">Seleziona SAL:</span>
+            <div className="flex items-center gap-2 flex-shrink-0">
+                <span className="text-xs font-semibold text-gray-600 dark:text-gray-300">SAL:</span>
                 <select 
                     value={activeSalId || ''} 
                     onChange={e => setActiveSalId(e.target.value || null)}
-                    className="p-2 bg-gray-100 dark:bg-gray-700 border-none rounded-lg text-sm font-bold text-indigo-700 dark:text-indigo-300 focus:ring-2 focus:ring-indigo-500"
+                    className="py-1 px-2.5 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md text-xs font-bold text-indigo-700 dark:text-indigo-300 focus:ring-2 focus:ring-indigo-500 outline-none"
                 >
                     {sals.length === 0 && <option value="">-- Nessun SAL --</option>}
                     {[...sals].sort((a,b) => b.number - a.number).map(sal => (
@@ -718,30 +768,15 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                         </option>
                     ))}
                 </select>
-                {activeTab === 'settings' && (
-                    <button onClick={handleAddNewSal} className="p-2 bg-green-100 text-green-700 rounded-lg hover:bg-green-200" title="Nuovo SAL">
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" /></svg>
-                    </button>
-                )}
-            </div>
-        </div>
-
-        <div className="flex space-x-2 bg-gray-100 dark:bg-gray-700 p-1 rounded-lg overflow-x-auto mb-4 flex-shrink-0">
-            {[
-                {id: 'libretto', label: 'Libretto Misure'},
-                {id: 'register', label: 'Registro Contabilità'},
-                {id: 'summary', label: 'Sommario'},
-                {id: 'sal_technical', label: 'Riepilogo SAL'},
-                {id: 'payment_cert', label: 'Certificato Pagamento'},
-                {id: 'settings', label: 'Impostazioni & SAL'}
-            ].map(tab => (
-                <button key={tab.id} onClick={() => setActiveTab(tab.id as any)} className={`px-4 py-2 text-sm font-medium rounded-md transition-colors whitespace-nowrap capitalize ${activeTab === tab.id ? 'bg-white dark:bg-gray-600 shadow text-indigo-600 dark:text-white' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-200'}`}>{tab.label}</button>
-            ))}
-        </div>
-
-        <div className="flex-grow bg-white dark:bg-gray-800 rounded-xl shadow-lg overflow-hidden flex flex-col relative">
-            {['libretto', 'register', 'summary', 'sal_technical', 'payment_cert'].includes(activeTab) && (
-                <div className="absolute top-4 right-4 z-20">
+                <button
+                    onClick={handleAddNewSal}
+                    className="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 rounded-md hover:bg-emerald-200 text-xs font-bold flex items-center gap-1 transition-colors"
+                    title="Crea Nuovo SAL"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" /></svg>
+                    <span className="hidden md:inline">Nuovo SAL</span>
+                </button>
+                {['libretto', 'register', 'summary', 'sal_technical', 'payment_cert'].includes(activeTab) && (
                     <button 
                         onClick={() => { 
                             if (activeTab === 'sal_technical' && certificateRef.current) generatePdfWithCover('Stato Avanzamento Lavori', certificateRef.current); 
@@ -749,19 +784,21 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                             else if (['libretto', 'register', 'summary'].includes(activeTab)) generateAccountingPdf(activeTab as any);
                         }} 
                         disabled={isGeneratingPdf} 
-                        className="bg-indigo-600 text-white px-3 py-1.5 rounded-md text-xs font-bold shadow hover:bg-indigo-700 disabled:bg-gray-400 flex items-center gap-2"
+                        className="bg-indigo-600 text-white px-2.5 py-1 rounded-md text-xs font-bold shadow-xs hover:bg-indigo-700 disabled:bg-gray-400 flex items-center gap-1.5 transition-colors"
                     >
                         {isGeneratingPdf ? 'Generazione...' : 'Scarica PDF'} 
-                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
                     </button>
-                </div>
-            )}
+                )}
+            </div>
+        </div>
 
+        <div className="flex-grow bg-white dark:bg-gray-800 overflow-hidden flex flex-col relative min-h-0">
             {activeTab === 'settings' && (
-                <div className="p-8 max-w-5xl mx-auto w-full overflow-y-auto">
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                        <div className="bg-gray-50 dark:bg-gray-700/30 p-6 rounded-xl border border-gray-200 dark:border-gray-600">
-                            <h3 className="text-lg font-bold text-gray-800 dark:text-gray-200 mb-4 border-b pb-2 dark:border-gray-600 flex items-center">
+                <div className="p-4 md:p-6 max-w-6xl mx-auto w-full overflow-y-auto flex-grow">
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div className="bg-gray-50 dark:bg-gray-700/30 p-5 rounded-xl border border-gray-200 dark:border-gray-600">
+                            <h3 className="text-base font-bold text-gray-800 dark:text-gray-200 mb-4 border-b pb-2 dark:border-gray-600 flex items-center">
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2-2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" /></svg>
                                 Dati Generali Contratto
                             </h3>
@@ -774,8 +811,8 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                             </div>
                         </div>
 
-                        <div className="bg-gray-50 dark:bg-gray-700/30 p-6 rounded-xl border border-gray-200 dark:border-gray-600">
-                            <h3 className="text-lg font-bold text-gray-800 dark:text-gray-200 mb-4 border-b pb-2 dark:border-gray-600 flex items-center">
+                        <div className="bg-gray-50 dark:bg-gray-700/30 p-5 rounded-xl border border-gray-200 dark:border-gray-600">
+                            <h3 className="text-base font-bold text-gray-800 dark:text-gray-200 mb-4 border-b pb-2 dark:border-gray-600 flex items-center">
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v.01" /></svg>
                                 Parametri Economici Contratto
                             </h3>
@@ -809,8 +846,8 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             )}
 
             {activeTab === 'sal_technical' && (
-                <div className="flex-grow overflow-auto bg-gray-100 dark:bg-gray-900 p-4 md:p-8 flex justify-center">
-                    <div ref={certificateRef} className="bg-white text-gray-900 w-[210mm] min-h-[297mm] p-[15mm] shadow-2xl text-[12px] relative" style={{ fontFamily: "'Times New Roman', Times, serif" }}>
+                <div className="flex-grow overflow-auto bg-gray-100 dark:bg-gray-900 p-3 md:p-5 flex justify-center min-h-0">
+                    <div ref={certificateRef} className="bg-white text-gray-900 w-[210mm] min-h-[297mm] p-[15mm] shadow-2xl text-[12px] relative h-fit" style={{ fontFamily: "'Times New Roman', Times, serif" }}>
                         <div className="text-center mb-6 border-b-2 border-black pb-2"><h1 className="text-xl font-bold uppercase tracking-widest mb-1">Stato Avanzamento Lavori</h1><h2 className="text-lg">Riepilogo Tecnico Contabile N. {sals.find(s => s.id === activeSalId)?.number || '(Bozza)'}</h2></div>
                         <div className="grid grid-cols-2 gap-4 mb-6 text-[12px]"><div><p className="font-bold uppercase mb-1">Lavori</p><p className="border-b border-gray-300 pb-1 mb-2">{projectName}</p></div><div><p className="font-bold uppercase mb-1">Data</p><p className="border-b border-gray-300 pb-1 mb-2">{format(parseISO(salReferenceDate), 'dd/MM/yyyy')}</p></div></div>
                         
@@ -844,34 +881,23 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             )}
             
             {activeTab === 'libretto' && (
-                <div className="flex-grow p-4 md:p-6 overflow-hidden flex flex-col">
-                    <div className="mb-4 flex justify-between items-end">
-                        <div>
-                            <h3 className="text-lg font-bold text-gray-800 dark:text-white uppercase tracking-tight">Libretto delle Misure</h3>
-                            <p className="text-xs font-bold text-indigo-600 uppercase">
-                                Periodo: {previousSalObject ? `dal ${format(parseISO(previousSalDate), 'dd/MM/yyyy')}` : 'dall\'inizio lavori'} al {format(parseISO(salReferenceDate), 'dd/MM/yyyy')}
-                            </p>
-                        </div>
-                        <div className="text-right">
-                            <span className="text-[10px] font-black text-gray-400 uppercase">D.Lgs 36/2023 - Art. 114</span>
-                        </div>
-                    </div>
-                    <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-grow overflow-auto">
+                <div className="flex-grow p-2 overflow-hidden flex flex-col min-h-0">
+                    <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-xs border border-gray-200 dark:border-gray-700 flex-grow overflow-auto min-h-0">
                          <table className="w-full text-xs text-left border-collapse">
-                            <thead className="bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 font-bold border-b dark:border-gray-600 sticky top-0 z-10 shadow-sm">
-                                <tr><th className="p-3 w-16 text-center border-r dark:border-gray-600 align-top">N.</th><th className="p-3 w-24 border-r dark:border-gray-600 align-top">Data</th><th className="p-3 w-16 text-center border-r dark:border-gray-600 align-top text-indigo-600">Num. ord.</th><th className="p-3 w-32 border-r dark:border-gray-600 align-top">WBS</th><th className="p-3 w-32 border-r dark:border-gray-600 align-top">Codice</th><th className="p-3 border-r dark:border-gray-600 align-top">Descrizione & Note</th><th className="p-3 w-12 text-center border-r dark:border-gray-600 bg-gray-50 align-top">U.M.</th><th className="p-3 w-24 text-right bg-indigo-50 align-top">Quantità</th></tr>
+                            <thead className="bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 font-bold border-b dark:border-gray-600 sticky top-0 z-10 shadow-xs">
+                                <tr><th className="p-2.5 w-14 text-center border-r dark:border-gray-600 align-top">N.</th><th className="p-2.5 w-24 border-r dark:border-gray-600 align-top">Data</th><th className="p-2.5 w-16 text-center border-r dark:border-gray-600 align-top text-indigo-600">Num. ord.</th><th className="p-2.5 w-32 border-r dark:border-gray-600 align-top">WBS</th><th className="p-2.5 w-32 border-r dark:border-gray-600 align-top">Codice</th><th className="p-2.5 border-r dark:border-gray-600 align-top">Descrizione & Note</th><th className="p-2.5 w-12 text-center border-r dark:border-gray-600 bg-gray-50 dark:bg-gray-700 align-top">U.M.</th><th className="p-2.5 w-24 text-right bg-indigo-50 dark:bg-indigo-900/30 align-top">Quantità</th></tr>
                             </thead>
                             <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
                                 {filteredLibretto.filter(applyFilters).map((entry) => (
                                     <tr key={entry.id} className={`hover:bg-gray-50 dark:hover:bg-gray-700/50 ${entry.accountingType === 'body' ? 'bg-purple-50/50' : ''}`}>
-                                        <td className="p-3 text-center border-r dark:border-gray-600 bg-gray-50/50 align-top">{entry.progressiveIndex}</td>
-                                        <td className="p-3 border-r dark:border-gray-600 align-top">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
-                                        <td className="p-3 border-r dark:border-gray-600 align-top text-center font-bold text-indigo-700">{entry.originalIndex || '-'}</td>
-                                        <td className="p-3 border-r dark:border-gray-600 align-top text-xs uppercase font-semibold">{entry.groupName}</td>
-                                        <td className="p-3 border-r dark:border-gray-600 align-top font-mono text-xs">{entry.articleCode}</td>
-                                        <td className="p-3 border-r dark:border-gray-600"><div className="text-xs mb-1">{entry.description}</div><div className="italic text-indigo-700">{entry.measurementNote || '-'}</div></td>
-                                        <td className="p-3 text-center border-r dark:border-gray-600">{entry.unit}</td>
-                                        <td className="p-3 text-right font-bold font-mono bg-indigo-50/30">{entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity)}</td>
+                                        <td className="p-2.5 text-center border-r dark:border-gray-600 bg-gray-50/50 dark:bg-gray-800 align-top">{entry.progressiveIndex}</td>
+                                        <td className="p-2.5 border-r dark:border-gray-600 align-top">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
+                                        <td className="p-2.5 border-r dark:border-gray-600 align-top text-center font-bold text-indigo-700 dark:text-indigo-400">{entry.originalIndex || '-'}</td>
+                                        <td className="p-2.5 border-r dark:border-gray-600 align-top text-xs uppercase font-semibold">{entry.groupName}</td>
+                                        <td className="p-2.5 border-r dark:border-gray-600 align-top font-mono text-xs">{entry.articleCode}</td>
+                                        <td className="p-2.5 border-r dark:border-gray-600"><div className="text-xs mb-0.5">{entry.description}</div><div className="italic text-indigo-700 dark:text-indigo-400">{entry.measurementNote || '-'}</div></td>
+                                        <td className="p-2.5 text-center border-r dark:border-gray-600">{entry.unit}</td>
+                                        <td className="p-2.5 text-right font-bold font-mono bg-indigo-50/30 dark:bg-indigo-900/10">{entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity)}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -881,40 +907,29 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             )}
             
             {activeTab === 'register' && (
-                <div className="flex-grow p-4 md:p-6 overflow-hidden flex flex-col">
-                    <div className="mb-4 flex justify-between items-end">
-                        <div>
-                            <h3 className="text-lg font-bold text-gray-800 dark:text-white uppercase tracking-tight">Registro di Contabilità</h3>
-                            <p className="text-xs font-bold text-indigo-600 uppercase">
-                                Situazione cumulativa al {format(parseISO(salReferenceDate), 'dd/MM/yyyy')}
-                            </p>
-                        </div>
-                        <div className="text-right">
-                            <span className="text-[10px] font-black text-gray-400 uppercase">Documento Fiscale - Registro Cronologico</span>
-                        </div>
-                    </div>
-                    <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-grow overflow-auto">
+                <div className="flex-grow p-2 overflow-hidden flex flex-col min-h-0">
+                    <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-xs border border-gray-200 dark:border-gray-700 flex-grow overflow-auto min-h-0">
                         <table className="w-full text-sm text-left text-gray-600 dark:text-gray-300 border-collapse">
-                        <thead className="text-xs text-gray-700 uppercase bg-gray-100 sticky top-0 z-10">
-                            <tr><th className="px-4 py-3 w-20 text-center border-r">Rif. M.</th><th className="px-4 py-3 w-24">Data</th><th className="px-4 py-3 w-20 text-center border-r">Num. ord.</th><th className="px-4 py-3 w-32">WBS</th><th className="px-4 py-3">Descrizione</th><th className="px-4 py-3 w-16 text-center">U.M.</th><th className="px-4 py-3 text-right w-24">Q.tà</th><th className="px-4 py-3 text-right w-24">Prezzo</th><th className="px-4 py-3 text-right w-32 font-bold">Importo</th></tr>
+                        <thead className="text-xs text-gray-700 dark:text-gray-200 uppercase bg-gray-100 dark:bg-gray-700 sticky top-0 z-10 shadow-xs">
+                            <tr><th className="px-3 py-2.5 w-16 text-center border-r dark:border-gray-600">Rif. M.</th><th className="px-3 py-2.5 w-24">Data</th><th className="px-3 py-2.5 w-20 text-center border-r dark:border-gray-600">Num. ord.</th><th className="px-3 py-2.5 w-32">WBS</th><th className="px-3 py-2.5">Descrizione</th><th className="px-3 py-2.5 w-16 text-center">U.M.</th><th className="px-3 py-2.5 text-right w-24">Q.tà</th><th className="px-3 py-2.5 text-right w-24">Prezzo</th><th className="px-3 py-2.5 text-right w-32 font-bold">Importo</th></tr>
                         </thead>
-                        <tbody className="divide-y divide-gray-100">
+                        <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
                             {filteredRegistry.filter(applyFilters).map((entry, idx) => {
                                 const isCurrentPeriod = entry.date.localeCompare(previousSalDate) > 0;
                                 return (
-                                    <tr key={idx} className={`hover:bg-gray-50 ${entry.isSecurityCost ? 'bg-green-50' : entry.accountingType === 'body' ? 'bg-purple-50/50' : ''} ${isCurrentPeriod ? 'border-l-4 border-l-indigo-500' : 'opacity-75'}`}>
-                                        <td className="px-4 py-2 text-center font-bold border-r">{entry.progressiveIndex}</td>
-                                        <td className="px-4 py-2">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
-                                        <td className="px-4 py-2 text-center font-bold text-indigo-700 border-r">{entry.originalIndex || '-'}</td>
-                                        <td className="px-4 py-2 text-xs uppercase font-bold">{entry.groupName}</td>
-                                        <td className="px-4 py-2 truncate max-w-md">
+                                    <tr key={idx} className={`hover:bg-gray-50 dark:hover:bg-gray-700/40 ${entry.isSecurityCost ? 'bg-green-50 dark:bg-green-900/20' : entry.accountingType === 'body' ? 'bg-purple-50/50 dark:bg-purple-900/20' : ''} ${isCurrentPeriod ? 'border-l-4 border-l-indigo-500' : 'opacity-75'}`}>
+                                        <td className="px-3 py-2 text-center font-bold border-r dark:border-gray-600">{entry.progressiveIndex}</td>
+                                        <td className="px-3 py-2">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
+                                        <td className="px-3 py-2 text-center font-bold text-indigo-700 dark:text-indigo-400 border-r dark:border-gray-600">{entry.originalIndex || '-'}</td>
+                                        <td className="px-3 py-2 text-xs uppercase font-bold">{entry.groupName}</td>
+                                        <td className="px-3 py-2 truncate max-w-md">
                                             {entry.description}
                                             {isCurrentPeriod && <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-700 uppercase tracking-tighter">Nuovo</span>}
                                         </td>
-                                        <td className="px-4 py-2 text-center">{entry.unit}</td>
-                                        <td className="px-4 py-2 text-right">{entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity)}</td>
-                                        <td className="px-4 py-2 text-right">{currencyFormatter.format(entry.unitPrice)}</td>
-                                        <td className="px-4 py-2 text-right font-bold">{currencyFormatter.format(entry.debit)}</td>
+                                        <td className="px-3 py-2 text-center">{entry.unit}</td>
+                                        <td className="px-3 py-2 text-right">{entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity)}</td>
+                                        <td className="px-3 py-2 text-right">{currencyFormatter.format(entry.unitPrice)}</td>
+                                        <td className="px-3 py-2 text-right font-bold">{currencyFormatter.format(entry.debit)}</td>
                                     </tr>
                                 );
                             })}
@@ -925,47 +940,36 @@ const AccountingView: React.FC<AccountingViewProps> = ({
         )}
 
             {activeTab === 'summary' && (
-                <div className="flex-grow p-4 md:p-6 overflow-hidden flex flex-col">
-                    <div className="mb-4 flex justify-between items-end">
-                        <div>
-                            <h3 className="text-lg font-bold text-gray-800 dark:text-white uppercase tracking-tight">Sommario del Registro</h3>
-                            <p className="text-xs font-bold text-indigo-600 uppercase">
-                                Riepilogo per articolo - SAL N. {sals.find(s => s.id === activeSalId)?.number || 'Bozza'}
-                            </p>
-                        </div>
-                        <div className="text-right">
-                            <span className="text-[10px] font-black text-gray-400 uppercase">Analisi Avanzamento per Categoria</span>
-                        </div>
-                    </div>
-                    <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-sm border border-gray-200 dark:border-gray-700 flex-grow overflow-auto">
+                <div className="flex-grow p-2 overflow-hidden flex flex-col min-h-0">
+                    <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-xs border border-gray-200 dark:border-gray-700 flex-grow overflow-auto min-h-0">
                         <table className="w-full text-sm text-left text-gray-600 dark:text-gray-300 border-collapse">
-                        <thead className="text-xs text-gray-700 uppercase bg-gray-100 sticky top-0 z-10 shadow-sm">
+                        <thead className="text-xs text-gray-700 dark:text-gray-200 uppercase bg-gray-100 dark:bg-gray-700 sticky top-0 z-10 shadow-xs">
                             <tr>
-                                <th className="px-4 py-3 border-r">Codice Articolo</th>
-                                <th className="px-4 py-3 border-r">WBS</th>
-                                <th className="px-4 py-3">Descrizione</th>
-                                <th className="px-4 py-3 w-16 text-center">U.M.</th>
-                                <th className="px-4 py-3 text-right w-24">Prezzo</th>
-                                <th className="px-4 py-3 text-right w-24 bg-gray-50">Q.tà Prec.</th>
-                                <th className="px-4 py-3 text-right w-24 bg-indigo-50">Q.tà Att.</th>
-                                <th className="px-4 py-3 text-right w-24 font-bold">Q.tà Tot.</th>
-                                <th className="px-4 py-3 text-right w-32 font-bold">Importo</th>
-                                <th className="px-4 py-3 text-center w-28">%</th>
+                                <th className="px-3 py-2.5 border-r dark:border-gray-600">Codice Articolo</th>
+                                <th className="px-3 py-2.5 border-r dark:border-gray-600">WBS</th>
+                                <th className="px-3 py-2.5">Descrizione</th>
+                                <th className="px-3 py-2.5 w-16 text-center">U.M.</th>
+                                <th className="px-3 py-2.5 text-right w-24">Prezzo</th>
+                                <th className="px-3 py-2.5 text-right w-24 bg-gray-50 dark:bg-gray-700">Q.tà Prec.</th>
+                                <th className="px-3 py-2.5 text-right w-24 bg-indigo-50 dark:bg-indigo-900/30">Q.tà Att.</th>
+                                <th className="px-3 py-2.5 text-right w-24 font-bold">Q.tà Tot.</th>
+                                <th className="px-3 py-2.5 text-right w-32 font-bold">Importo</th>
+                                <th className="px-3 py-2.5 text-center w-28">%</th>
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-gray-100">
+                        <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
                             {accountingSummary.filter(applyFilters).map((item, idx) => (
                                 <tr key={idx} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
-                                    <td className="px-4 py-2 font-mono text-xs border-r dark:border-gray-700">{item.articleCode}</td>
-                                    <td className="px-4 py-2 text-xs uppercase font-bold border-r dark:border-gray-700">{item.wbsName}</td>
-                                    <td className="px-4 py-2 truncate max-w-xs">{item.description}</td>
-                                    <td className="px-4 py-2 text-center">{item.unit}</td>
-                                    <td className="px-4 py-2 text-right">{currencyFormatter.format(item.unitPrice)}</td>
-                                    <td className="px-4 py-2 text-right bg-gray-50">{item.accountingType === 'body' ? percentFormatter.format(item.previousQuantity) : numberFormatter.format(item.previousQuantity)}</td>
-                                    <td className="px-4 py-2 text-right bg-indigo-50 font-semibold">{item.accountingType === 'body' ? percentFormatter.format(item.currentQuantity) : numberFormatter.format(item.currentQuantity)}</td>
-                                    <td className="px-4 py-2 text-right font-bold">{item.accountingType === 'body' ? percentFormatter.format(item.totalQuantity) : numberFormatter.format(item.totalQuantity)}</td>
-                                    <td className="px-4 py-2 text-right font-bold">{currencyFormatter.format(item.totalAmount)}</td>
-                                    <td className="px-4 py-2 text-center">
+                                    <td className="px-3 py-2 font-mono text-xs border-r dark:border-gray-700">{item.articleCode}</td>
+                                    <td className="px-3 py-2 text-xs uppercase font-bold border-r dark:border-gray-700">{item.wbsName}</td>
+                                    <td className="px-3 py-2 truncate max-w-xs">{item.description}</td>
+                                    <td className="px-3 py-2 text-center">{item.unit}</td>
+                                    <td className="px-3 py-2 text-right">{currencyFormatter.format(item.unitPrice)}</td>
+                                    <td className="px-3 py-2 text-right bg-gray-50 dark:bg-gray-800">{item.accountingType === 'body' ? percentFormatter.format(item.previousQuantity) : numberFormatter.format(item.previousQuantity)}</td>
+                                    <td className="px-3 py-2 text-right bg-indigo-50 dark:bg-indigo-900/20 font-semibold">{item.accountingType === 'body' ? percentFormatter.format(item.currentQuantity) : numberFormatter.format(item.currentQuantity)}</td>
+                                    <td className="px-3 py-2 text-right font-bold">{item.accountingType === 'body' ? percentFormatter.format(item.totalQuantity) : numberFormatter.format(item.totalQuantity)}</td>
+                                    <td className="px-3 py-2 text-right font-bold">{currencyFormatter.format(item.totalAmount)}</td>
+                                    <td className="px-3 py-2 text-center">
                                         <div className="flex items-center gap-2">
                                             <div className="flex-1 h-1.5 bg-gray-200 dark:bg-gray-600 rounded-full overflow-hidden">
                                                 <div className="h-full bg-green-500" style={{ width: `${Math.min(100, item.progressPercent)}%` }}></div>
@@ -982,8 +986,8 @@ const AccountingView: React.FC<AccountingViewProps> = ({
         )}
 
             {activeTab === 'payment_cert' && (
-                <div className="flex-grow overflow-auto bg-gray-100 dark:bg-gray-900 p-4 md:p-8 flex justify-center">
-                    <div ref={certificateRef} className="bg-white text-gray-900 w-[210mm] min-h-[297mm] p-[20mm] shadow-2xl text-[12px] relative" style={{ fontFamily: "'Times New Roman', Times, serif" }}>
+                <div className="flex-grow overflow-auto bg-gray-100 dark:bg-gray-900 p-3 md:p-5 flex justify-center min-h-0">
+                    <div ref={certificateRef} className="bg-white text-gray-900 w-[210mm] min-h-[297mm] p-[20mm] shadow-2xl text-[12px] relative h-fit" style={{ fontFamily: "'Times New Roman', Times, serif" }}>
                         <div className="text-center mb-8 border-b-2 border-black pb-4"><h1 className="text-xl font-bold uppercase tracking-widest mb-1">Certificato di Pagamento</h1><h2 className="text-lg">Rata di Acconto N. {sals.find(s => s.id === activeSalId)?.number || '(Bozza)'}</h2></div>
                         <table className="w-full mb-8 border-collapse border border-black text-[12px]">
                             <thead><tr className="bg-gray-200 uppercase"><th className="border border-black p-2 text-left font-bold">Descrizione</th><th className="border border-black p-2 text-right w-32 font-bold">Importi</th></tr></thead>

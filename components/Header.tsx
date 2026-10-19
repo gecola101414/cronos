@@ -100,7 +100,7 @@ const Header: React.FC<HeaderProps> = ({
   const formattedTime = new Date(sessionSecondsRemaining * 1000).toISOString().substr(14, 5);
 
   return (
-    <header className="bg-white dark:bg-gray-800 shadow-sm sticky top-0 z-30 no-print border-b border-gray-200 dark:border-gray-700 h-20 flex-shrink-0">
+    <header className="bg-white dark:bg-gray-800 shadow-sm sticky top-0 z-30 no-print border-b border-gray-200 dark:border-gray-700 h-16 flex-shrink-0">
       <div className="max-w-7xl mx-auto h-full px-4 sm:px-6 lg:px-8 flex justify-between items-center">
         <div className="flex items-center space-x-4 flex-wrap">
             <div className="mr-4 flex flex-col justify-center group relative">

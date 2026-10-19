@@ -45,6 +45,9 @@ export interface Measurement {
   height?: number;
   _isCommitted?: boolean;
   sourceBoqId?: string; // ID della riga originale nel computo per evitare duplicati
+  isReversed?: boolean; // Indica che la misurazione è stata stornata
+  reversedById?: string; // ID della misurazione di storno associata
+  reversesMeasurementId?: string; // ID della misurazione originale che questa riga storna
 }
 
 export type AccountingType = 'measure' | 'body'; // 'measure' = A Misura, 'body' = A Corpo
