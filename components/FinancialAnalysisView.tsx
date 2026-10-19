@@ -1,7 +1,7 @@
 
 import React, { useMemo, useState } from 'react';
 import { ProjectDocument, Expense } from '../types';
-import { format, parseISO, differenceInDays, addDays, startOfMonth, endOfMonth, eachMonthOfInterval, isSameMonth } from 'date-fns';
+import { format, parseISO, differenceInDays, addDays, startOfMonth, endOfMonth, eachMonthOfInterval, isSameMonth, isValid } from 'date-fns';
 import { it } from 'date-fns/locale/it';
 
 interface FinancialAnalysisViewProps {

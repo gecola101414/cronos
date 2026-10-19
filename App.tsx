@@ -490,7 +490,13 @@ const App: React.FC = () => {
 
   const handleSaveToDrive = async () => { alert("Google Drive non disponibile in Intranet."); };
 
-  const handleOpenTaskModal = (group: WorkGroup) => { const doc = projectDocuments.find(d => d.workGroups.some(wg => wg.id === group.id)); setIsCurrentTaskLocked(doc?.isLocked ?? false); setSelectedTask(group); };
+  const [taskModalInitialTab, setTaskModalInitialTab] = useState<'measurements' | 'planning'>('measurements');
+  const handleOpenTaskModal = (group: WorkGroup, initialTab: 'measurements' | 'planning' = 'measurements') => { 
+    const doc = projectDocuments.find(d => d.workGroups.some(wg => wg.id === group.id)); 
+    setIsCurrentTaskLocked(doc?.isLocked ?? false); 
+    setTaskModalInitialTab(initialTab);
+    setSelectedTask(group); 
+  };
   const handleAddExpense = useCallback((exp: any) => setExpenses(prev => [...prev, { ...exp, id: crypto.randomUUID(), insertionDate: new Date().toISOString() }].sort((a, b) => new Date(b.insertionDate).getTime() - new Date(a.insertionDate).getTime())), []);
   const handleUpdateExpense = useCallback((updated: Expense) => setExpenses(prev => prev.map(e => e.id === updated.id ? updated : e)), []);
   const handleDeleteExpense = useCallback((id: string) => setExpenses(prev => prev.filter(e => e.id !== id)), []);
@@ -551,14 +557,33 @@ const App: React.FC = () => {
     }
 
     switch(activeView) {
-      case 'dashboard': return <Dashboard projectSummary={projectSummaryStats} onViewChange={setActiveView} documentCount={projectDocuments.length} onImport={handleCreateProject} isProjectLoaded={isProjectLoaded} isDemoMode={isDemoMode} />;
-      case 'timeline': return <GanttChart workGroups={projectDocuments.flatMap(d => d.workGroups)} dependencies={projectDocuments.flatMap(d => d.dependencies || [])} expenses={expenses} setWorkGroups={handleWorkGroupsUpdate} onDependenciesChange={handleDependenciesChange} isViewOnly={effectiveIsViewOnly} onBarDoubleClick={handleOpenTaskModal} isEconomicViewVisible={isEconomicViewVisible} onToggleEconomicView={() => setIsEconomicViewVisible(prev => !prev)} onUpdateExpenseSupplyDate={handleUpdateExpenseSupplyDate} projectName={projectName} documents={projectDocuments} salMarkers={projectDocuments[0]?.salMarkers ?? []} onSalMarkersChange={handleSetSalMarkers} onAddVariant={handleAddVariant} />;
-      case 'summary': return <ComputoDetailView documents={projectDocuments.filter(d => d.isVisible ?? true)} onToggleGroupSecurity={handleToggleGroupSecurity} />;
+      case 'timeline': return (
+        <GanttChart 
+          workGroups={projectDocuments.flatMap(d => d.workGroups)} 
+          dependencies={projectDocuments.flatMap(d => d.dependencies || [])} 
+          expenses={expenses} 
+          setWorkGroups={handleWorkGroupsUpdate} 
+          onDependenciesChange={handleDependenciesChange} 
+          isViewOnly={effectiveIsViewOnly} 
+          onBarDoubleClick={(group) => handleOpenTaskModal(group, 'measurements')} 
+          onOpenSettings={(group) => handleOpenTaskModal(group, 'planning')}
+          onOpenMeasurements={(group) => handleOpenTaskModal(group, 'measurements')}
+          isEconomicViewVisible={isEconomicViewVisible} 
+          onToggleEconomicView={() => setIsEconomicViewVisible(prev => !prev)} 
+          onUpdateExpenseSupplyDate={handleUpdateExpenseSupplyDate} 
+          projectName={projectName} 
+          documents={projectDocuments} 
+          salMarkers={projectDocuments[0]?.salMarkers ?? []} 
+          onSalMarkersChange={handleSetSalMarkers} 
+          onAddVariant={handleAddVariant} 
+        />
+      );
+      case 'summary': return <ComputoDetailView documents={projectDocuments.filter(d => d.isVisible ?? true)} />;
       case 'measurements': return <MeasurementsView documents={projectDocuments.filter(d => d.isVisible ?? true)} projectName={projectName} teams={teams} workers={workers} />;
       case 'costs': return <CostsView expenses={expenses} workGroups={projectDocuments.flatMap(d => d.workGroups)} onAddExpense={handleAddExpense} onUpdateExpense={handleUpdateExpense} onDeleteExpense={handleDeleteExpense} isViewOnly={effectiveIsViewOnly} earnedValue={projectSummaryStats?.earnedValue ?? 0} />;
       case 'teams': return <TeamManagementView teams={teams} workers={workers} onAddTeam={handleAddTeam} onUpdateTeam={handleUpdateTeam} onDeleteTeam={handleDeleteTeam} onAddWorker={handleAddWorker} onUpdateWorker={handleUpdateWorker} onDeleteWorker={handleDeleteWorker} isViewOnly={effectiveIsViewOnly} />;
       case 'reports': return <ReportsView documents={projectDocuments} teams={teams} workers={workers} />;
-      case 'accounting': return <AccountingView documents={projectDocuments} projectName={projectName} contractConfig={contractConfig} onUpdateContractConfig={setContractConfig} sals={sals} onUpdateSals={setSals} onToggleGroupSecurity={handleToggleGroupSecurity} />;
+      case 'accounting': return <AccountingView documents={projectDocuments} projectName={projectName} contractConfig={contractConfig} onUpdateContractConfig={setContractConfig} sals={sals} onUpdateSals={setSals} />;
       case 'help': return <UserManualView />;
       default: return null;
     }
@@ -628,6 +653,7 @@ const App: React.FC = () => {
         isLocked={isCurrentTaskLocked} 
         teams={teams} 
         workers={workers} 
+        initialTab={taskModalInitialTab}
       />
       <ShareModal isOpen={isShareModalOpen} onClose={() => setIsShareModalOpen(false)} link={shareableLink} />
       {isAdmin && <LicenseGeneratorModal isOpen={isGeneratorModalOpen} onClose={() => setIsGeneratorModalOpen(false)} />}

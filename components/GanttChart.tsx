@@ -27,8 +27,9 @@ interface GanttChartProps {
   expenses: Expense[];
   setWorkGroups: (updater: React.SetStateAction<WorkGroup[]>, updatedGroupId?: string) => void;
   onDependenciesChange: (updater: (prev: Dependency[]) => Dependency[]) => void;
-  isViewOnly?: boolean;
   onBarDoubleClick: (group: WorkGroup) => void;
+  onOpenSettings?: (group: WorkGroup) => void;
+  onOpenMeasurements?: (group: WorkGroup) => void;
   isEconomicViewVisible: boolean;
   onToggleEconomicView: () => void;
   onUpdateExpenseSupplyDate?: (expenseId: string, newDate: string) => void;
@@ -87,7 +88,7 @@ const calculateEndDateWithHolidays = (startDate: Date, workingDays: number): Dat
 
 const GanttChart: React.FC<GanttChartProps> = ({ 
     workGroups, dependencies, expenses, setWorkGroups, onDependenciesChange, 
-    isViewOnly, onBarDoubleClick, isEconomicViewVisible, onToggleEconomicView, 
+    isViewOnly, onBarDoubleClick, onOpenSettings, onOpenMeasurements, isEconomicViewVisible, onToggleEconomicView, 
     onUpdateExpenseSupplyDate, projectName, documents, salMarkers, onSalMarkersChange,
     onAddVariant
 }) => {
@@ -499,18 +500,41 @@ const GanttChart: React.FC<GanttChartProps> = ({
                         {enrichedWorkGroups.map((group, idx) => {
                             const variantNum = getGroupVariantInfo(group.id);
                             return (
-                            <div key={group.id} className={`h-[56px] flex-shrink-0 border-b border-gray-50/50 dark:border-gray-700/30 flex flex-col justify-center px-4 cursor-pointer transition-colors relative ${selectedGroupId === group.id ? 'bg-indigo-50 dark:bg-indigo-900/30 ring-inset ring-2 ring-indigo-500' : 'hover:bg-gray-50 dark:hover:bg-gray-700/50'}`} onClick={() => { centerTaskInView(group); }}>
+                            <div key={group.id} className={`h-[56px] flex-shrink-0 border-b border-gray-50/50 dark:border-gray-700/30 flex flex-col justify-center px-4 cursor-pointer transition-colors relative ${selectedGroupId === group.id ? 'bg-indigo-50 dark:bg-indigo-900/30 ring-inset ring-2 ring-indigo-500' : 'hover:bg-gray-50 dark:hover:bg-gray-700/50'}`} onClick={() => { centerTaskInView(group); if (onOpenMeasurements) onOpenMeasurements(group); else onBarDoubleClick(group); }}>
                                 {variantNum && (
                                     <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-orange-500 shadow-[2px_0_4px_rgba(249,115,22,0.3)]" title={`Variante n. ${variantNum}`} />
                                 )}
                                 <div className="flex justify-between items-center mb-0.5">
-                                    <div className="flex items-center gap-2 overflow-hidden">
-                                        {!isViewOnly && (<button onClick={(e) => { e.stopPropagation(); onBarDoubleClick(group); }} className="p-1 hover:bg-indigo-100 rounded text-gray-400 hover:text-indigo-600 transition-colors"><svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" /></svg></button>)}
-                                        <span className="text-[11px] font-bold text-gray-800 dark:text-white truncate uppercase max-w-[160px]">
+                                    <div className="flex items-center gap-1.5 overflow-hidden">
+                                        {!isViewOnly && (
+                                            <button 
+                                                onClick={(e) => { 
+                                                    e.stopPropagation(); 
+                                                    if (onOpenSettings) onOpenSettings(group); 
+                                                    else onBarDoubleClick(group); 
+                                                }} 
+                                                className="p-1 hover:bg-indigo-100 dark:hover:bg-gray-700 rounded text-gray-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+                                                title="Impostazioni Gruppo (Data inizio, A Misura/A Corpo, Sicurezza)"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                                                    <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+                                                </svg>
+                                            </button>
+                                        )}
+                                        <span className="text-[11px] font-bold text-gray-800 dark:text-white truncate uppercase max-w-[125px]">
                                             {variantNum ? `VAR ${variantNum}` : `WBS ${idx + 1}`} - {group.name}
                                         </span>
+                                        {group.isSecurityCost ? (
+                                            <span className="text-[8px] font-black bg-orange-100 text-orange-700 dark:bg-orange-900/60 dark:text-orange-300 px-1 py-0.5 rounded" title="Sicurezza">SIC</span>
+                                        ) : group.accountingType === 'body' ? (
+                                            <span className="text-[8px] font-black bg-purple-100 text-purple-700 dark:bg-purple-900/60 dark:text-purple-300 px-1 py-0.5 rounded" title="A Corpo">CORPO</span>
+                                        ) : (
+                                            <span className="text-[8px] font-black bg-blue-100 text-blue-700 dark:bg-blue-900/60 dark:text-blue-300 px-1 py-0.5 rounded" title="A Misura">MIS</span>
+                                        )}
                                     </div>
-                                    <span className="text-[10px] font-black bg-indigo-100 dark:bg-indigo-900 text-indigo-600 dark:text-indigo-300 px-1.5 rounded">{group.duration}gg</span>
+                                    <div className="flex items-center gap-1">
+                                        <span className="text-[10px] font-black bg-indigo-100 dark:bg-indigo-900 text-indigo-600 dark:text-indigo-300 px-1.5 rounded">{group.duration}gg</span>
+                                    </div>
                                 </div>
                                 <div className="flex justify-between items-center">
                                     <span className="text-[10px] font-mono font-bold text-blue-600">{currencyFormatter.format(group.value)}</span>
@@ -556,7 +580,7 @@ const GanttChart: React.FC<GanttChartProps> = ({
                         return (
                             <div key={group.id} className={`absolute border-b border-gray-50/50 dark:border-gray-700/30 transition-colors ${selectedGroupId === group.id ? 'bg-indigo-50/20' : ''}`} style={{top: index * ROW_HEIGHT, height: ROW_HEIGHT, left:0, width:'100%'}}>
                                 {/* FIX: Correctly wrap scale class and z-index in strings within the ternary expression to resolve scope and find name errors */}
-                                <div className={`absolute h-8 flex items-center my-3 group/task transition-all ${selectedGroupId === group.id ? 'scale-[1.02] z-30' : 'z-10'}`} style={{ left, width }} onDoubleClick={(e) => { e.stopPropagation(); onBarDoubleClick(group); }}>
+                                <div className={`absolute h-8 flex items-center my-3 group/task transition-all ${selectedGroupId === group.id ? 'scale-[1.02] z-30' : 'z-10'}`} style={{ left, width }} onDoubleClick={(e) => { e.stopPropagation(); if (onOpenMeasurements) onOpenMeasurements(group); else onBarDoubleClick(group); }}>
                                     <div className={`relative flex items-center rounded-lg shadow-sm w-full h-full overflow-hidden ${!isViewOnly && !group.officialStartDate ? 'cursor-pointer' : 'cursor-default'}`} style={{ backgroundColor: variantNum ? '#F97316' : group.color }} onMouseDown={(e) => handleTaskMouseDown(e, group.id, 'move')}>
                                         <div className="absolute left-0 top-0 h-full bg-black/20" style={{ width: `${group.progress}%` }} />
                                         

@@ -3,6 +3,8 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { ProjectDocument, ContractConfig, SalEntry, WorkGroup } from '../types';
 import { format, parseISO, startOfDay, isAfter, endOfDay, isValid } from 'date-fns';
 import { it } from 'date-fns/locale/it';
+import { EuropeanDateInput } from './EuropeanDateInput';
+
 
 declare const jspdf: any;
 declare const html2canvas: any;
@@ -103,7 +105,16 @@ const DateFilterPopover: React.FC<{ dateFrom: string, dateTo: string, onChange: 
     useOnClickOutside(ref, onClose);
     return (
         <div ref={ref} className="absolute top-full mt-1 left-0 z-50 w-64 bg-white dark:bg-gray-800 shadow-xl rounded-lg border border-gray-200 dark:border-gray-700 p-3 animate-fade-in">
-            <div className="space-y-2"><div><label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Dal:</label><input type="date" value={dateFrom} onChange={e => onChange(e.target.value, dateTo)} className="w-full p-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-700 focus:ring-2 focus:ring-indigo-500 outline-none" /></div><div><label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Al:</label><input type="date" value={dateTo} onChange={e => onChange(dateFrom, e.target.value)} className="w-full p-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-700 focus:ring-2 focus:ring-indigo-500 outline-none" /></div></div>
+            <div className="space-y-2">
+                <div>
+                    <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Dal:</label>
+                    <EuropeanDateInput value={dateFrom} onChange={val => onChange(val, dateTo)} className="w-full p-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-700 focus:ring-2 focus:ring-indigo-500 outline-none" />
+                </div>
+                <div>
+                    <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Al:</label>
+                    <EuropeanDateInput value={dateTo} onChange={val => onChange(dateFrom, val)} className="w-full p-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-gray-50 dark:bg-gray-700 focus:ring-2 focus:ring-indigo-500 outline-none" />
+                </div>
+            </div>
             <div className="flex justify-end mt-3 pt-2 border-t border-gray-100 dark:border-gray-700"><button onClick={() => { onChange('', ''); onClose(); }} className="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 mr-2">Pulisci</button><button onClick={onClose} className="text-xs bg-indigo-600 text-white px-2 py-1 rounded hover:bg-indigo-700">Applica</button></div>
         </div>
     );
@@ -758,7 +769,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                 <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Impresa Appaltatrice</label><input type="text" value={localConfig.contractorName || ''} onChange={e => setLocalConfig({...localConfig, contractorName: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" /></div>
                                 <div className="grid grid-cols-2 gap-4">
                                     <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">CIG/CUP</label><input type="text" value={localConfig.contractCode || ''} onChange={e => setLocalConfig({...localConfig, contractCode: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" /></div>
-                                    <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Data Contratto</label><input type="date" value={localConfig.contractDate || ''} onChange={e => setLocalConfig({...localConfig, contractDate: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" /></div>
+                                    <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Data Contratto</label><EuropeanDateInput value={localConfig.contractDate || ''} onChange={val => setLocalConfig({...localConfig, contractDate: val})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" /></div>
                                 </div>
                             </div>
                         </div>

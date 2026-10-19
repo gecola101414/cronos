@@ -3,6 +3,7 @@ import React, { useState, useMemo } from 'react';
 import { ProjectDocument, Team, Worker } from '../types';
 import { format, parseISO, startOfWeek, endOfWeek, eachDayOfInterval, startOfMonth, endOfMonth, isWithinInterval } from 'date-fns';
 import { it } from 'date-fns/locale/it';
+import { EuropeanDateInput } from './EuropeanDateInput';
 
 const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
 const percentFormatter = new Intl.NumberFormat('it-IT', { style: 'percent', minimumFractionDigits: 1 });
@@ -162,10 +163,10 @@ const ReportsView: React.FC<ReportsViewProps> = ({ documents, teams, workers }) 
                 </div>
                 <div className="flex items-center space-x-3 w-full md:w-auto">
                     {reportType === 'daily' && (
-                        <input type="date" value={selectedDate} onChange={e => setSelectedDate(e.target.value)} className="px-3 py-2 border rounded-md dark:bg-gray-700 dark:border-gray-600 w-full md:w-auto" />
+                        <EuropeanDateInput value={selectedDate} onChange={val => setSelectedDate(val)} className="px-3 py-2 border rounded-md dark:bg-gray-700 dark:border-gray-600 w-full md:w-auto" />
                     )}
                     {reportType === 'weekly' && (
-                        <input type="date" value={selectedWeekDate} onChange={e => setSelectedWeekDate(e.target.value)} className="px-3 py-2 border rounded-md dark:bg-gray-700 dark:border-gray-600 w-full md:w-auto" />
+                        <EuropeanDateInput value={selectedWeekDate} onChange={val => setSelectedWeekDate(val)} className="px-3 py-2 border rounded-md dark:bg-gray-700 dark:border-gray-600 w-full md:w-auto" />
                     )}
                     {reportType === 'monthly' && (
                         <input type="month" value={selectedMonthDate} onChange={e => setSelectedMonthDate(e.target.value)} className="px-3 py-2 border rounded-md dark:bg-gray-700 dark:border-gray-600 w-full md:w-auto" />

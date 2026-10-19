@@ -1,7 +1,9 @@
-
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { WorkGroup, WorkItem, Measurement, Dependency, DependencyType, Team, Worker, Annotation, Variation, ProjectDocument } from '../types';
-import { format, parseISO, addDays, startOfDay, isAfter, parse, isBefore } from 'date-fns';
+import { format, parseISO, addDays, parse, isValid } from 'date-fns';
+
+import { EuropeanDateInput } from './EuropeanDateInput';
+
 
 interface TaskModalProps {
   isOpen: boolean;
@@ -16,6 +18,7 @@ interface TaskModalProps {
   isLocked?: boolean;
   teams: Team[];
   workers: Worker[];
+  initialTab?: 'measurements' | 'planning' | 'dependencies';
 }
 
 interface ExtendedMeasurement extends Measurement {
@@ -34,12 +37,29 @@ interface ExtendedWorkGroup extends Omit<WorkGroup, 'items'> {
 }
 
 interface MeasurementInputState {
+    date?: string;
     quantity: string;
     note: string;
     factor: string;
     length: string;
     width: string;
     height: string;
+    sourceBoqId?: string;
+}
+
+export interface SingleBoqMeasure {
+  id: string;
+  articleCode: string;
+  index: number;
+  description: string;
+  factor?: number;
+  length?: number;
+  width?: number;
+  height?: number;
+  expectedQuantity: number;
+  measuredQuantity: number;
+  missingToClose: number;
+  isClosed: boolean;
 }
 
 const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2 });
@@ -48,23 +68,84 @@ const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 
 const DAILY_RATE_PER_PERSON = 240;
 const ITALIAN_HOLIDAYS = ['01-01', '06-01', '25-04', '01-05', '02-06', '15-08', '01-11', '08-12', '25-12', '26-12'];
 
-const TaskModal: React.FC<TaskModalProps> = ({ isOpen, onClose, group, allWorkGroups, allDocuments, dependencies, setWorkGroups, onDependenciesChange, isViewOnly, isLocked, teams, workers }) => {
-  const [activeTab, setActiveTab] = useState('measurements');
+// Helper per ricavare la quantità di una riga di computo
+const getBoqRowQuantity = (l: any): number => {
+    if (l.quantity !== undefined && l.quantity !== null && l.quantity !== 0) return Number(l.quantity);
+    if (l.quantita !== undefined && l.quantita !== null && l.quantita !== 0) return Number(l.quantita);
+    if (l.total !== undefined && l.total !== null && l.total !== 0) return Number(l.total);
+    if (l.totale !== undefined && l.totale !== null && l.totale !== 0) return Number(l.totale);
+    const f = parseFloat(l.multiplier || l.factor || l.parti || 1) || 1;
+    const len = parseFloat(l.length || l.lunghezza || 1) || 1;
+    const w = parseFloat(l.width || l.larghezza || 1) || 1;
+    const h = parseFloat(l.height || l.altezza || l.profondita || l.peso || 1) || 1;
+    return f * len * w * h;
+};
+
+// Helper per estrarre tutte le singole misure di computo per ciascuna voce
+export const getSingleBoqMeasuresForItem = (item: ExtendedWorkItem): SingleBoqMeasure[] => {
+  const varTotal = (item.variations || []).reduce((acc, v) => v.type === 'increase' ? acc + v.quantity : acc - v.quantity, 0);
+  
+  if (item.originalMeasurements && item.originalMeasurements.length > 0) {
+    return item.originalMeasurements.map((b: any, bIdx: number) => {
+      const boqId = b.id || `boq_${item.articleCode}_${bIdx}`;
+      const boqDesc = b.description || b.note || b.designazioneLavori || `Misura #${bIdx + 1}`;
+      const expectedQty = Math.round(getBoqRowQuantity(b) * 1000) / 1000;
+      
+      const measuredQty = Math.round(((item.measurements || []).reduce((acc, m) => {
+        if (m.sourceBoqId === boqId || (!m.sourceBoqId && m.note && m.note.trim() === boqDesc.trim())) return acc + m.quantity;
+        return acc;
+      }, 0)) * 1000) / 1000;
+
+      const missingToClose = Math.max(0, Math.round((expectedQty - measuredQty) * 1000) / 1000);
+      const isClosed = measuredQty >= (expectedQty - 0.001);
+
+      return {
+        id: boqId,
+        articleCode: item.articleCode,
+        index: bIdx + 1,
+        description: boqDesc,
+        factor: b.multiplier || b.factor || b.parti,
+        length: b.length || b.lunghezza,
+        width: b.width || b.larghezza,
+        height: b.height || b.altezza || b.profondita || b.peso,
+        expectedQuantity: expectedQty,
+        measuredQuantity: measuredQty,
+        missingToClose,
+        isClosed
+      };
+    });
+  } else {
+    const expectedQty = Math.round((item.quantity + varTotal) * 1000) / 1000;
+    const measuredQty = Math.round(((item.measurements || []).reduce((acc, m) => acc + m.quantity, 0)) * 1000) / 1000;
+    const missingToClose = Math.max(0, Math.round((expectedQty - measuredQty) * 1000) / 1000);
+    const isClosed = measuredQty >= (expectedQty - 0.001);
+
+    return [{
+      id: `${item.articleCode}_main`,
+      articleCode: item.articleCode,
+      index: 1,
+      description: item.description || 'Misura integrale di computo',
+      expectedQuantity: expectedQty,
+      measuredQuantity: measuredQty,
+      missingToClose,
+      isClosed
+    }];
+  }
+};
+
+const TaskModal: React.FC<TaskModalProps> = ({ 
+  isOpen, onClose, group, allWorkGroups, allDocuments, dependencies, 
+  setWorkGroups, onDependenciesChange, isViewOnly, isLocked, teams, workers, initialTab = 'measurements' 
+}) => {
+  const [activeTab, setActiveTab] = useState<'measurements' | 'planning' | 'dependencies'>('measurements');
   const [activeGroup, setActiveGroup] = useState<ExtendedWorkGroup | null>(null);
   
-  const [stickyDate, setStickyDate] = useState(format(new Date(), 'yyyy-MM-dd'));
-  const [globalTeamId, setGlobalTeamId] = useState<string>('');
-  const [globalWorkerIds, setGlobalWorkerIds] = useState<string[]>([]);
-
   const [newMeasurements, setNewMeasurements] = useState<Record<string, MeasurementInputState>>({});
   const [deductionModes, setDeductionModes] = useState<Record<string, boolean>>({}); 
+  const [isCustomNoteMode, setIsCustomNoteMode] = useState<Record<string, boolean>>({});
   
   const [isDirty, setIsDirty] = useState(false);
   const [expandedVariations, setExpandedVariations] = useState<Set<string>>(new Set());
-  
-  const [activeBoqPickerItem, setActiveBoqPickerItem] = useState<string | null>(null);
-  const [selectedBoqIds, setSelectedBoqIds] = useState<Record<string, Set<string>>>({});
-  const [pickerCoords, setPickerCoords] = useState({ top: 0, left: 0 });
 
   const [newVariation, setNewVariation] = useState<{ number: string, quantity: string, type: 'increase' | 'decrease' }>({
       number: '', quantity: '', type: 'increase'
@@ -90,34 +171,53 @@ const TaskModal: React.FC<TaskModalProps> = ({ isOpen, onClose, group, allWorkGr
       return currentDate;
   };
 
-  const projectLatestMeasureDate = useMemo(() => {
-    let latest = '';
-    allWorkGroups.forEach(wg => {
-        wg.items.forEach(item => {
-            item.measurements?.forEach(m => {
-                if (!latest || m.date > latest) {
-                    latest = m.date;
-                }
-            });
-        });
-    });
-    return latest;
-  }, [allWorkGroups]);
+  // Lista delle voci di computo del progetto non ancora in questo gruppo
+  const availableComputoItems = useMemo(() => {
+    const map = new Map<string, {
+      articleCode: string;
+      description: string;
+      unit: string;
+      unitPrice: number;
+      quantity: number;
+      total: number;
+      originalIndex?: number;
+      originalMeasurements?: any[];
+      groupName: string;
+      docName: string;
+    }>();
 
-  const hasMeasurementsInGroup = useMemo(() => {
-    if (!activeGroup) return false;
-    return activeGroup.items.some(i => (i.measurements?.length || 0) > 0);
-  }, [activeGroup]);
+    allDocuments.forEach(doc => {
+      doc.workGroups.forEach(wg => {
+        wg.items.forEach(item => {
+          if (!activeGroup?.items.some(i => i.articleCode === item.articleCode)) {
+            if (!map.has(item.articleCode)) {
+              map.set(item.articleCode, {
+                articleCode: item.articleCode,
+                description: item.description,
+                unit: item.unit,
+                unitPrice: item.unitPrice,
+                quantity: item.quantity,
+                total: item.total,
+                originalIndex: item.originalIndex,
+                originalMeasurements: item.originalMeasurements,
+                groupName: wg.name,
+                docName: doc.fileName
+              });
+            }
+          }
+        });
+      });
+    });
+
+    return Array.from(map.values()).sort((a, b) => (a.originalIndex || 9999) - (b.originalIndex || 9999));
+  }, [allDocuments, activeGroup]);
 
   useEffect(() => {
     if (isOpen && group) {
-        if (!group.officialStartDate) {
-            setActiveTab('planning');
-        } else {
-            setActiveTab('measurements');
-        }
-
+        setActiveTab(initialTab || 'measurements');
         setExpandedVariations(new Set()); 
+        setIsCustomNoteMode({});
+
         let migratedGroup = { ...group } as ExtendedWorkGroup;
         if (!migratedGroup.accountingType) migratedGroup.accountingType = 'measure';
 
@@ -133,32 +233,49 @@ const TaskModal: React.FC<TaskModalProps> = ({ isOpen, onClose, group, allWorkGr
         setActiveGroup(migratedGroup);
         setIsDirty(false);
 
+        const todayStr = format(new Date(), 'yyyy-MM-dd');
         const initialMeasurements: Record<string, MeasurementInputState> = {};
         const initialDeductions: Record<string, boolean> = {};
         
         migratedGroup.items.forEach(item => {
-            initialMeasurements[item.articleCode] = { quantity: '', note: '', factor: '', length: '', width: '', height: '' };
+            // Data congruente: tra ultima misura e oggi
+            const itemMeasures = item.measurements || [];
+            const latestItemDate = itemMeasures.length > 0 
+              ? itemMeasures.reduce((max, m) => m.date > max ? m.date : max, itemMeasures[0].date)
+              : null;
+            const wbsStart = group.officialStartDate || group.startDate;
+            const defaultDate = latestItemDate && latestItemDate <= todayStr ? latestItemDate : (wbsStart <= todayStr ? wbsStart : todayStr);
+
+            // I campi sono liberi: la quantità è vuota e il residuo viene suggerito in grigio nel placeholder
+            initialMeasurements[item.articleCode] = { 
+              date: defaultDate,
+              quantity: '', 
+              note: '', 
+              factor: '', 
+              length: '', 
+              width: '', 
+              height: '',
+              sourceBoqId: undefined
+            };
             initialDeductions[item.articleCode] = false;
         });
         
         setNewMeasurements(initialMeasurements);
         setDeductionModes(initialDeductions);
-        
-        const today = format(new Date(), 'yyyy-MM-dd');
-        const defaultDate = (projectLatestMeasureDate && projectLatestMeasureDate > today) 
-            ? projectLatestMeasureDate 
-            : today;
-            
-        setStickyDate(defaultDate);
-        setGlobalTeamId(''); setGlobalWorkerIds([]); setActiveBoqPickerItem(null);
     }
-  }, [isOpen, group, projectLatestMeasureDate]);
+  }, [isOpen, group, initialTab]);
   
   const handleAttemptClose = useCallback(() => {
-    if (isDirty && !(isViewOnly || isLocked)) { if (window.confirm('Modifiche non salvate. Uscire comunque?')) onClose(); } else onClose();
+    if (isDirty && !(isViewOnly || isLocked)) { 
+      if (window.confirm('Modifiche non salvate. Uscire comunque?')) onClose(); 
+    } else {
+      onClose();
+    }
   }, [isDirty, isViewOnly, isLocked, onClose]);
 
-  const toggleDeductionMode = (articleCode: string) => { setDeductionModes(prev => ({ ...prev, [articleCode]: !prev[articleCode] })); };
+  const toggleDeductionMode = (articleCode: string) => { 
+    setDeductionModes(prev => ({ ...prev, [articleCode]: !prev[articleCode] })); 
+  };
 
   const handleMeasurementChange = (articleCode: string, field: keyof MeasurementInputState, value: string) => {
     if (isViewOnly || isLocked) return;
@@ -166,89 +283,163 @@ const TaskModal: React.FC<TaskModalProps> = ({ isOpen, onClose, group, allWorkGr
     setNewMeasurements(prev => ({ ...prev, [articleCode]: { ...prev[articleCode], [field]: value } }));
   };
 
-  const calculateAnalyticQuantity = (input: MeasurementInputState): number | null => {
-      const f = parseFloat(input.factor.replace(',', '.')) || null;
-      const l = parseFloat(input.length.replace(',', '.')) || null;
-      const w = parseFloat(input.width.replace(',', '.')) || null;
-      const h = parseFloat(input.height.replace(',', '.')) || null;
+  const handleItemDateChange = (articleCode: string, dateVal: string) => {
+    if (isViewOnly || isLocked) return;
+    setIsDirty(true);
+    setNewMeasurements(prev => ({
+      ...prev,
+      [articleCode]: {
+        ...(prev[articleCode] || { note: '', factor: '', length: '', width: '', height: '', quantity: '' }),
+        date: dateVal
+      }
+    }));
+  };
+
+  const calculateAnalyticQuantity = (input: MeasurementInputState | undefined): number | null => {
+      if (!input) return null;
+      const f = parseFloat(input.factor?.replace(',', '.') || '') || null;
+      const l = parseFloat(input.length?.replace(',', '.') || '') || null;
+      const w = parseFloat(input.width?.replace(',', '.') || '') || null;
+      const h = parseFloat(input.height?.replace(',', '.') || '') || null;
       if (f !== null || l !== null || w !== null || h !== null) {
           return (f || 1) * (l || 1) * (w || 1) * (h || 1);
       }
       return null;
   };
 
-  const toggleVariations = (articleCode: string) => { setExpandedVariations(prev => { const next = new Set(prev); if (next.has(articleCode)) next.delete(articleCode); else next.add(articleCode); return next; }); };
-
-  const getBoqRowQuantity = (l: any): number => {
-      if (l.quantity !== undefined && l.quantity !== null) return l.quantity;
-      if (l.total !== undefined && l.total !== null && l.total !== 0) return l.total;
-      return (l.multiplier || 1) * (l.length || 1) * (l.width || 1) * (l.height || 1);
+  const toggleVariations = (articleCode: string) => { 
+    setExpandedVariations(prev => { 
+      const next = new Set(prev); 
+      if (next.has(articleCode)) next.delete(articleCode); else next.add(articleCode); 
+      return next; 
+    }); 
   };
 
-  const toggleBoqPicker = (articleCode: string, e: React.MouseEvent) => {
-      const rect = e.currentTarget.getBoundingClientRect();
-      setPickerCoords({ top: rect.top, left: Math.max(10, rect.left - 520) });
-      setActiveBoqPickerItem(activeBoqPickerItem === articleCode ? null : articleCode);
-      if (!selectedBoqIds[articleCode]) setSelectedBoqIds(prev => ({ ...prev, [articleCode]: new Set() }));
-  };
-
-  const toggleBoqLineSelection = (articleCode: string, boqId: string) => {
-      setSelectedBoqIds(prev => {
-          const nextSet = new Set(prev[articleCode]);
-          if (nextSet.has(boqId)) nextSet.delete(boqId); else nextSet.add(boqId);
-          return { ...prev, [articleCode]: nextSet };
+  // Calcolo dell'inizio lavori del progetto o gruppo per la massima libertà ma rispetto del calendario
+  const projectInizioLavori = useMemo(() => {
+    let earliest = activeGroup?.officialStartDate || activeGroup?.startDate || format(new Date(), 'yyyy-MM-dd');
+    if (allWorkGroups && allWorkGroups.length > 0) {
+      allWorkGroups.forEach(g => {
+        const gStart = g.officialStartDate || g.startDate;
+        if (gStart && gStart < earliest) earliest = gStart;
       });
-  };
+    }
+    const today = format(new Date(), 'yyyy-MM-dd');
+    return earliest <= today ? earliest : today;
+  }, [allWorkGroups, activeGroup]);
 
-  const importSelectedBoqLines = (articleCode: string) => {
-      const item = activeGroup?.items.find(i => i.articleCode === articleCode);
-      if (!item || !item.originalMeasurements) return;
-      
-      const currentSelectedIds = selectedBoqIds[articleCode];
-      if (!currentSelectedIds || currentSelectedIds.size === 0) return;
+  // QUANDO L'UTENTE SCEGLIE LA MISURA DAL MENU A TENDINA DELLA CASELLA
+  // "poi quando richiami la misura gia parzialemnte contabilizzata....lascia libero i cambi delle misure imponi solo il massimo residuo suggerito in grigio..."
+  // "inoltre se carichi una misura con una data la successiva puo essere tra quella data e oggi"
+  const handleSelectComputoMeasure = (articleCode: string, boqMeasureId: string) => {
+    const item = activeGroup?.items.find(i => i.articleCode === articleCode);
+    if (!item) return;
 
-      const linesToImport = item.originalMeasurements.filter(m => currentSelectedIds.has(m.id));
-      const totalToImport = linesToImport.reduce((acc, l) => acc + getBoqRowQuantity(l), 0);
-      
-      const varTotal = (item.variations || []).reduce((acc, v) => v.type === 'increase' ? acc + v.quantity : acc - v.quantity, 0);
-      const residual = Math.round((item.quantity + varTotal - (item.measurements || []).reduce((acc, m) => acc + m.quantity, 0)) * 1000) / 1000;
+    const singleMeasures = getSingleBoqMeasuresForItem(item);
+    const sm = singleMeasures.find(m => m.id === boqMeasureId);
+    if (!sm) return;
 
-      if (totalToImport > (residual + 0.001) && totalToImport > 0) {
-          alert(`ECCEDENZA: Importazione supera residuo.`);
-          return;
+    const existingInputDate = newMeasurements[articleCode]?.date;
+    const itemMeasures = item.measurements || [];
+    const latestItemMeasureDate = itemMeasures.length > 0
+      ? itemMeasures.reduce((max, m) => m.date > max ? m.date : max, itemMeasures[0].date)
+      : null;
+
+    const wbsStart = activeGroup.officialStartDate || activeGroup.startDate || projectInizioLavori;
+    const inizioLavoriVoice = projectInizioLavori < wbsStart ? projectInizioLavori : wbsStart;
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    
+    // Mantieni la data già impostata, oppure l'ultima data registrata nell'articolo, oppure inizio lavori
+    const targetDate = existingInputDate 
+      ? existingInputDate 
+      : (latestItemMeasureDate && latestItemMeasureDate <= todayStr 
+          ? latestItemMeasureDate 
+          : (inizioLavoriVoice <= todayStr ? inizioLavoriVoice : todayStr));
+
+    setNewMeasurements(prev => ({
+      ...prev,
+      [articleCode]: {
+        ...(prev[articleCode] || {}),
+        date: targetDate,
+        note: sm.description,
+        factor: '',
+        length: '',
+        width: '',
+        height: '',
+        quantity: '',
+        sourceBoqId: sm.id
       }
+    }));
 
-      const newBatch: ExtendedMeasurement[] = linesToImport.map(l => ({
-          id: crypto.randomUUID(), 
-          date: stickyDate, 
-          quantity: getBoqRowQuantity(l), 
-          note: l.description || 'Da Computo',
-          factor: l.multiplier, 
-          length: l.length, 
-          width: l.width, 
-          height: l.height,
-          teamId: globalTeamId || undefined, 
-          workerIds: globalWorkerIds.length > 0 ? globalWorkerIds : undefined, 
-          _isCommitted: false,
-          sourceBoqId: l.id 
-      }));
+    setIsDirty(true);
+  };
 
-      setActiveGroup(prev => {
-          if (!prev) return null;
-          const updatedItems = prev.items.map(i => i.articleCode === articleCode ? { ...i, measurements: [...(i.measurements || []), ...newBatch] } : i);
-          return { ...prev, items: updatedItems };
-      });
+  // Chiudi immediatamente con il residuo disponibile
+  const handleCloseWithResidual = (articleCode: string, residual: number) => {
+    if (isViewOnly || isLocked || residual <= 0) return;
+    setNewMeasurements(prev => ({
+      ...prev,
+      [articleCode]: {
+        ...(prev[articleCode] || { note: '', factor: '', length: '', width: '', height: '' }),
+        quantity: residual.toString()
+      }
+    }));
+    setIsDirty(true);
+  };
 
-      // PATTO DI FERRO: Reset dello stato di selezione per questo articolo per evitare duplicazioni al prossimo giro
-      setSelectedBoqIds(prev => ({ ...prev, [articleCode]: new Set() }));
-      setActiveBoqPickerItem(null);
-      setIsDirty(true);
+  // Aggiungi una voce dal Computo a questo gruppo
+  const handleAddVoiceFromComputo = (computoItem: typeof availableComputoItems[0]) => {
+    if (isViewOnly || isLocked || !activeGroup) return;
+
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const wbsStart = activeGroup.officialStartDate || activeGroup.startDate;
+    const defaultDate = wbsStart <= todayStr ? wbsStart : todayStr;
+
+    const newItem: ExtendedWorkItem = {
+      articleCode: computoItem.articleCode,
+      description: computoItem.description,
+      quantity: computoItem.quantity,
+      unit: computoItem.unit,
+      unitPrice: computoItem.unitPrice,
+      total: computoItem.quantity * computoItem.unitPrice,
+      originalIndex: computoItem.originalIndex,
+      originalMeasurements: computoItem.originalMeasurements || [],
+      measurements: [],
+      variations: [],
+      annotations: []
+    };
+
+    const updatedItems = [...activeGroup.items, newItem];
+    const newGroupTotal = updatedItems.reduce((acc, i) => acc + (i.quantity * i.unitPrice), 0);
+
+    setActiveGroup({
+      ...activeGroup,
+      value: newGroupTotal,
+      items: updatedItems
+    });
+
+    setNewMeasurements(prev => ({
+      ...prev,
+      [computoItem.articleCode]: {
+        date: defaultDate,
+        quantity: '',
+        note: '',
+        factor: '',
+        length: '',
+        width: '',
+        height: '',
+        sourceBoqId: undefined
+      }
+    }));
+
+    setIsDirty(true);
   };
 
   const handleAddVariation = (articleCode: string) => {
       if (!newVariation.number || !newVariation.quantity) return;
       const qty = parseFloat(newVariation.quantity.replace(',', '.'));
-      const variation: Variation = { id: crypto.randomUUID(), date: stickyDate, number: newVariation.number, quantity: qty, type: newVariation.type };
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      const variation: Variation = { id: crypto.randomUUID(), date: todayStr, number: newVariation.number, quantity: qty, type: newVariation.type };
       
       setActiveGroup(prev => {
           if (!prev) return null;
@@ -260,6 +451,7 @@ const TaskModal: React.FC<TaskModalProps> = ({ isOpen, onClose, group, allWorkGr
       toggleVariations(articleCode); 
   };
 
+  // Aggiungi misurazione a Libretto con rispetto del calendario e blocco sul residuo
   const handleAddMeasurement = (itemArticleCode: string) => {
     if (!activeGroup || isViewOnly || isLocked) return;
     const measurementInput = newMeasurements[itemArticleCode];
@@ -267,41 +459,106 @@ const TaskModal: React.FC<TaskModalProps> = ({ isOpen, onClose, group, allWorkGr
     if (!item) return;
 
     const varTotal = (item.variations || []).reduce((acc, v) => v.type === 'increase' ? acc + v.quantity : acc - v.quantity, 0);
-    const residual = Math.round((item.quantity + varTotal - (item.measurements || []).reduce((acc, m) => acc + m.quantity, 0)) * 1000) / 1000;
-    
+    const measuredTotal = (item.measurements || []).reduce((acc, m) => acc + m.quantity, 0);
+    const itemResidual = Math.max(0, Math.round(((item.quantity + varTotal) - measuredTotal) * 1000) / 1000);
+
+    // Verifica rigorosa: la misura deve sempre agganciarsi al computo del progettista (testo libero rimosso)
+    const singleMeasures = getSingleBoqMeasuresForItem(item);
+    const openBoqMeasures = singleMeasures.filter(sm => sm.missingToClose > 0.0001);
+
+    if (openBoqMeasures.length > 0 && !measurementInput?.sourceBoqId) {
+      alert('⛔ MISURA OBBLIGATORIA DAL COMPUTO: Per mantenere l\'allineamento con il computo metrico, devi selezionare una misura dal menu a tendina.');
+      return;
+    }
+
+    const linkedBoq = measurementInput?.sourceBoqId 
+      ? singleMeasures.find(sm => sm.id === measurementInput.sourceBoqId)
+      : (openBoqMeasures.length > 0 ? openBoqMeasures[0] : null);
+
+    const maxAllowed = linkedBoq ? Math.min(linkedBoq.missingToClose, itemResidual) : itemResidual;
+
     const analyticQty = calculateAnalyticQuantity(measurementInput);
     let quantity: number;
 
     if (analyticQty !== null) {
         quantity = analyticQty;
     } else {
-        let quantityStr = measurementInput.quantity.replace(',', '.');
-        quantity = quantityStr.trim() === '' ? residual : (parseFloat(quantityStr) || 0);
+        let quantityStr = (measurementInput?.quantity || '').replace(',', '.');
+        // Se lasciato vuoto, assume il massimo residuo suggerito in grigio
+        quantity = quantityStr.trim() === '' ? maxAllowed : (parseFloat(quantityStr) || 0);
     }
     
-    if (quantity > (residual + 0.001) && quantity > 0) { alert(`ATTENZIONE: Quantità superiore al residuo.`); return; }
+    // PATTO DI FERRO: "se la supero mi blocca e la chiude con il residuo"
+    if (quantity > (maxAllowed + 0.001) && quantity > 0) { 
+      alert(`⛔ MISURA BLOCCATA: Stai inserendo ${numberFormatter.format(quantity)} ${item.unit}, ma il residuo massimo disponibile è di ${numberFormatter.format(maxAllowed)} ${item.unit}.\n\nLa quantità è stata bloccata e impostata esattamente al residuo (${numberFormatter.format(maxAllowed)} ${item.unit}) per chiuderla.`);
+      quantity = maxAllowed;
+    }
+    
     if (deductionModes[itemArticleCode]) quantity = -Math.abs(quantity);
     if (quantity === 0) return; 
 
+    // Calcolo data congruente per ogni voce o misura:
+    // "date che vanno dall'inizio lavori fino a oggi... inoltre se carichi una misura con una data la successiva puo essere tra quella data e oggi"
+    const measuresForCurrent = linkedBoq
+      ? (item.measurements || []).filter(m => m.sourceBoqId === linkedBoq.id)
+      : (item.measurements || []);
+
+    const latestRelevantDate = measuresForCurrent.length > 0 
+      ? measuresForCurrent.reduce((max, m) => m.date > max ? m.date : max, measuresForCurrent[0].date)
+      : null;
+
+    const wbsStart = activeGroup.officialStartDate || activeGroup.startDate || projectInizioLavori;
+    const inizioLavoriVoice = projectInizioLavori < wbsStart ? projectInizioLavori : wbsStart;
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+
+    let minAllowedDate = latestRelevantDate || inizioLavoriVoice;
+    if (minAllowedDate > todayStr) minAllowedDate = todayStr;
+
+    let measureDate = measurementInput?.date || (latestRelevantDate && latestRelevantDate <= todayStr ? latestRelevantDate : (inizioLavoriVoice <= todayStr ? inizioLavoriVoice : todayStr));
+    
+    if (measureDate < minAllowedDate) {
+      alert(`⛔ DATA NON CONGRUENTE: La data inserita (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere anteriore a ${format(parseISO(minAllowedDate), 'dd/MM/yyyy')}.\n\nLe misurazioni successive devono essere comprese tra l'ultima data registrata e oggi.`);
+      return;
+    }
+    if (measureDate > todayStr) {
+      alert(`⛔ DATA NON CONGRUENTE: La data inserita (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere futura rispetto a oggi (${format(parseISO(todayStr), 'dd/MM/yyyy')}).`);
+      return;
+    }
+
     const newMeasurement: ExtendedMeasurement = { 
         id: crypto.randomUUID(), 
-        date: stickyDate, 
+        date: measureDate, 
         quantity: quantity, 
-        note: measurementInput.note || 'Misura', 
-        teamId: globalTeamId || undefined, 
-        workerIds: globalWorkerIds.length > 0 ? globalWorkerIds : undefined, 
+        note: measurementInput?.note || linkedBoq?.description || 'Misura', 
+        teamId: undefined, 
+        workerIds: undefined, 
         _isCommitted: false, 
-        factor: measurementInput.factor ? parseFloat(measurementInput.factor.replace(',', '.')) : undefined, 
-        length: measurementInput.length ? parseFloat(measurementInput.length.replace(',', '.')) : undefined, 
-        width: measurementInput.width ? parseFloat(measurementInput.width.replace(',', '.')) : undefined, 
-        height: measurementInput.height ? parseFloat(measurementInput.height.replace(',', '.')) : undefined 
+        factor: measurementInput?.factor ? parseFloat(measurementInput.factor.replace(',', '.')) : undefined, 
+        length: measurementInput?.length ? parseFloat(measurementInput.length.replace(',', '.')) : undefined, 
+        width: measurementInput?.width ? parseFloat(measurementInput.width.replace(',', '.')) : undefined, 
+        height: measurementInput?.height ? parseFloat(measurementInput.height.replace(',', '.')) : undefined,
+        sourceBoqId: linkedBoq?.id
     };
 
     setActiveGroup(prev => { 
         if (!prev) return null; 
         return { ...prev, items: prev.items.map(i => i.articleCode === itemArticleCode ? { ...i, measurements: [...(i.measurements || []), newMeasurement] } : i) }; 
     });
-    setNewMeasurements(prev => ({ ...prev, [itemArticleCode]: { quantity: '', note: '', factor: '', length: '', width: '', height: '' } }));
+
+    // Per la misura successiva, la data riparte da quella appena caricata (fino a oggi)
+    setNewMeasurements(prev => ({ 
+      ...prev, 
+      [itemArticleCode]: { 
+        date: measureDate, 
+        quantity: '', 
+        note: '', 
+        factor: '', 
+        length: '', 
+        width: '', 
+        height: '', 
+        sourceBoqId: undefined 
+      } 
+    }));
     setIsDirty(true);
   };
 
@@ -311,7 +568,8 @@ const TaskModal: React.FC<TaskModalProps> = ({ isOpen, onClose, group, allWorkGr
     const item = activeGroup.items.find(i => i.articleCode === itemArticleCode);
     const m = item?.measurements?.[mIndex];
     if (!m || m.quantity < 0) return;
-    const rev: ExtendedMeasurement = { id: crypto.randomUUID(), date: stickyDate, quantity: -m.quantity, note: `STORNO: ${m.note || ''}`, teamId: m.teamId, workerIds: m.workerIds, _isCommitted: false };
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const rev: ExtendedMeasurement = { id: crypto.randomUUID(), date: todayStr, quantity: -m.quantity, note: `STORNO: ${m.note || ''}`, sourceBoqId: m.sourceBoqId, _isCommitted: false };
     setActiveGroup(prev => prev ? ({ ...prev, items: prev.items.map(i => i.articleCode === itemArticleCode ? { ...i, measurements: [...(i.measurements || []), rev] } : i) }) : null);
     setIsDirty(true);
   };
@@ -319,11 +577,16 @@ const TaskModal: React.FC<TaskModalProps> = ({ isOpen, onClose, group, allWorkGr
   const handleSaveChanges = () => { 
       if (!activeGroup || isViewOnly || isLocked) return; 
       
-      const totalMeasuredValue = activeGroup.items.reduce((total, i) => 
+      const totalMeasuredVal = activeGroup.items.reduce((total, i) => 
           total + ((i.measurements || []).reduce((acc, m) => acc + m.quantity, 0) * i.unitPrice), 0);
       
-      const teamSize = activeGroup.teamSize || 1;
-      const residualValue = Math.max(0, activeGroup.value - totalMeasuredValue);
+      const groupTotalVal = activeGroup.items.reduce((acc, i) => {
+          const varTotal = (i.variations || []).reduce((vAcc, v) => v.type === 'increase' ? vAcc + v.quantity : vAcc - v.quantity, 0);
+          return acc + ((i.quantity + varTotal) * i.unitPrice);
+      }, 0);
+
+      const teamSize = activeGroup.teamSize || 2;
+      const residualValue = Math.max(0, groupTotalVal - totalMeasuredVal);
       const remainingWorkingDays = Math.ceil(residualValue / (DAILY_RATE_PER_PERSON * teamSize));
       
       let baselineStr = activeGroup.startDate;
@@ -334,11 +597,11 @@ const TaskModal: React.FC<TaskModalProps> = ({ isOpen, onClose, group, allWorkGr
       
       const baselineDate = parseISO(baselineStr);
       const calculatedEndDate = calculateEndDateLocal(baselineDate, remainingWorkingDays);
-
-      const calculatedProgress = activeGroup.value > 0 ? Math.min(100, (totalMeasuredValue / activeGroup.value) * 100) : 0;
+      const calculatedProgress = groupTotalVal > 0 ? Math.min(100, (totalMeasuredVal / groupTotalVal) * 100) : 0;
 
       const cleanGroup: WorkGroup = { 
           ...activeGroup, 
+          value: groupTotalVal,
           progress: calculatedProgress, 
           endDate: format(calculatedEndDate, 'yyyy-MM-dd'),
           items: activeGroup.items.map(item => ({ 
@@ -355,269 +618,666 @@ const TaskModal: React.FC<TaskModalProps> = ({ isOpen, onClose, group, allWorkGr
       setActiveGroup(prev => {
           if (!prev) return null;
           const updated = { ...prev, [field]: value };
-          if (field === 'officialStartDate') {
-              updated.startDate = value;
-          }
           return updated;
       });
       setIsDirty(true);
   };
 
   if (!isOpen || !activeGroup) return null;
+
   const totalMeasuredValue = activeGroup.items.reduce((total, i) => total + ((i.measurements || []).reduce((acc, m) => acc + m.quantity, 0) * i.unitPrice), 0);
-  const currentProgress = activeGroup.value > 0 ? (totalMeasuredValue / activeGroup.value) * 100 : 0;
+  const groupTotalValue = activeGroup.items.reduce((acc, i) => {
+      const varTotal = (i.variations || []).reduce((vAcc, v) => v.type === 'increase' ? vAcc + v.quantity : vAcc - v.quantity, 0);
+      return acc + ((i.quantity + varTotal) * i.unitPrice);
+  }, 0);
+  const currentProgress = groupTotalValue > 0 ? (totalMeasuredValue / groupTotalValue) * 100 : 0;
+  const groupResidualValue = Math.max(0, groupTotalValue - totalMeasuredValue);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-60" onClick={handleAttemptClose}>
-      <div className="relative w-full max-w-6xl h-[95vh] bg-white dark:bg-gray-800 rounded-lg shadow-xl flex flex-col" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={handleAttemptClose}>
+      <div className="relative w-full max-w-6xl h-[95vh] bg-white dark:bg-gray-800 rounded-2xl shadow-2xl flex flex-col overflow-hidden border border-gray-200 dark:border-gray-700 animate-fade-in" onClick={e => e.stopPropagation()}>
         
-        <div className="flex-shrink-0 bg-white dark:bg-gray-800 z-10 rounded-t-lg">
-            <div className={`w-full py-1.5 px-4 flex items-center justify-between border-b-2 shadow-sm ${activeGroup.isSecurityCost ? 'bg-orange-100 text-orange-800 border-orange-300' : 'bg-green-100 text-green-800 border-green-300'}`}>
-                <div className="flex items-center gap-4">
-                    <span className="text-xs font-black uppercase tracking-widest">{activeGroup.accountingType === 'body' ? 'LAVORI A CORPO' : 'LAVORI A MISURA'}</span>
-                    {activeGroup.isSecurityCost && <span className="text-xs font-bold px-2 py-0.5 bg-orange-600 text-white rounded-full">SICUREZZA</span>}
+        {/* Header superiore WBS e stato contabile */}
+        <div className="flex-shrink-0 bg-white dark:bg-gray-800 z-10">
+            <div className={`w-full py-2 px-5 flex items-center justify-between border-b shadow-sm ${activeGroup.isSecurityCost ? 'bg-orange-50 dark:bg-orange-950/40 text-orange-900 dark:text-orange-200 border-orange-200 dark:border-orange-800' : 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-900 dark:text-indigo-200 border-indigo-200 dark:border-indigo-800'}`}>
+                <div className="flex items-center gap-3">
+                    <span className="text-xs font-black uppercase tracking-wider px-2.5 py-1 rounded-md bg-white/80 dark:bg-gray-800/80 shadow-sm border border-black/5">
+                      {activeGroup.accountingType === 'body' ? 'LAVORI A CORPO' : 'LAVORI A MISURA'}
+                    </span>
+                    {activeGroup.isSecurityCost ? (
+                      <span className="text-xs font-black px-2.5 py-1 bg-orange-600 text-white rounded-md uppercase tracking-wider shadow-sm">
+                        🛡️ ONERI SICUREZZA (No Ribasso)
+                      </span>
+                    ) : (
+                      <span className="text-xs font-semibold px-2 py-0.5 text-gray-600 dark:text-gray-300">
+                        Lavori Ordinari (Con Ribasso)
+                      </span>
+                    )}
                 </div>
-                <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold uppercase tracking-wider">{activeGroup.name}</span>
+                <div className="flex items-center gap-3 text-xs font-mono font-bold">
+                    <span className="text-gray-500">Inizio Cronoprogramma:</span>
+                    <span className="bg-white/80 dark:bg-gray-800/80 px-2 py-0.5 rounded border flex items-center gap-1">
+                      🔒 {format(parse(activeGroup.startDate, 'yyyy-MM-dd', new Date()), 'dd/MM/yyyy')}
+                    </span>
                 </div>
             </div>
 
-            <div className="flex flex-col border-b border-gray-200 dark:border-gray-700 p-3">
-                <div className="flex items-start justify-between">
-                    <div className="flex-1 flex flex-col sm:flex-row sm:items-center sm:gap-4">
-                        <div className="flex flex-col">
-                             <h3 className="text-xl font-bold text-indigo-600 dark:text-indigo-400 truncate">{activeGroup.name}</h3>
-                             <p className="text-[10px] text-gray-500 font-bold uppercase">WBS / Gruppo di Lavoro</p>
+            <div className="flex flex-col border-b border-gray-200 dark:border-gray-700 p-4">
+                <div className="flex items-start justify-between gap-4">
+                    <div className="flex-1 min-w-0">
+                         <div className="flex items-center gap-2">
+                           <h3 className="text-xl font-black text-gray-900 dark:text-white truncate">{activeGroup.name}</h3>
+                           <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">WBS Gruppo</span>
+                         </div>
+                    </div>
+
+                    <div className="flex items-center gap-3 bg-gray-50 dark:bg-gray-700/50 p-2 rounded-xl border border-gray-200 dark:border-gray-600">
+                        <div className="text-right">
+                          <span className="text-[10px] text-gray-400 uppercase font-bold block">Contabilizzato</span>
+                          <span className="text-sm font-black text-indigo-600 dark:text-indigo-400">{currencyFormatter.format(totalMeasuredValue)}</span>
                         </div>
-                        <div className="flex items-center space-x-4 text-xs bg-gray-50 dark:bg-gray-700/50 px-3 py-1 rounded-full">
-                            <div title="Valore misurato cumulativo"><span className="text-gray-500 mr-1">Maturato:</span><span className="font-bold text-indigo-600">{currencyFormatter.format(totalMeasuredValue)}</span></div>
-                            <div className="w-px h-3 bg-gray-300"></div>
-                            <div title="Progresso calcolato per il Gantt"><span className="text-gray-500 mr-1">Avanzamento:</span><span className="font-bold text-gray-900 dark:text-white">{numberFormatter.format(currentProgress)}%</span></div>
+                        <div className="w-px h-7 bg-gray-300 dark:bg-gray-600"></div>
+                        <div className="text-right">
+                          <span className="text-[10px] text-gray-400 uppercase font-bold block">Residuo di Gruppo</span>
+                          <span className="text-sm font-black text-emerald-600 dark:text-emerald-400">{currencyFormatter.format(groupResidualValue)}</span>
+                        </div>
+                        <div className="w-px h-7 bg-gray-300 dark:bg-gray-600"></div>
+                        <div className="text-center px-1">
+                          <span className="text-[10px] text-gray-400 uppercase font-bold block">Avanzamento</span>
+                          <span className="text-sm font-black text-gray-900 dark:text-white">{numberFormatter.format(currentProgress)}%</span>
                         </div>
                     </div>
-                    <button onClick={handleAttemptClose} className="text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 p-1.5 rounded-lg">✕</button>
                 </div>
             </div>
-            <div className="border-b border-gray-200 dark:border-gray-700 px-4">
+
+            {/* Navigation Tabs */}
+            <div className="border-b border-gray-200 dark:border-gray-700 px-4 bg-gray-50/50 dark:bg-gray-900/20">
                 <nav className="-mb-px flex space-x-6">
-                    <button onClick={() => setActiveTab('measurements')} className={`py-2 px-1 border-b-2 font-black text-xs uppercase tracking-widest ${activeTab === 'measurements' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>Libretto Contabilità</button>
-                    <button onClick={() => setActiveTab('planning')} className={`py-2 px-1 border-b-2 font-black text-xs uppercase tracking-widest ${activeTab === 'planning' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>Pianificazione</button>
-                    <button onClick={() => setActiveTab('dependencies')} className={`py-2 px-1 border-b-2 font-black text-xs uppercase tracking-widest ${activeTab === 'dependencies' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>Dipendenze / Legami</button>
+                    <button 
+                      onClick={() => setActiveTab('measurements')} 
+                      className={`py-3 px-2 border-b-2 font-black text-xs uppercase tracking-wider flex items-center gap-2 transition-all ${activeTab === 'measurements' ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400' : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
+                    >
+                      <span>📋 Libretto delle Misure ({activeGroup.items.length} voci)</span>
+                    </button>
+                    <button 
+                      onClick={() => setActiveTab('planning')} 
+                      className={`py-3 px-2 border-b-2 font-black text-xs uppercase tracking-wider flex items-center gap-2 transition-all ${activeTab === 'planning' ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400' : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
+                    >
+                      <span>⚙️ Impostazioni Gruppo (Data Inizio, Misura/Corpo, Sicurezza)</span>
+                    </button>
+                    <button 
+                      onClick={() => setActiveTab('dependencies')} 
+                      className={`py-3 px-2 border-b-2 font-black text-xs uppercase tracking-wider flex items-center gap-2 transition-all ${activeTab === 'dependencies' ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400' : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
+                    >
+                      <span>🔗 Dipendenze Gantt</span>
+                    </button>
                 </nav>
             </div>
         </div>
 
-        <div className="flex-grow p-4 flex flex-col overflow-hidden relative">
+        {/* Corpo principale */}
+        <div className="flex-grow p-4 flex flex-col overflow-hidden relative bg-gray-50/30 dark:bg-gray-900/30">
+          
+          {/* TAB 1: LIBRETTO CONTABILITÀ - VOCI UNA DOPO L'ALTRA */}
           {activeTab === 'measurements' && (
-            <div className="flex-grow overflow-y-auto pr-2 space-y-4">
-                {activeGroup.items.map((item, index) => {
-                    const varTotal = (item.variations || []).reduce((acc, v) => v.type === 'increase' ? acc + v.quantity : acc - v.quantity, 0);
-                    const measuredTotal = (item.measurements || []).reduce((acc, m) => acc + m.quantity, 0);
-                    const residual = Math.max(0, Math.round((item.quantity + varTotal - measuredTotal) * 1000) / 1000);
-                    const hasOriginalMeasures = item.originalMeasurements && item.originalMeasurements.length > 0;
-                    
-                    const measurementInput = newMeasurements[item.articleCode];
-                    const analyticQty = calculateAnalyticQuantity(measurementInput);
-                    
-                    let previewQty: number;
-                    if (analyticQty !== null) {
-                        previewQty = analyticQty;
-                    } else {
-                        const inputVal = measurementInput?.quantity;
-                        previewQty = (inputVal === '' || inputVal === undefined) ? residual : parseFloat(inputVal.replace(',', '.')) || 0;
-                    }
-                    
-                    const previewTotalAmount = previewQty * item.unitPrice;
-
-                    const wbsStart = activeGroup.officialStartDate || activeGroup.startDate;
-                    let minDate = wbsStart;
-                    if (projectLatestMeasureDate && projectLatestMeasureDate > wbsStart) {
-                        minDate = projectLatestMeasureDate;
-                    }
-
-                    return (
-                    <div key={index} className="p-3 border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 shadow-sm">
-                        <table className="w-full text-sm mb-2 table-fixed">
-                            <colgroup><col className="w-[15%]" /><col className="w-[35%]" /><col className="w-[50%]" /></colgroup>
-                            <tbody>
-                                <tr>
-                                    <td className="font-semibold text-gray-900 dark:text-white align-top text-xs">
-                                        <div className="flex items-center gap-1">
-                                            <span className="text-indigo-600 dark:text-indigo-400 font-black text-xl mr-2">#{item.originalIndex || (index + 1)}</span>
-                                            <span>{item.articleCode}</span>
-                                            {activeGroup.isSecurityCost && <span className="text-[9px] bg-green-100 text-green-700 px-1 rounded font-bold">SIC</span>}
-                                        </div>
-                                        <div className="flex flex-col gap-1 mt-2">
-                                            <button onClick={() => toggleVariations(item.articleCode)} className={`flex items-center gap-1 text-[10px] transition-colors ${expandedVariations.has(item.articleCode) ? 'text-orange-600' : 'text-gray-400 hover:text-orange-600'}`}><svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg><span>Varianti ({item.variations?.length || 0})</span></button>
-                                        </div>
-                                    </td>
-                                    <td className="text-gray-700 dark:text-gray-300 text-justify align-top pr-4 text-xs leading-tight line-clamp-8" title={item.description}>{item.description}</td>
-                                    <td className="align-top text-right text-[11px]">
-                                        <div className="grid grid-cols-[auto_auto] gap-x-3 items-baseline justify-end">
-                                            <span className="text-gray-500">Prezzo:</span><span className="font-bold text-indigo-600">{currencyFormatter.format(item.unitPrice)}</span>
-                                            <span className="text-gray-500 font-bold">Progetto:</span>
-                                            <div className="flex items-center justify-end gap-1">{varTotal !== 0 && <span className="text-gray-400 line-through mr-1">{numberFormatter.format(item.quantity)}</span>}<span className="font-bold text-gray-700 dark:text-gray-200">{numberFormatter.format(item.quantity + varTotal)} {item.unit}</span></div>
-                                            <span className="text-gray-500">Misurato:</span><span className="font-bold text-gray-900 dark:text-white">{numberFormatter.format(measuredTotal)} {item.unit}</span>
-                                        </div>
-                                    </td>
-                                </tr>
-                            </tbody>
-                        </table>
-                        {expandedVariations.has(item.articleCode) && (
-                            <div className="mb-3 p-2 bg-orange-50 dark:bg-orange-900/10 border border-orange-200 dark:border-orange-800 rounded animate-fade-in">
-                                <h4 className="text-[10px] font-bold text-orange-800 dark:text-orange-400 uppercase mb-2">Gestione Varianti e Perizie</h4>
-                                <div className="space-y-1 mb-2">
-                                    {item.variations?.map(v => (
-                                        <div key={v.id} className="flex justify-between text-[11px] bg-white dark:bg-gray-700 p-1 rounded shadow-sm">
-                                            <span><strong>{v.number}</strong> ({format(parseISO(v.date), 'dd/MM/yy')})</span>
-                                            <span className={v.type === 'increase' ? 'text-green-600 font-bold' : 'text-red-600 font-bold'}>{v.type === 'increase' ? '+' : '-'}{numberFormatter.format(v.quantity)}</span>
-                                        </div>
-                                    ))}
-                                </div>
-                                {!isLocked && !isViewOnly && (
-                                    <div className="flex gap-1">
-                                        <input type="text" placeholder="N. Perizia" value={newVariation.number} onChange={e => setNewVariation(p => ({ ...p, number: e.target.value }))} className="w-1/3 p-1 text-[11px] border rounded dark:bg-gray-800" />
-                                        <select value={newVariation.type} onChange={e => setNewVariation(p => ({ ...p, type: e.target.value as any }))} className="w-1/4 p-1 text-[11px] border rounded dark:bg-gray-800"><option value="increase">Aumento (+)</option><option value="decrease">Diminuz. (-)</option></select>
-                                        <input type="text" placeholder="Q.tà" value={newVariation.quantity} onChange={e => setNewVariation(p => ({ ...p, quantity: e.target.value }))} className="w-1/4 p-1 text-[11px] border rounded dark:bg-gray-800" />
-                                        <button onClick={() => handleAddVariation(item.articleCode)} className="flex-grow bg-orange-600 text-white text-[11px] font-bold rounded hover:bg-orange-700">+</button>
-                                    </div>
-                                )}
-                            </div>
-                        )}
-                        <div className="mb-3 max-h-64 overflow-y-auto border border-gray-100 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-900/20">
-                            <table className="w-full text-[11px] text-left table-fixed">
-                            <thead className="text-gray-700 bg-gray-100 dark:bg-gray-700 dark:text-gray-400 sticky top-0 z-10">
-                                <tr><th className="px-2 py-1 w-[10%]">Data</th><th className="px-2 py-1 w-[20%]">Nota / Posizione</th><th className="px-2 py-1 w-[10%] text-center text-gray-500">U.M.</th><th className="px-1 py-1 w-[5%] text-center text-gray-500">Parti</th><th className="px-1 py-1 w-[5%] text-center text-gray-500">Lung.</th><th className="px-1 py-1 w-[5%] text-center text-gray-500">Larg.</th><th className="px-1 py-1 w-[5%] text-center text-gray-500">Alt/P</th><th className="px-2 py-1 w-[10%] text-right font-bold">Quantità</th><th className="px-2 py-1 w-[12%] text-right">Valore</th><th className="px-1 py-1 w-[6%]"></th></tr>
-                            </thead>
-                            <tbody>
-                                {item.measurements?.map((m, mIdx) => {
-                                const isNeg = m.quantity < 0; const isCom = m._isCommitted ?? false;
-                                return (
-                                    <tr key={mIdx} className={`border-b dark:border-gray-600 bg-white dark:bg-gray-800 ${isNeg ? 'text-red-600' : ''}`}>
-                                    <td className="px-2 py-1">{format(parseISO(m.date), 'dd/MM/yy')}</td>
-                                    <td className="px-2 py-1 truncate italic" title={m.note}>{m.note}</td>
-                                    <td className="px-2 py-1 text-center text-gray-400">{item.unit}</td>
-                                    <td className="px-1 py-1 text-center text-gray-400">{m.factor || '-'}</td><td className="px-1 py-1 text-center text-gray-400">{m.length || '-'}</td><td className="px-1 py-1 text-center text-gray-400">{m.width || '-'}</td><td className="px-1 py-1 text-center text-gray-400">{m.height || '-'}</td>
-                                    <td className={`px-2 py-1 text-right font-bold ${isNeg ? 'text-red-600' : 'text-gray-900 dark:text-white'}`}>{numberFormatter.format(m.quantity)}</td>
-                                    <td className="px-2 py-1 text-right font-semibold">{currencyFormatter.format(m.quantity * item.unitPrice)}</td>
-                                    <td className="px-1 py-1 text-center">{!(isViewOnly || isLocked) && !isNeg && (isCom ? (<button onClick={(e) => handleReverseMeasurement(e, item.articleCode, mIdx)} className="text-orange-400 hover:text-orange-600" title="Storno"><svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" /></svg></button>) : (<button onClick={() => { setActiveGroup(p => p ? ({ ...p, items: p.items.map(i => i.articleCode === item.articleCode ? ({ ...i, measurements: i.measurements?.filter((_, idx) => idx !== mIdx) }) : i) }) : null); setIsDirty(true); }} className="text-gray-400 hover:text-red-500"><svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>))}</td>
-                                    </tr>
-                                );})}
-                            </tbody>
-                            {(!(isViewOnly || isLocked)) && (
-                                <tfoot className="bg-indigo-50/80 dark:bg-indigo-900/30 sticky bottom-0 z-10">
-                                    <tr className="border-t border-indigo-100 dark:border-gray-600">
-                                        <td className="px-1 py-1 text-center">
-                                            <input 
-                                                type="date" 
-                                                value={stickyDate} 
-                                                min={minDate}
-                                                max={format(new Date(), 'yyyy-MM-dd')}
-                                                onChange={e => {
-                                                    setStickyDate(e.target.value);
-                                                    setIsDirty(true);
-                                                }}
-                                                className="bg-transparent border-none p-0 text-[10px] font-bold focus:ring-0 cursor-pointer text-indigo-700 dark:text-indigo-300 w-full"
-                                                title={`Data Misurazione (Minima consentita: ${format(parseISO(minDate), 'dd/MM/yy')})`}
-                                            />
-                                        </td>
-                                        <td className="px-1 py-1">
-                                            <input type="text" value={(newMeasurements[item.articleCode] || { note: '' }).note} placeholder="Nota..." onChange={e => handleMeasurementChange(item.articleCode, 'note', e.target.value)} className="w-full p-1 text-[10px] border rounded dark:bg-gray-700" />
-                                        </td>
-                                        <td className="px-1 py-1">
-                                            <div className="flex items-center justify-center gap-1">
-                                                {hasOriginalMeasures && <button onClick={(e) => toggleBoqPicker(item.articleCode, e)} className="w-8 h-6 flex items-center justify-center rounded border bg-white text-indigo-600 text-[10px] hover:bg-indigo-50 transition-colors" title="Dettaglio Computo">📋</button>}
-                                                <button onClick={() => toggleDeductionMode(item.articleCode)} className={`w-8 h-6 flex items-center justify-center rounded text-white font-bold text-[10px] transition-colors ${deductionModes[item.articleCode] ? 'bg-red-500 hover:bg-red-600' : 'bg-gray-400 hover:bg-gray-500'}`} title={deductionModes[item.articleCode] ? 'Sottrazione' : 'Addizione'}>{deductionModes[item.articleCode] ? '-' : '±'}</button>
-                                            </div>
-                                        </td>
-                                        {['factor', 'length', 'width', 'height'].map(f => (
-                                            <td key={f} className="px-0.5 py-1">
-                                                <input type="text" className="w-full p-1 text-center text-[10px] border rounded dark:bg-gray-700" value={(newMeasurements[item.articleCode] as any)[f] || ''} onChange={e => handleMeasurementChange(item.articleCode, f as any, e.target.value)} placeholder="-" />
-                                            </td>
-                                        ))}
-                                        <td className="px-1 py-1 relative">
-                                            <input 
-                                                type="text" 
-                                                value={analyticQty !== null ? numberFormatter.format(analyticQty) : (newMeasurements[item.articleCode] || { quantity: '' }).quantity} 
-                                                onChange={e => handleMeasurementChange(item.articleCode, 'quantity', e.target.value)} 
-                                                readOnly={analyticQty !== null}
-                                                className={`w-full p-1 text-[11px] border rounded text-right font-bold ${analyticQty !== null ? 'bg-gray-50 text-indigo-600' : deductionModes[item.articleCode] ? 'text-red-600 bg-red-50' : 'text-gray-900 bg-white'}`} 
-                                                placeholder={numberFormatter.format(residual)} 
-                                            />
-                                        </td>
-                                        <td className="px-2 py-1 text-right font-bold text-[11px] text-indigo-800 dark:text-indigo-200">{currencyFormatter.format(previewTotalAmount)}</td>
-                                        <td className="px-1 py-1 text-center"><button onClick={() => handleAddMeasurement(item.articleCode)} className="flex items-center justify-center w-6 h-6 bg-indigo-600 text-white rounded hover:bg-indigo-700 shadow-sm"><svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" /></svg></button></td>
-                                    </tr>
-                                </tfoot>
-                            )}
-                            </table>
-                        </div>
+            <div className="flex-grow flex flex-col overflow-hidden space-y-4">
+                
+                {/* Elenco voci del gruppo una dopo l'altra */}
+                <div className="flex-grow overflow-y-auto pr-1 space-y-4">
+                  {activeGroup.items.length === 0 ? (
+                    <div className="p-8 text-center bg-white dark:bg-gray-800 rounded-2xl border-2 border-dashed border-gray-300 dark:border-gray-700 space-y-3">
+                      <div className="text-3xl">📦</div>
+                      <h4 className="text-sm font-black text-gray-800 dark:text-white uppercase">Nessuna voce in questa lavorazione</h4>
                     </div>
-                )})}
+                  ) : (
+                    activeGroup.items.map((item, index) => {
+                      const varTotal = (item.variations || []).reduce((acc, v) => v.type === 'increase' ? acc + v.quantity : acc - v.quantity, 0);
+                      const measuredTotal = (item.measurements || []).reduce((acc, m) => acc + m.quantity, 0);
+                      const contractQty = item.quantity + varTotal;
+                      const residual = Math.max(0, Math.round((contractQty - measuredTotal) * 1000) / 1000);
+                      const progressPercent = contractQty > 0 ? Math.min(100, (measuredTotal / contractQty) * 100) : 0;
+                      
+                      // Righe del computo metrico del progettista per questa voce
+                      const boqMeasures = getSingleBoqMeasuresForItem(item);
+                      // REGOLA: "se una misura è zero non la devi piu far vedere nel menu a tendina"
+                      const openBoqMeasures = boqMeasures.filter(bm => bm.missingToClose > 0.0001);
+
+                      const measurementInput = newMeasurements[item.articleCode];
+                      const analyticQty = calculateAnalyticQuantity(measurementInput);
+                      
+                      // Se è associata una specifica riga di computo
+                      const linkedBoq = measurementInput?.sourceBoqId 
+                        ? boqMeasures.find(bm => bm.id === measurementInput.sourceBoqId)
+                        : null;
+                      const maxAllowed = linkedBoq ? Math.min(linkedBoq.missingToClose, residual) : residual;
+
+                      const inputVal = measurementInput?.quantity;
+                      let previewQty = 0;
+                      if (analyticQty !== null) {
+                          previewQty = analyticQty;
+                      } else if (inputVal !== undefined && inputVal.trim() !== '') {
+                          previewQty = parseFloat(inputVal.replace(',', '.')) || 0;
+                      }
+
+                      // Verifica se supera il residuo (solo se inserito > 0)
+                      const isExceeded = previewQty > (maxAllowed + 0.001);
+                      const previewVal = (previewQty > 0 ? previewQty : 0) * item.unitPrice;
+
+                      // CONGRUITA CALENDARIO PER OGNI VOCE O MISURA:
+                      // "date che vanno dall'inizio lavori fino a oggi... inoltre se carichi una misura con una data la successiva puo essere tra quella data e oggi"
+                      const itemMeasures = item.measurements || [];
+                      const latestItemMeasureDate = itemMeasures.length > 0 
+                        ? itemMeasures.reduce((max, m) => m.date > max ? m.date : max, itemMeasures[0].date)
+                        : null;
+
+                      const wbsStart = activeGroup.officialStartDate || activeGroup.startDate || projectInizioLavori;
+                      const inizioLavoriVoice = projectInizioLavori < wbsStart ? projectInizioLavori : wbsStart;
+                      const todayStr = format(new Date(), 'yyyy-MM-dd');
+                      
+                      let itemMinDate = latestItemMeasureDate || inizioLavoriVoice;
+                      if (itemMinDate > todayStr) itemMinDate = todayStr;
+                      const itemMaxDate = todayStr;
+
+                      const currentItemDate = measurementInput?.date 
+                        ? (measurementInput.date < itemMinDate ? itemMinDate : (measurementInput.date > itemMaxDate ? itemMaxDate : measurementInput.date))
+                        : (latestItemMeasureDate && latestItemMeasureDate <= todayStr ? latestItemMeasureDate : (inizioLavoriVoice <= todayStr ? inizioLavoriVoice : todayStr));
+
+                      return (
+                        <div key={item.articleCode} className="p-4 border border-gray-200 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 shadow-sm space-y-3">
+                          
+                          {/* Intestazione voce singola */}
+                          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-gray-100 dark:border-gray-700">
+                            <div className="flex items-start gap-3 flex-1 min-w-0">
+                              <span className="text-base font-black px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 rounded-lg border border-indigo-200 dark:border-indigo-800">
+                                #{item.originalIndex || (index + 1)}
+                              </span>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-xs font-mono font-black text-gray-900 dark:text-white uppercase bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded">
+                                    {item.articleCode}
+                                  </span>
+                                  <span className="text-xs text-gray-500 font-bold">
+                                    Tariffa: <strong className="text-indigo-600 dark:text-indigo-400">{currencyFormatter.format(item.unitPrice)}</strong> / {item.unit}
+                                  </span>
+                                </div>
+                                <p className="text-xs text-gray-700 dark:text-gray-300 mt-1 leading-snug line-clamp-2">
+                                  {item.description}
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-3 bg-gray-50 dark:bg-gray-700/40 p-2.5 rounded-xl border border-gray-200 dark:border-gray-600 flex-shrink-0">
+                              <div className="text-right">
+                                <span className="text-[9px] text-gray-400 uppercase font-bold block">Computo</span>
+                                <span className="text-xs font-bold text-gray-700 dark:text-gray-300">
+                                  {numberFormatter.format(contractQty)} {item.unit}
+                                </span>
+                              </div>
+                              <div className="w-px h-6 bg-gray-300 dark:bg-gray-600"></div>
+                              <div className="text-right">
+                                <span className="text-[9px] text-gray-400 uppercase font-bold block">Contabilizzato</span>
+                                <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400">
+                                  {numberFormatter.format(measuredTotal)} {item.unit} ({progressPercent.toFixed(0)}%)
+                                </span>
+                              </div>
+                              <div className="w-px h-6 bg-gray-300 dark:bg-gray-600"></div>
+                              <div className="text-right">
+                                <span className="text-[9px] text-gray-400 uppercase font-bold block">Residuo</span>
+                                <span className={`text-xs font-black ${residual > 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-400'}`}>
+                                  {numberFormatter.format(residual)} {item.unit}
+                                </span>
+                              </div>
+
+                              <button 
+                                onClick={() => toggleVariations(item.articleCode)}
+                                className={`p-1.5 rounded-lg border text-[10px] font-bold transition-colors ${expandedVariations.has(item.articleCode) ? 'bg-orange-50 border-orange-300 text-orange-700' : 'bg-white dark:bg-gray-800 text-gray-500 hover:text-gray-800'}`}
+                              >
+                                Perizie ({item.variations?.length || 0})
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Varianti e perizie (se espanse) */}
+                          {expandedVariations.has(item.articleCode) && (
+                              <div className="p-3 bg-orange-50/80 dark:bg-orange-950/20 border border-orange-200 dark:border-orange-800 rounded-xl space-y-2">
+                                  <div className="flex items-center justify-between">
+                                    <h4 className="text-[10px] font-black text-orange-800 dark:text-orange-400 uppercase tracking-wider">
+                                      Perizie e Variazioni Contrattuali
+                                    </h4>
+                                  </div>
+                                  <div className="space-y-1">
+                                      {item.variations?.map(v => (
+                                          <div key={v.id} className="flex justify-between items-center text-xs bg-white dark:bg-gray-800 p-2 rounded-lg shadow-sm border border-orange-100 dark:border-orange-900">
+                                              <span><strong>{v.number}</strong> in data {format(parseISO(v.date), 'dd/MM/yyyy')}</span>
+                                              <span className={v.type === 'increase' ? 'text-green-600 font-bold' : 'text-red-600 font-bold'}>
+                                                {v.type === 'increase' ? '+' : '-'}{numberFormatter.format(v.quantity)} {item.unit}
+                                              </span>
+                                          </div>
+                                      ))}
+                                  </div>
+                                  {!isLocked && !isViewOnly && (
+                                      <div className="flex gap-2">
+                                          <input type="text" placeholder="N. Perizia" value={newVariation.number} onChange={e => setNewVariation(p => ({ ...p, number: e.target.value }))} className="w-1/3 p-1.5 text-xs border rounded-lg dark:bg-gray-800" />
+                                          <select value={newVariation.type} onChange={e => setNewVariation(p => ({ ...p, type: e.target.value as any }))} className="w-1/4 p-1.5 text-xs border rounded-lg dark:bg-gray-800"><option value="increase">Aumento (+)</option><option value="decrease">Diminuzione (-)</option></select>
+                                          <input type="text" placeholder={`Q.tà (${item.unit})`} value={newVariation.quantity} onChange={e => setNewVariation(p => ({ ...p, quantity: e.target.value }))} className="w-1/4 p-1.5 text-xs border rounded-lg dark:bg-gray-800" />
+                                          <button onClick={() => handleAddVariation(item.articleCode)} className="flex-grow bg-orange-600 text-white text-xs font-bold rounded-lg hover:bg-orange-700 px-3">+</button>
+                                      </div>
+                                  )}
+                              </div>
+                          )}
+
+                          {/* Avviso in caso di eccedenza residuo */}
+                          {isExceeded && (
+                            <div className="p-2 bg-red-100 dark:bg-red-950/70 border border-red-400 text-red-800 dark:text-red-200 text-xs font-bold rounded-lg flex items-center justify-between animate-fade-in">
+                              <span>⛔ Quantità superiore al residuo massimo consentito ({numberFormatter.format(maxAllowed)} {item.unit})!</span>
+                              <button
+                                type="button"
+                                onClick={() => handleCloseWithResidual(item.articleCode, maxAllowed)}
+                                className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-[10px] font-black uppercase tracking-wider"
+                              >
+                                Chiudi con Residuo ({numberFormatter.format(maxAllowed)})
+                              </button>
+                            </div>
+                          )}
+
+                          {/* TABELLA LIBRETTO MISURE CON RIGO DI INSERIMENTO INTEGRATO E PERFETTAMENTE ALLINEATO */}
+                          <div className="border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden bg-gray-50/50 dark:bg-gray-900/20 shadow-sm">
+                              <table className="w-full text-xs text-left table-fixed">
+                              <thead className="text-gray-600 bg-gray-100 dark:bg-gray-700/80 dark:text-gray-300 sticky top-0 z-10 shadow-sm text-[11px] uppercase font-bold">
+                                  <tr>
+                                    <th className="px-2 py-1.5 w-[11%]">Data</th>
+                                    <th className="px-2 py-1.5 w-[24%]">Rilievo a Libretto</th>
+                                    <th className="px-1 py-1.5 w-[5%] text-center">U.M.</th>
+                                    <th className="px-1 py-1.5 w-[6%] text-center">Parti</th>
+                                    <th className="px-1 py-1.5 w-[6%] text-center">Lung.</th>
+                                    <th className="px-1 py-1.5 w-[6%] text-center">Larg.</th>
+                                    <th className="px-1 py-1.5 w-[6%] text-center">Alt/P</th>
+                                    <th className="px-2 py-1.5 w-[12%] text-right">Quantità</th>
+                                    <th className="px-2 py-1.5 w-[14%] text-right">Importo</th>
+                                    <th className="px-1 py-1.5 w-[10%] text-center">Azioni</th>
+                                  </tr>
+                              </thead>
+                              <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                                  {(!item.measurements || item.measurements.length === 0) ? (
+                                    <tr>
+                                      <td colSpan={10} className="px-3 py-3 text-center text-gray-400 italic">
+                                        Nessuna misurazione ancora registrata per questa voce.
+                                      </td>
+                                    </tr>
+                                  ) : (
+                                    item.measurements.map((m, mIdx) => {
+                                      const isNeg = m.quantity < 0; 
+                                      const isCom = m._isCommitted ?? false;
+                                      const matchedBoq = boqMeasures.find(sm => sm.id === m.sourceBoqId);
+                                      return (
+                                          <tr key={m.id || mIdx} className={`bg-white dark:bg-gray-800 ${isNeg ? 'text-red-600 dark:text-red-400' : 'text-gray-800 dark:text-gray-200'}`}>
+                                            <td className="px-2 py-1.5 font-mono">{format(parseISO(m.date), 'dd/MM/yyyy')}</td>
+                                            <td className="px-2 py-1.5 truncate italic" title={m.note}>
+                                              {matchedBoq && (
+                                                <span className="mr-1.5 px-1 py-0.2 bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-300 rounded font-mono font-bold text-[9px] not-italic">
+                                                  #{matchedBoq.index}
+                                                </span>
+                                              )}
+                                              {m.note}
+                                            </td>
+                                            <td className="px-1 py-1.5 text-center text-gray-400">{item.unit}</td>
+                                            <td className="px-1 py-1.5 text-center text-gray-400">{m.factor || '-'}</td>
+                                            <td className="px-1 py-1.5 text-center text-gray-400">{m.length || '-'}</td>
+                                            <td className="px-1 py-1.5 text-center text-gray-400">{m.width || '-'}</td>
+                                            <td className="px-1 py-1.5 text-center text-gray-400">{m.height || '-'}</td>
+                                            <td className={`px-2 py-1.5 text-right font-bold ${isNeg ? 'text-red-600' : 'text-gray-900 dark:text-white'}`}>
+                                              {numberFormatter.format(m.quantity)}
+                                            </td>
+                                            <td className="px-2 py-1.5 text-right font-semibold text-indigo-600 dark:text-indigo-400">
+                                              {currencyFormatter.format(m.quantity * item.unitPrice)}
+                                            </td>
+                                            <td className="px-1 py-1.5 text-center">
+                                              {!(isViewOnly || isLocked) && !isNeg && (
+                                                isCom ? (
+                                                  <button onClick={(e) => handleReverseMeasurement(e, item.articleCode, mIdx)} className="text-orange-500 hover:text-orange-700 p-1 font-bold text-[10px]" title="Storno">
+                                                    ↩ Storno
+                                                  </button>
+                                                ) : (
+                                                  <button onClick={() => { setActiveGroup(p => p ? ({ ...p, items: p.items.map(i => i.articleCode === item.articleCode ? ({ ...i, measurements: i.measurements?.filter((_, idx) => idx !== mIdx) }) : i) }) : null); setIsDirty(true); }} className="text-gray-400 hover:text-red-500 p-1" title="Elimina">
+                                                    🗑️
+                                                  </button>
+                                                )
+                                              )}
+                                            </td>
+                                          </tr>
+                                      );
+                                    })
+                                  )}
+                              </tbody>
+
+                              {/* RIGO DELLA MISURAZIONE PERFETTAMENTE ALLINEATO CON LA TABELLA SUPERIORE */}
+                              {!(isViewOnly || isLocked) && (
+                                <tfoot className="border-t-2 border-indigo-200 dark:border-indigo-800 bg-indigo-50/40 dark:bg-indigo-950/20">
+                                  <tr>
+                                    {/* 1. DATA (CONGRUENTE: DALL'INIZIO LAVORI/PRECEDENTE MISURA FINO A OGGI) */}
+                                    <td className="p-1 align-middle">
+                                      <EuropeanDateInput 
+                                        value={currentItemDate} 
+                                        min={itemMinDate}
+                                        max={itemMaxDate}
+                                        onChange={val => handleItemDateChange(item.articleCode, val)}
+                                        className="w-full p-1 text-[11px] font-mono font-bold bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded text-indigo-700 dark:text-indigo-300 shadow-sm"
+                                        title={`Data consentita tra ${format(parseISO(itemMinDate), 'dd/MM/yyyy')} (inizio lavori/precedente misura) e oggi ${format(parseISO(itemMaxDate), 'dd/MM/yyyy')}`}
+                                      />
+                                      <div className="text-[9px] text-gray-500 dark:text-gray-400 font-mono text-center truncate mt-0.5" title={`Valida da ${format(parseISO(itemMinDate), 'dd/MM/yyyy')} a ${format(parseISO(itemMaxDate), 'dd/MM/yyyy')}`}>
+                                        {format(parseISO(itemMinDate), 'dd/MM')} ➜ {format(parseISO(itemMaxDate), 'dd/MM')}
+                                      </div>
+                                    </td>
+
+                                    {/* 2. RILIEVO A LIBRETTO - MENU A TENDINA OBBLIGATORIO DAL COMPUTO */}
+                                    <td className="p-1 align-middle">
+                                      {openBoqMeasures.length > 0 ? (
+                                        <div className="space-y-1">
+                                          <select
+                                            value={(newMeasurements[item.articleCode] as any)?.sourceBoqId || ''}
+                                            onChange={(e) => {
+                                              const val = e.target.value;
+                                              if (!val) {
+                                                handleMeasurementChange(item.articleCode, 'note', '');
+                                                handleMeasurementChange(item.articleCode, 'sourceBoqId', '');
+                                                return;
+                                              }
+                                              handleSelectComputoMeasure(item.articleCode, val);
+                                            }}
+                                            className="w-full p-1 text-xs font-semibold bg-white dark:bg-gray-700 border border-indigo-300 dark:border-indigo-600 rounded text-gray-800 dark:text-gray-100 cursor-pointer truncate shadow-sm focus:ring-1 focus:ring-indigo-500"
+                                            title="Seleziona la misura dal computo metrico"
+                                          >
+                                            <option value="">-- Scegli misura da computo ({openBoqMeasures.length} aperte) --</option>
+                                            {openBoqMeasures.map((bm) => (
+                                              <option key={bm.id} value={bm.id}>
+                                                #{bm.index}. {bm.description} [Residuo: {numberFormatter.format(bm.missingToClose)} {item.unit}]
+                                              </option>
+                                            ))}
+                                          </select>
+
+                                          {/* Se è selezionata una misura dal computo, permette di precisare eventuali dettagli */}
+                                          {(newMeasurements[item.articleCode] as any)?.sourceBoqId && (
+                                            <input 
+                                              type="text" 
+                                              value={(newMeasurements[item.articleCode] || { note: '' }).note} 
+                                              placeholder="Dettaglio o nota opzionale..." 
+                                              onChange={e => handleMeasurementChange(item.articleCode, 'note', e.target.value)} 
+                                              className="w-full p-1 text-[11px] border border-gray-200 dark:border-gray-600 rounded bg-indigo-50/40 dark:bg-indigo-950/30 text-gray-800 dark:text-gray-200 font-medium" 
+                                              title="Dettaglio opzionale legato alla misura di computo"
+                                            />
+                                          )}
+                                        </div>
+                                      ) : (
+                                        <div className="p-1.5 text-center text-xs font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 rounded border border-emerald-200 dark:border-emerald-800">
+                                          ✅ Tutte le misure di computo sono chiuse (100%)
+                                        </div>
+                                      )}
+                                    </td>
+
+                                    {/* 3. U.M. */}
+                                    <td className="p-1 text-center text-gray-500 font-bold align-middle text-xs">
+                                      {item.unit}
+                                    </td>
+
+                                    {/* 4. PARTI (CAMPO LIBERO) */}
+                                    <td className="p-1 align-middle">
+                                      <input 
+                                        type="text" 
+                                        placeholder="-" 
+                                        className="w-full p-1 text-center text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700" 
+                                        value={(newMeasurements[item.articleCode] as any)?.factor || ''} 
+                                        onChange={e => handleMeasurementChange(item.articleCode, 'factor', e.target.value)} 
+                                        title="Parti uguali"
+                                      />
+                                    </td>
+
+                                    {/* 5. LUNG. (CAMPO LIBERO) */}
+                                    <td className="p-1 align-middle">
+                                      <input 
+                                        type="text" 
+                                        placeholder="-" 
+                                        className="w-full p-1 text-center text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700" 
+                                        value={(newMeasurements[item.articleCode] as any)?.length || ''} 
+                                        onChange={e => handleMeasurementChange(item.articleCode, 'length', e.target.value)} 
+                                        title="Lunghezza"
+                                      />
+                                    </td>
+
+                                    {/* 6. LARG. (CAMPO LIBERO) */}
+                                    <td className="p-1 align-middle">
+                                      <input 
+                                        type="text" 
+                                        placeholder="-" 
+                                        className="w-full p-1 text-center text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700" 
+                                        value={(newMeasurements[item.articleCode] as any)?.width || ''} 
+                                        onChange={e => handleMeasurementChange(item.articleCode, 'width', e.target.value)} 
+                                        title="Larghezza"
+                                      />
+                                    </td>
+
+                                    {/* 7. ALT/P (CAMPO LIBERO) */}
+                                    <td className="p-1 align-middle">
+                                      <input 
+                                        type="text" 
+                                        placeholder="-" 
+                                        className="w-full p-1 text-center text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700" 
+                                        value={(newMeasurements[item.articleCode] as any)?.height || ''} 
+                                        onChange={e => handleMeasurementChange(item.articleCode, 'height', e.target.value)} 
+                                        title="Altezza / Profondità"
+                                      />
+                                    </td>
+
+                                    {/* 8. QUANTITÀ: CAMPO LIBERO CON RESIDUO MASSIMO SUGGERITO IN GRIGIO */}
+                                    <td className="p-1 align-middle">
+                                      <div className="flex items-center gap-0.5">
+                                        <button 
+                                          type="button"
+                                          onClick={() => toggleDeductionMode(item.articleCode)} 
+                                          className={`text-[9px] font-bold px-1 py-0.5 rounded transition-colors ${deductionModes[item.articleCode] ? 'bg-red-500 text-white' : 'text-gray-400 hover:text-gray-600'}`} 
+                                          title="Detrazione negativa (-)"
+                                        >
+                                          {deductionModes[item.articleCode] ? '-' : '±'}
+                                        </button>
+                                        <input 
+                                          type="text" 
+                                          value={analyticQty !== null ? numberFormatter.format(analyticQty) : (newMeasurements[item.articleCode] || { quantity: '' }).quantity} 
+                                          onChange={e => handleMeasurementChange(item.articleCode, 'quantity', e.target.value)} 
+                                          readOnly={analyticQty !== null}
+                                          className={`w-full p-1 text-xs border rounded text-right font-black placeholder:text-gray-400 dark:placeholder:text-gray-500 placeholder:font-normal ${
+                                            isExceeded 
+                                              ? 'bg-red-100 border-red-500 text-red-700 ring-2 ring-red-400' 
+                                              : analyticQty !== null 
+                                                ? 'bg-gray-100 text-indigo-600' 
+                                                : deductionModes[item.articleCode] 
+                                                  ? 'text-red-600 bg-red-50' 
+                                                  : 'text-gray-900 bg-white dark:bg-gray-700 dark:text-white border-gray-300 dark:border-gray-600'
+                                          }`} 
+                                          placeholder={numberFormatter.format(maxAllowed)} 
+                                          title={`Massimo residuo suggerito: ${numberFormatter.format(maxAllowed)} ${item.unit}`}
+                                        />
+                                      </div>
+                                    </td>
+
+                                    {/* 9. IMPORTO PREVISTO */}
+                                    <td className="px-2 py-1 text-right font-semibold text-indigo-600 dark:text-indigo-400 align-middle truncate text-xs">
+                                      {currencyFormatter.format(previewVal)}
+                                    </td>
+
+                                    {/* 10. AZIONI */}
+                                    <td className="p-1 text-center align-middle">
+                                      <button 
+                                        type="button"
+                                        onClick={() => handleAddMeasurement(item.articleCode)} 
+                                        className={`w-full py-1 rounded text-xs font-black shadow-sm transition-all flex items-center justify-center ${
+                                          isExceeded 
+                                            ? 'bg-red-600 hover:bg-red-700 text-white' 
+                                            : 'bg-indigo-600 hover:bg-indigo-700 text-white active:scale-95'
+                                        }`}
+                                        title={isExceeded ? "Blocca e chiudi con il residuo" : "Registra a libretto"}
+                                      >
+                                        {isExceeded ? 'Chiudi' : '+'}
+                                      </button>
+                                    </td>
+                                  </tr>
+                                </tfoot>
+                              )}
+                              </table>
+                          </div>
+
+                        </div>
+                      );
+                    })
+                  )}
+
+                  {/* Semplice selettore in calce per aggiungere una nuova voce dal computo se necessario */}
+                  {!isViewOnly && !isLocked && availableComputoItems.length > 0 && (
+                    <div className="p-3 bg-white dark:bg-gray-800 rounded-xl border border-dashed border-gray-300 dark:border-gray-700 flex items-center justify-between gap-3">
+                      <span className="text-xs font-bold text-gray-500">
+                        ➕ Aggiungi un'altra voce dal Computo a questa lavorazione:
+                      </span>
+                      <select 
+                        value="" 
+                        onChange={(e) => {
+                          const selected = availableComputoItems.find(i => i.articleCode === e.target.value);
+                          if (selected) handleAddVoiceFromComputo(selected);
+                        }}
+                        className="p-1.5 text-xs font-medium border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-700 text-gray-700 dark:text-gray-200"
+                      >
+                        <option value="">-- Seleziona voce da aggiungere ({availableComputoItems.length} disponibili) --</option>
+                        {availableComputoItems.map(cItem => (
+                          <option key={cItem.articleCode} value={cItem.articleCode}>
+                            {cItem.articleCode} - {cItem.description.slice(0, 50)}... ({cItem.quantity} {cItem.unit})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
             </div>
           )}
           
+          {/* TAB 2: IMPOSTAZIONI GRUPPO (DATA INIZIO BLOCCATA, A MISURA/CORPO, SICUREZZA, SQUADRA) */}
           {activeTab === 'planning' && (
-            <div className="flex-grow overflow-y-auto pr-2">
-                <div className="bg-gray-50 dark:bg-gray-900/20 p-6 rounded-xl border border-gray-200 dark:border-gray-700 space-y-6">
-                    <h4 className="text-sm font-black uppercase tracking-widest text-indigo-700 dark:text-indigo-400 mb-4 border-b pb-2">Configurazione Strategica WBS</h4>
-                    
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                        <div className="space-y-4">
-                            <label className="block">
-                                <span className="text-xs font-bold text-gray-500 uppercase">Data Inizio Prevista (Data Ufficiale)</span>
-                                <input 
-                                    type="date" 
-                                    value={activeGroup.officialStartDate || activeGroup.startDate} 
-                                    disabled={hasMeasurementsInGroup}
-                                    onChange={e => handleConfigChange('officialStartDate', e.target.value)}
-                                    className={`mt-1 block w-full p-2.5 bg-white dark:bg-gray-800 border rounded-lg shadow-sm font-medium ${hasMeasurementsInGroup ? 'opacity-50 cursor-not-allowed bg-gray-100' : ''}`}
-                                />
-                                {hasMeasurementsInGroup && (
-                                    <p className="text-[10px] text-red-500 font-bold mt-1 uppercase italic">* Bloccato definitivamente: misurazioni già registrate.</p>
-                                )}
-                            </label>
-                            <label className="block">
-                                <span className="text-xs font-bold text-gray-500 uppercase">Dimensione Squadra (Numero Operai)</span>
-                                <div className="flex items-center gap-3 mt-1">
-                                    <input 
-                                        type="number" 
-                                        min="1" 
-                                        value={activeGroup.teamSize || 1} 
-                                        onChange={e => handleConfigChange('teamSize', parseInt(e.target.value) || 1)}
-                                        className="block w-24 p-2.5 bg-white dark:bg-gray-800 border rounded-lg shadow-sm font-bold text-indigo-600"
-                                    />
-                                    <span className="text-sm text-gray-500 italic">Determina la durata residua: €240/persona al giorno.</span>
-                                </div>
-                            </label>
-                        </div>
+            <div className="flex-grow overflow-y-auto pr-2 space-y-6">
+                <div className="bg-gradient-to-r from-indigo-50 to-blue-50 dark:from-indigo-950/40 dark:to-blue-950/30 p-5 rounded-2xl border border-indigo-100 dark:border-indigo-900 shadow-sm flex items-start gap-4">
+                  <div className="p-3 bg-indigo-600 text-white rounded-xl shadow-md">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h4 className="text-base font-black text-gray-900 dark:text-white uppercase tracking-tight">Parametri di Gruppo & Collocazione Contabile (SAL)</h4>
+                    <p className="text-xs text-gray-600 dark:text-gray-300 mt-1 leading-relaxed">
+                      La <strong>data di inizio</strong> è stabilita dal Cronoprogramma e non è modificabile manualmente da qui. Le altre <strong>tre opzioni</strong> (Tipologia A Misura/A Corpo, Oneri di Sicurezza, Squadra) sono sempre modificabili in modo flessibile per impostare la corretta collocazione nel SAL (D.Lgs. 36/2023).
+                    </p>
+                  </div>
+                </div>
 
-                        <div className="space-y-4">
-                            <div>
-                                <span className="text-xs font-bold text-gray-500 uppercase block mb-2">Tipologia Contabile</span>
-                                <div className="flex bg-gray-200 dark:bg-gray-700 p-1 rounded-lg w-full">
-                                    <button onClick={() => handleConfigChange('accountingType', 'measure')} className={`flex-1 py-2 text-xs font-black rounded-md transition-all ${activeGroup.accountingType === 'measure' ? 'bg-white dark:bg-gray-800 text-indigo-600 shadow-sm' : 'text-gray-500'}`}>A MISURA</button>
-                                    <button onClick={() => handleConfigChange('accountingType', 'body')} className={`flex-1 py-2 text-xs font-black rounded-md transition-all ${activeGroup.accountingType === 'body' ? 'bg-white dark:bg-gray-800 text-indigo-600 shadow-sm' : 'text-gray-500'}`}>A CORPO (%)</button>
-                                </div>
-                            </div>
-                            <div className="pt-2">
-                                <button 
-                                    onClick={() => handleConfigChange('isSecurityCost', !activeGroup.isSecurityCost)}
-                                    className={`w-full flex items-center justify-between p-3 rounded-xl border-2 transition-all ${activeGroup.isSecurityCost ? 'bg-orange-50 border-orange-500 text-orange-800' : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-500'}`}
-                                >
-                                    <span className="text-xs font-bold uppercase">Lavorazione di Sicurezza</span>
-                                    <div className={`w-10 h-5 rounded-full relative transition-colors ${activeGroup.isSecurityCost ? 'bg-orange-500' : 'bg-gray-300'}`}>
-                                        <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${activeGroup.isSecurityCost ? 'right-1' : 'left-1'}`} />
-                                    </div>
-                                </button>
-                                <p className="text-[10px] text-gray-500 mt-2 italic">* Se attivo, il valore non sarà soggetto a ribasso d'asta nel SAL.</p>
-                            </div>
-                        </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white dark:bg-gray-800 p-6 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-sm">
+                  {/* 1. DATA DI INIZIO (MODIFICABILE DA IMPOSTAZIONI, MAI DOPO OGGI) */}
+                  <div className="space-y-6">
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-xs font-black uppercase tracking-wider text-gray-500 dark:text-gray-400">1. Data Inizio Lavorazioni (Gruppo)</span>
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-300">
+                          📅 Scelta da Impostazioni
+                        </span>
+                      </div>
+                      <div className="relative">
+                        <EuropeanDateInput 
+                          value={activeGroup.officialStartDate || activeGroup.startDate || format(new Date(), 'yyyy-MM-dd')} 
+                          max={format(new Date(), 'yyyy-MM-dd')}
+                          disabled={isViewOnly || isLocked}
+                          onChange={val => {
+                            const todayStr = format(new Date(), 'yyyy-MM-dd');
+                            if (val && val <= todayStr) {
+                              handleConfigChange('officialStartDate', val);
+                              handleConfigChange('startDate', val);
+                            }
+                          }}
+                          className="block w-full p-3 bg-white dark:bg-gray-700 border-2 border-indigo-400 dark:border-indigo-600 rounded-xl shadow-sm font-mono font-bold text-indigo-700 dark:text-indigo-300 text-lg cursor-pointer pr-10"
+                        />
+                      </div>
+                      <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1.5 italic">
+                        * Caricata e gestita dal pulsante di impostazione di ogni gruppo. Mai successiva alla data odierna.
+                      </p>
                     </div>
+
+                    <div>
+                      <span className="text-xs font-black uppercase tracking-wider text-gray-500 dark:text-gray-400 block mb-1.5">4. Dimensione Squadra (Operai in Cantiere)</span>
+                      <div className="flex items-center gap-3">
+                        <input 
+                          type="number" 
+                          min="1" 
+                          max="50"
+                          value={activeGroup.teamSize || 2} 
+                          onChange={e => handleConfigChange('teamSize', Math.max(1, parseInt(e.target.value) || 1))}
+                          className="block w-28 p-3 bg-white dark:bg-gray-700 border-2 border-indigo-400 dark:border-indigo-600 rounded-xl shadow-sm font-black text-indigo-700 dark:text-indigo-300 text-lg text-center"
+                        />
+                        <div className="text-xs text-gray-600 dark:text-gray-300">
+                          <span className="font-bold">Produttività:</span> € 240/giorno per operaio.
+                          <p className="text-[10px] text-gray-500 italic">Ricalcola automaticamente la durata residua del gruppo.</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 2 & 3. TIPOLOGIA CONTABILE E SICUREZZA */}
+                  <div className="space-y-6">
+                    {/* 2. TIPOLOGIA CONTABILE */}
+                    <div>
+                      <span className="text-xs font-black uppercase tracking-wider text-gray-500 dark:text-gray-400 block mb-2">2. Tipologia Contabile (SAL)</span>
+                      <div className="grid grid-cols-2 gap-3 p-1 bg-gray-100 dark:bg-gray-700/60 rounded-xl border border-gray-200 dark:border-gray-600">
+                        <button 
+                          type="button"
+                          onClick={() => handleConfigChange('accountingType', 'measure')} 
+                          className={`py-3 px-3 rounded-lg text-xs font-black uppercase tracking-wider transition-all flex flex-col items-center justify-center gap-1 ${activeGroup.accountingType === 'measure' ? 'bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 shadow-md ring-2 ring-blue-500' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'}`}
+                        >
+                          <span>A MISURA</span>
+                          <span className="text-[9px] font-normal normal-case opacity-75">Quantità analitiche</span>
+                        </button>
+                        <button 
+                          type="button"
+                          onClick={() => handleConfigChange('accountingType', 'body')} 
+                          className={`py-3 px-3 rounded-lg text-xs font-black uppercase tracking-wider transition-all flex flex-col items-center justify-center gap-1 ${activeGroup.accountingType === 'body' ? 'bg-white dark:bg-gray-800 text-purple-600 dark:text-purple-400 shadow-md ring-2 ring-purple-500' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'}`}
+                        >
+                          <span>A CORPO</span>
+                          <span className="text-[9px] font-normal normal-case opacity-75">Aliquota percentuale (%)</span>
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-2">
+                        Nel SAL colloca le voci nel prospetto <strong>{activeGroup.accountingType === 'body' ? 'Lavori a Corpo' : 'Lavori a Misura'}</strong>.
+                      </p>
+                    </div>
+
+                    {/* 3. LAVORAZIONE DI SICUREZZA */}
+                    <div>
+                      <span className="text-xs font-black uppercase tracking-wider text-gray-500 dark:text-gray-400 block mb-2">3. Regime Economico (Ribasso d'Asta)</span>
+                      <button 
+                        type="button"
+                        onClick={() => handleConfigChange('isSecurityCost', !activeGroup.isSecurityCost)}
+                        className={`w-full flex items-center justify-between p-4 rounded-xl border-2 transition-all shadow-sm ${activeGroup.isSecurityCost ? 'bg-orange-50 dark:bg-orange-950/40 border-orange-500 text-orange-900 dark:text-orange-200' : 'bg-gray-50 dark:bg-gray-700/40 border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-300'}`}
+                      >
+                        <div className="text-left">
+                          <span className="text-xs font-black uppercase block">
+                            {activeGroup.isSecurityCost ? '🛡️ Oneri di Sicurezza (Non Soggetti a Ribasso)' : '🏗️ Lavori Ordinari (Soggetti a Ribasso d\'Asta)'}
+                          </span>
+                          <span className="text-[11px] opacity-80 font-normal">
+                            {activeGroup.isSecurityCost ? 'L\'importo non subisce il ribasso contrattuale nel SAL.' : 'L\'importo subisce il ribasso d\'asta contrattuale nel SAL.'}
+                          </span>
+                        </div>
+                        <div className={`w-12 h-6 rounded-full relative transition-colors flex-shrink-0 ml-3 ${activeGroup.isSecurityCost ? 'bg-orange-500' : 'bg-gray-300 dark:bg-gray-500'}`}>
+                          <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${activeGroup.isSecurityCost ? 'right-1' : 'left-1'}`} />
+                        </div>
+                      </button>
+                    </div>
+                  </div>
                 </div>
             </div>
           )}
 
+          {/* TAB 3: DIPENDENZE / LEGAMI */}
           {activeTab === 'dependencies' && (
              <div className="flex-grow overflow-y-auto pr-2 space-y-6">
                 <div className="grid grid-cols-2 gap-6">
@@ -694,42 +1354,20 @@ const TaskModal: React.FC<TaskModalProps> = ({ isOpen, onClose, group, allWorkGr
           )}
         </div>
 
-        {activeBoqPickerItem && (
-            <div className="fixed bg-white dark:bg-gray-800 shadow-2xl rounded-xl border border-gray-300 dark:border-gray-600 z-[100] flex flex-col" style={{ top: Math.min(pickerCoords.top, window.innerHeight - 450), left: pickerCoords.left, width: '600px', maxHeight: '420px' }}>
-                <div className="flex justify-between items-center p-3 bg-gray-100 dark:bg-gray-700 rounded-t-xl border-b">
-                    <div><h5 className="text-xs font-bold uppercase text-indigo-700 dark:text-indigo-300">Misure Originali da Computo</h5><p className="text-[10px] text-gray-500">Seleziona righe analitiche da importare nel libretto</p></div>
-                    <button onClick={() => setActiveBoqPickerItem(null)} className="p-1 hover:bg-gray-200 rounded">✕</button>
-                </div>
-                <div className="flex-grow overflow-y-auto">
-                    <table className="w-full text-[11px] text-left">
-                        <thead className="bg-gray-50 dark:bg-gray-900 sticky top-0 z-10 shadow-sm"><tr className="text-gray-500 uppercase font-bold border-b"><th className="px-3 py-2 w-10 text-center">Sel.</th><th className="px-2 py-2">Posizione / Note</th><th className="px-3 py-2 w-20 text-right">Quantità</th></tr></thead>
-                        <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-                            {activeGroup.items.find(i => i.articleCode === activeBoqPickerItem)?.originalMeasurements?.filter(boq => {
-                                const item = activeGroup.items.find(i => i.articleCode === activeBoqPickerItem);
-                                return !(item?.measurements || []).some(m => m.sourceBoqId === boq.id);
-                            }).map(boq => {
-                                const isSel = selectedBoqIds[activeBoqPickerItem]?.has(boq.id);
-                                return (
-                                    <tr key={boq.id} onClick={() => toggleBoqLineSelection(activeBoqPickerItem, boq.id)} className={`cursor-pointer transition-colors ${isSel ? 'bg-indigo-50' : 'hover:bg-gray-50'}`}>
-                                        <td className="px-3 py-2 text-center"><input type="checkbox" checked={isSel} readOnly className="h-3 w-3 text-indigo-600 rounded" /></td>
-                                        <td className="px-2 py-2 font-medium italic">{boq.description || 'Riga computo'}</td>
-                                        <td className="px-3 py-2 text-right font-bold text-indigo-600">{numberFormatter.format(getBoqRowQuantity(boq))}</td>
-                                    </tr>
-                                );
-                            })}
-                        </tbody>
-                    </table>
-                </div>
-                <div className="p-3 bg-gray-50 dark:bg-gray-900 rounded-b-xl border-t flex justify-between items-center">
-                    <span className="text-[10px] font-bold text-gray-500">Righe Selezionate: {selectedBoqIds[activeBoqPickerItem]?.size || 0}</span>
-                    <div className="flex gap-2"><button onClick={() => setActiveBoqPickerItem(null)} className="px-3 py-1.5 text-xs font-medium text-gray-600">Annulla</button><button onClick={() => importSelectedBoqLines(activeBoqPickerItem)} disabled={!selectedBoqIds[activeBoqPickerItem]?.size} className="px-4 py-1.5 bg-indigo-600 text-white rounded text-xs font-bold hover:bg-indigo-700 disabled:opacity-50">Importa Selezionate</button></div>
-                </div>
-            </div>
-        )}
-
-        <div className="flex-shrink-0 flex items-center justify-between p-3 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50 rounded-b-lg">
-          <button type="button" onClick={handleAttemptClose} className="px-6 py-2 text-xs font-black uppercase tracking-widest text-gray-500 hover:text-gray-800 transition-colors">Annulla</button>
-          {!(isViewOnly || isLocked) && <button type="button" onClick={handleSaveChanges} className="px-8 py-2.5 text-xs font-black uppercase tracking-widest text-white bg-indigo-600 rounded-lg shadow-md hover:bg-indigo-700 transition-all active:scale-95">Salva e Applica</button>}
+        {/* Footer azioni */}
+        <div className="flex-shrink-0 flex items-center justify-between p-3.5 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50 rounded-b-2xl">
+          <button type="button" onClick={handleAttemptClose} className="px-6 py-2.5 text-xs font-black uppercase tracking-widest text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 transition-colors">
+            Annulla
+          </button>
+          {!(isViewOnly || isLocked) && (
+            <button 
+              type="button" 
+              onClick={handleSaveChanges} 
+              className="px-8 py-2.5 text-xs font-black uppercase tracking-widest text-white bg-indigo-600 rounded-xl shadow-lg shadow-indigo-500/20 hover:bg-indigo-700 transition-all active:scale-95 flex items-center gap-2"
+            >
+              <span>💾 Salva e Applica Modifiche</span>
+            </button>
+          )}
         </div>
       </div>
     </div>

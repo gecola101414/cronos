@@ -2,6 +2,8 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Expense, WorkGroup, expenseCategories, ExpenseCategory } from '../types';
 import { format, parseISO, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isSameDay, isWithinInterval, isValid, startOfDay, endOfDay } from 'date-fns';
 import { it } from 'date-fns/locale/it';
+import { EuropeanDateInput } from './EuropeanDateInput';
+
 
 interface CostsViewProps {
   expenses: Expense[];
@@ -688,7 +690,18 @@ const CostsView: React.FC<CostsViewProps> = ({ expenses, workGroups, onAddExpens
 const InputField: React.FC<any> = ({ label, ...props }) => (
     <div>
         <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">{label}</label>
-        <input {...props} className="w-full p-2.5 text-sm bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition-colors" />
+        {props.type === 'date' ? (
+            <EuropeanDateInput 
+                value={props.value || ''} 
+                onChange={(val) => props.onChange({ target: { name: props.name, value: val } })} 
+                min={props.min}
+                max={props.max}
+                disabled={props.disabled}
+                className="w-full p-2.5 text-sm bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition-colors" 
+            />
+        ) : (
+            <input {...props} className="w-full p-2.5 text-sm bg-gray-50 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition-colors" />
+        )}
     </div>
 );
 

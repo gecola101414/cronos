@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { ProjectDocument, Team, Worker } from '../types';
 import { format, parseISO } from 'date-fns';
 import { it } from 'date-fns/locale/it';
+import { EuropeanDateInput } from './EuropeanDateInput';
 
 const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
 const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -78,6 +79,10 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
         // Remove input borders/bg for printing
         const inputs = clone.querySelectorAll('input');
         inputs.forEach(input => {
+            if (input.getAttribute('data-eu-picker') === 'true' || input.type === 'date') {
+                input.remove();
+                return;
+            }
             const val = input.value;
             const span = document.createElement('span');
             span.innerText = val;
@@ -487,10 +492,9 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                     <div className="flex justify-between items-start">
                         <div className="w-1/3 text-center">
                             <p className="mb-2 font-semibold text-gray-600 dark:text-gray-300">Data</p>
-                            <input 
-                                type="date" 
+                            <EuropeanDateInput 
                                 value={signatureDate}
-                                onChange={e => setSignatureDate(e.target.value)}
+                                onChange={val => setSignatureDate(val)}
                                 className="border-b border-gray-400 bg-transparent text-center w-full pb-1 focus:outline-none focus:border-indigo-500 font-medium text-gray-800 dark:text-white"
                             />
                         </div>
