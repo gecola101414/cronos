@@ -275,16 +275,31 @@ const TaskModal: React.FC<TaskModalProps> = ({
         const todayStr = format(new Date(), 'yyyy-MM-dd');
         const initialMeasurements: Record<string, MeasurementInputState> = {};
         const initialDeductions: Record<string, boolean> = {};
+
+        // REGOLA D'ORO: cerca l'ultima data immessa a libretto su qualsiasi voce (a corpo o a misura) del progetto
+        let latestGlobalDate: string | null = null;
+        allDocuments.forEach(doc => {
+            if (doc.isFrozen) return;
+            doc.workGroups.forEach(wg => {
+                const sourceItems = wg.id === group.id ? itemsWithFlags : wg.items;
+                sourceItems.forEach(it => {
+                    (it.measurements || []).forEach(m => {
+                        const isStorno = Boolean(m.reversesMeasurementId || (m.quantity < 0 && m.note?.toUpperCase().startsWith('STORNO')));
+                        if (!m.isReversed && !isStorno && m.date) {
+                            if (!latestGlobalDate || m.date > latestGlobalDate) {
+                                latestGlobalDate = m.date;
+                            }
+                        }
+                    });
+                });
+            });
+        });
+
+        const wbsStart = group.officialStartDate || group.startDate || todayStr;
+        const minAllowedDate = (latestGlobalDate && latestGlobalDate > wbsStart) ? latestGlobalDate : wbsStart;
+        const defaultDate = minAllowedDate <= todayStr ? minAllowedDate : todayStr;
         
         migratedGroup.items.forEach(item => {
-            // Data congruente: tra ultima misura attiva (non stornata) e oggi
-            const activeItemMeasures = (item.measurements || []).filter(m => !m.isReversed && !m.reversesMeasurementId && m.quantity > 0);
-            const latestItemDate = activeItemMeasures.length > 0 
-              ? activeItemMeasures.reduce((max, m) => m.date > max ? m.date : max, activeItemMeasures[0].date)
-              : null;
-            const wbsStart = group.officialStartDate || group.startDate;
-            const defaultDate = latestItemDate && latestItemDate <= todayStr ? latestItemDate : (wbsStart <= todayStr ? wbsStart : todayStr);
-
             // I campi sono liberi: la quantità è vuota e il residuo viene suggerito in grigio nel placeholder
             initialMeasurements[item.articleCode] = { 
               date: defaultDate,
@@ -302,7 +317,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
         setNewMeasurements(initialMeasurements);
         setDeductionModes(initialDeductions);
     }
-  }, [isOpen, group, initialTab]);
+  }, [isOpen, group, initialTab, allDocuments]);
   
   const handleAttemptClose = useCallback(() => {
     if (isDirty && !(isViewOnly || isLocked)) { 
@@ -354,43 +369,73 @@ const TaskModal: React.FC<TaskModalProps> = ({
     }); 
   };
 
-  // Calcolo dell'inizio lavori del progetto o gruppo per la massima libertà ma rispetto del calendario
-  const projectInizioLavori = useMemo(() => {
-    let earliest = activeGroup?.officialStartDate || activeGroup?.startDate || format(new Date(), 'yyyy-MM-dd');
-    if (allWorkGroups && allWorkGroups.length > 0) {
-      allWorkGroups.forEach(g => {
-        const gStart = g.officialStartDate || g.startDate;
-        if (gStart && gStart < earliest) earliest = gStart;
+  // REGOLA D'ORO DATE: Calcola l'ultima data immessa a libretto su qualsiasi voce (sia a corpo che a misura)
+  const latestGlobalMeasureDate = useMemo(() => {
+    let maxDate: string | null = null;
+
+    allDocuments.forEach(doc => {
+      if (doc.isFrozen) return;
+      doc.workGroups.forEach(wg => {
+        if (activeGroup && wg.id === activeGroup.id) return;
+        wg.items.forEach(item => {
+          (item.measurements || []).forEach(m => {
+            const isStorno = Boolean(m.reversesMeasurementId || (m.quantity < 0 && m.note?.toUpperCase().startsWith('STORNO')));
+            if (!m.isReversed && !isStorno && m.date) {
+              if (!maxDate || m.date > maxDate) {
+                maxDate = m.date;
+              }
+            }
+          });
+        });
+      });
+    });
+
+    if (activeGroup) {
+      activeGroup.items.forEach(item => {
+        (item.measurements || []).forEach(m => {
+          const isStorno = Boolean(m.reversesMeasurementId || (m.quantity < 0 && m.note?.toUpperCase().startsWith('STORNO')));
+          if (!m.isReversed && !isStorno && m.date) {
+            if (!maxDate || m.date > maxDate) {
+              maxDate = m.date;
+            }
+          }
+        });
       });
     }
-    const today = format(new Date(), 'yyyy-MM-dd');
-    return earliest <= today ? earliest : today;
-  }, [allWorkGroups, activeGroup]);
+
+    return maxDate;
+  }, [allDocuments, activeGroup]);
+
+  // Data di inizio di questa specifica attività (gruppo WBS)
+  const activityStartDate = useMemo(() => {
+    return activeGroup?.officialStartDate || activeGroup?.startDate || format(new Date(), 'yyyy-MM-dd');
+  }, [activeGroup?.officialStartDate, activeGroup?.startDate]);
+
+  // Data minima consentita dalla Regola d'Oro: max(data inizio attività, ultima data immessa nel libretto)
+  const goldenMinDate = useMemo(() => {
+    let minD = activityStartDate;
+    if (latestGlobalMeasureDate && latestGlobalMeasureDate > minD) {
+      minD = latestGlobalMeasureDate;
+    }
+    return minD;
+  }, [activityStartDate, latestGlobalMeasureDate]);
 
   // QUANDO L'UTENTE SCEGLIE LA MISURA DAL MENU A TENDINA DELLA CASELLA
   const handleSelectComputoMeasure = (articleCode: string, boqMeasureId: string) => {
     const item = activeGroup?.items.find(i => i.articleCode === articleCode);
-    if (!item) return;
+    if (!item || !activeGroup) return;
 
     const singleMeasures = getSingleBoqMeasuresForItem(item);
     const sm = singleMeasures.find(m => m.id === boqMeasureId);
     if (!sm) return;
 
-    const existingInputDate = newMeasurements[articleCode]?.date;
-    const activeItemMeasures = (item.measurements || []).filter(m => !m.isReversed && !m.reversesMeasurementId && m.quantity > 0);
-    const latestItemMeasureDate = activeItemMeasures.length > 0
-      ? activeItemMeasures.reduce((max, m) => m.date > max ? m.date : max, activeItemMeasures[0].date)
-      : null;
-
-    const wbsStart = activeGroup.officialStartDate || activeGroup.startDate || projectInizioLavori;
-    const inizioLavoriVoice = projectInizioLavori < wbsStart ? projectInizioLavori : wbsStart;
     const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const clampedMin = goldenMinDate <= todayStr ? goldenMinDate : todayStr;
+    const existingInputDate = newMeasurements[articleCode]?.date;
     
-    const targetDate = existingInputDate 
+    const targetDate = existingInputDate && existingInputDate >= clampedMin && existingInputDate <= todayStr
       ? existingInputDate 
-      : (latestItemMeasureDate && latestItemMeasureDate <= todayStr 
-          ? latestItemMeasureDate 
-          : (inizioLavoriVoice <= todayStr ? inizioLavoriVoice : todayStr));
+      : clampedMin;
 
     setNewMeasurements(prev => ({
       ...prev,
@@ -428,8 +473,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
     if (isViewOnly || isLocked || !activeGroup) return;
 
     const todayStr = format(new Date(), 'yyyy-MM-dd');
-    const wbsStart = activeGroup.officialStartDate || activeGroup.startDate;
-    const defaultDate = wbsStart <= todayStr ? wbsStart : todayStr;
+    const defaultDate = goldenMinDate <= todayStr ? goldenMinDate : todayStr;
 
     const newItem: ExtendedWorkItem = {
       articleCode: computoItem.articleCode,
@@ -532,31 +576,39 @@ const TaskModal: React.FC<TaskModalProps> = ({
     if (deductionModes[itemArticleCode]) quantity = -Math.abs(quantity);
     if (quantity === 0) return; 
 
-    // Calcolo data congruente (considerando solo le misure attive non stornate)
-    const activeMeasuresForCurrent = (linkedBoq
-      ? (item.measurements || []).filter(m => m.sourceBoqId === linkedBoq.id)
-      : (item.measurements || [])
-    ).filter(m => !m.isReversed && !m.reversesMeasurementId && m.quantity > 0);
-
-    const latestRelevantDate = activeMeasuresForCurrent.length > 0 
-      ? activeMeasuresForCurrent.reduce((max, m) => m.date > max ? m.date : max, activeMeasuresForCurrent[0].date)
-      : null;
-
-    const wbsStart = activeGroup.officialStartDate || activeGroup.startDate || projectInizioLavori;
-    const inizioLavoriVoice = projectInizioLavori < wbsStart ? projectInizioLavori : wbsStart;
+    // REGOLA D'ORO DATE:
+    // 1) Non inferiore all'ultima data immessa a libretto (su qualsiasi voce sia a corpo che a misura), al massimo uguale
+    // 2) Non inferiore alla data di inizio di questa attività
+    // 3) Non superiore alla data odierna
     const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const actStart = activeGroup.officialStartDate || activeGroup.startDate || todayStr;
 
-    let minAllowedDate = latestRelevantDate || inizioLavoriVoice;
-    if (minAllowedDate > todayStr) minAllowedDate = todayStr;
+    if (actStart > todayStr) {
+      setValidationNotice(`⛔ DATA INIZIO ATTIVITÀ FUTURA: La data di inizio di questa attività (${format(parseISO(actStart), 'dd/MM/yyyy')}) è successiva alla data odierna (${format(parseISO(todayStr), 'dd/MM/yyyy')}). Aggiorna prima la data di inizio nelle Impostazioni Gruppo.`);
+      return;
+    }
 
-    let measureDate = measurementInput?.date || (latestRelevantDate && latestRelevantDate <= todayStr ? latestRelevantDate : (inizioLavoriVoice <= todayStr ? inizioLavoriVoice : todayStr));
+    const minAllowedDate = (latestGlobalMeasureDate && latestGlobalMeasureDate > actStart)
+      ? latestGlobalMeasureDate
+      : actStart;
+
+    if (minAllowedDate > todayStr) {
+      setValidationNotice(`⛔ DATA NON CONGRUENTE: La data minima consentita (${format(parseISO(minAllowedDate), 'dd/MM/yyyy')}) supera la data odierna (${format(parseISO(todayStr), 'dd/MM/yyyy')}).`);
+      return;
+    }
+
+    const measureDate = measurementInput?.date || minAllowedDate;
     
-    if (measureDate < minAllowedDate) {
-      setValidationNotice(`⛔ DATA NON CONGRUENTE: La data (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere anteriore a ${format(parseISO(minAllowedDate), 'dd/MM/yyyy')}.`);
+    if (measureDate < actStart) {
+      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data della misura (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere inferiore alla data di inizio di questa attività (${format(parseISO(actStart), 'dd/MM/yyyy')}).`);
+      return;
+    }
+    if (latestGlobalMeasureDate && measureDate < latestGlobalMeasureDate) {
+      setValidationNotice(`⛔ REGOLA D'ORO DATE: La misura successiva (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere inferiore all'ultima data immessa a libretto (${format(parseISO(latestGlobalMeasureDate), 'dd/MM/yyyy')}), al massimo uguale.`);
       return;
     }
     if (measureDate > todayStr) {
-      setValidationNotice(`⛔ DATA NON CONGRUENTE: La data (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere successiva a oggi (${format(parseISO(todayStr), 'dd/MM/yyyy')}).`);
+      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data della misura (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere superiore alla data odierna (${format(parseISO(todayStr), 'dd/MM/yyyy')}).`);
       return;
     }
 
@@ -572,7 +624,8 @@ const TaskModal: React.FC<TaskModalProps> = ({
         length: measurementInput?.length ? parseFloat(measurementInput.length.replace(',', '.')) : undefined, 
         width: measurementInput?.width ? parseFloat(measurementInput.width.replace(',', '.')) : undefined, 
         height: measurementInput?.height ? parseFloat(measurementInput.height.replace(',', '.')) : undefined,
-        sourceBoqId: linkedBoq?.id
+        sourceBoqId: linkedBoq?.id,
+        createdAt: Date.now()
     };
 
     setActiveGroup(prev => { 
@@ -580,20 +633,30 @@ const TaskModal: React.FC<TaskModalProps> = ({
         return { ...prev, items: prev.items.map(i => i.articleCode === itemArticleCode ? { ...i, measurements: [...(i.measurements || []), newMeasurement] } : i) }; 
     });
 
-    // Per la misura successiva, la data riparte da quella appena caricata (fino a oggi)
-    setNewMeasurements(prev => ({ 
-      ...prev, 
-      [itemArticleCode]: { 
-        date: measureDate, 
-        quantity: '', 
-        note: '', 
-        factor: '', 
-        length: '', 
-        width: '', 
-        height: '', 
-        sourceBoqId: undefined 
-      } 
-    }));
+    // Per la misura successiva di qualsiasi voce, la data riparte da quella appena caricata (non può più essere inferiore a measureDate)
+    setNewMeasurements(prev => {
+      const next: Record<string, MeasurementInputState> = { ...prev };
+      Object.keys(next).forEach(code => {
+        if (code === itemArticleCode) {
+          next[code] = {
+            date: measureDate,
+            quantity: '',
+            note: '',
+            factor: '',
+            length: '',
+            width: '',
+            height: '',
+            sourceBoqId: undefined
+          };
+        } else if (!next[code]?.date || next[code].date! < measureDate) {
+          next[code] = {
+            ...next[code],
+            date: measureDate
+          };
+        }
+      });
+      return next;
+    });
     setIsDirty(true);
   };
 
@@ -627,8 +690,40 @@ const TaskModal: React.FC<TaskModalProps> = ({
       height: m.height,
       sourceBoqId: m.sourceBoqId,
       reversesMeasurementId: m.id,
-      _isCommitted: false
+      _isCommitted: false,
+      createdAt: Date.now()
     };
+
+    // Calcola la nuova ultima data attiva escludendo la misura appena stornata
+    let latestRemainingDate: string | null = null;
+    allDocuments.forEach(doc => {
+      if (doc.isFrozen) return;
+      doc.workGroups.forEach(wg => {
+        if (wg.id === activeGroup.id) return;
+        wg.items.forEach(it => {
+          (it.measurements || []).forEach(other => {
+            const isStorno = Boolean(other.reversesMeasurementId || (other.quantity < 0 && other.note?.toUpperCase().startsWith('STORNO')));
+            if (!other.isReversed && !isStorno && other.date) {
+              if (!latestRemainingDate || other.date > latestRemainingDate) latestRemainingDate = other.date;
+            }
+          });
+        });
+      });
+    });
+    activeGroup.items.forEach(it => {
+      (it.measurements || []).forEach((other, idx) => {
+        if (it.articleCode === itemArticleCode && idx === mIndex) return;
+        const isStorno = Boolean(other.reversesMeasurementId || (other.quantity < 0 && other.note?.toUpperCase().startsWith('STORNO')));
+        if (!other.isReversed && !isStorno && other.date) {
+          if (!latestRemainingDate || other.date > latestRemainingDate) latestRemainingDate = other.date;
+        }
+      });
+    });
+
+    const actStart = activeGroup.officialStartDate || activeGroup.startDate || todayStr;
+    const minDateAfterStorno = (latestRemainingDate && latestRemainingDate > actStart) ? latestRemainingDate : actStart;
+    const prefillDateBase = m.date && m.date >= minDateAfterStorno ? m.date : minDateAfterStorno;
+    const prefillDate = prefillDateBase <= todayStr ? prefillDateBase : todayStr;
 
     setActiveGroup(prev => {
       if (!prev) return null;
@@ -644,11 +739,11 @@ const TaskModal: React.FC<TaskModalProps> = ({
       };
     });
 
-    // Precompila il rigo inferiore con i dati della misura stornata per agevolare il ricaricamento modificato
+    // Precompila il rigo inferiore con i dati della misura stornata e data coerente con la Regola d'Oro
     setNewMeasurements(prev => ({
       ...prev,
       [itemArticleCode]: {
-        date: m.date && m.date <= todayStr ? m.date : todayStr,
+        date: prefillDate,
         note: m.note || '',
         factor: m.factor !== undefined ? String(m.factor) : '',
         length: m.length !== undefined ? String(m.length) : '',
@@ -789,7 +884,52 @@ const TaskModal: React.FC<TaskModalProps> = ({
       return;
     }
 
-    const validDate = editMeasureDraft.date <= todayStr ? editMeasureDraft.date : todayStr;
+    const actStart = activeGroup.officialStartDate || activeGroup.startDate || todayStr;
+    if (editMeasureDraft.date < actStart) {
+      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data modificata (${format(parseISO(editMeasureDraft.date), 'dd/MM/yyyy')}) non può essere inferiore alla data di inizio di questa attività (${format(parseISO(actStart), 'dd/MM/yyyy')}).`);
+      return;
+    }
+    if (editMeasureDraft.date > todayStr) {
+      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data modificata (${format(parseISO(editMeasureDraft.date), 'dd/MM/yyyy')}) non può essere superiore alla data odierna (${format(parseISO(todayStr), 'dd/MM/yyyy')}).`);
+      return;
+    }
+
+    // Verifica coerenza progressiva rispetto alle altre misure già immesse prima di questa
+    let maxPriorDate: string | null = null;
+    allDocuments.forEach(doc => {
+      if (doc.isFrozen) return;
+      doc.workGroups.forEach(wg => {
+        if (wg.id === activeGroup.id) return;
+        wg.items.forEach(it => {
+          (it.measurements || []).forEach(other => {
+            const isSt = Boolean(other.reversesMeasurementId || (other.quantity < 0 && other.note?.toUpperCase().startsWith('STORNO')));
+            if (!other.isReversed && !isSt && other.date) {
+              if (!m.createdAt || !other.createdAt || other.createdAt < m.createdAt) {
+                if (!maxPriorDate || other.date > maxPriorDate) maxPriorDate = other.date;
+              }
+            }
+          });
+        });
+      });
+    });
+    activeGroup.items.forEach(it => {
+      (it.measurements || []).forEach(other => {
+        if (other.id === m.id) return;
+        const isSt = Boolean(other.reversesMeasurementId || (other.quantity < 0 && other.note?.toUpperCase().startsWith('STORNO')));
+        if (!other.isReversed && !isSt && other.date) {
+          if (m.createdAt && other.createdAt && other.createdAt < m.createdAt) {
+            if (!maxPriorDate || other.date > maxPriorDate) maxPriorDate = other.date;
+          }
+        }
+      });
+    });
+
+    if (maxPriorDate && editMeasureDraft.date < maxPriorDate) {
+      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data (${format(parseISO(editMeasureDraft.date), 'dd/MM/yyyy')}) non può essere inferiore alla precedente data immessa a libretto (${format(parseISO(maxPriorDate), 'dd/MM/yyyy')}).`);
+      return;
+    }
+
+    const validDate = editMeasureDraft.date;
 
     setActiveGroup(prev => {
       if (!prev) return null;
@@ -930,11 +1070,21 @@ const TaskModal: React.FC<TaskModalProps> = ({
                       </span>
                     )}
                 </div>
-                <div className="flex items-center gap-3 text-xs font-mono font-bold">
-                    <span className="text-gray-500">Inizio Cronoprogramma:</span>
-                    <span className="bg-white/80 dark:bg-gray-800/80 px-2 py-0.5 rounded border flex items-center gap-1">
-                      🔒 {format(parse(activeGroup.startDate, 'yyyy-MM-dd', new Date()), 'dd/MM/yyyy')}
-                    </span>
+                <div className="flex items-center gap-3 text-xs font-mono font-bold flex-wrap">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-gray-500">Inizio Attività:</span>
+                      <span className="bg-white/80 dark:bg-gray-800/80 px-2 py-0.5 rounded border flex items-center gap-1">
+                        📅 {format(parseISO(activityStartDate), 'dd/MM/yyyy')}
+                      </span>
+                    </div>
+                    {latestGlobalMeasureDate && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-gray-500">Ultima Data Libretto:</span>
+                        <span className="bg-indigo-100 dark:bg-indigo-900/80 text-indigo-800 dark:text-indigo-200 px-2 py-0.5 rounded border border-indigo-300 dark:border-indigo-700 flex items-center gap-1">
+                          ⏱️ {format(parseISO(latestGlobalMeasureDate), 'dd/MM/yyyy')}
+                        </span>
+                      </div>
+                    )}
                 </div>
             </div>
 
@@ -1052,23 +1202,17 @@ const TaskModal: React.FC<TaskModalProps> = ({
                       const isExceeded = previewQty > (maxAllowed + 0.001);
                       const previewVal = (previewQty > 0 ? previewQty : 0) * item.unitPrice;
 
-                      // CONGRUITA CALENDARIO PER OGNI VOCE O MISURA (considerando solo le misure attive non stornate)
-                      const activeItemMeasures = (item.measurements || []).filter(m => !m.isReversed && !m.reversesMeasurementId && m.quantity > 0);
-                      const latestItemMeasureDate = activeItemMeasures.length > 0 
-                        ? activeItemMeasures.reduce((max, m) => m.date > max ? m.date : max, activeItemMeasures[0].date)
-                        : null;
-
-                      const wbsStart = activeGroup.officialStartDate || activeGroup.startDate || projectInizioLavori;
-                      const inizioLavoriVoice = projectInizioLavori < wbsStart ? projectInizioLavori : wbsStart;
+                      // REGOLA D'ORO DATE PER OGNI VOCE (SIA A CORPO CHE A MISURA):
+                      // La misura successiva non può essere inferiore all'ultima data immessa a libretto (al massimo uguale),
+                      // non può essere inferiore alla data inizio di questa attività, e non può superare la data odierna.
                       const todayStr = format(new Date(), 'yyyy-MM-dd');
-                      
-                      let itemMinDate = latestItemMeasureDate || inizioLavoriVoice;
-                      if (itemMinDate > todayStr) itemMinDate = todayStr;
+                      const itemMinDate = goldenMinDate <= todayStr ? goldenMinDate : todayStr;
                       const itemMaxDate = todayStr;
+                      const editMinDate = activityStartDate <= todayStr ? activityStartDate : todayStr;
 
                       const currentItemDate = measurementInput?.date 
                         ? (measurementInput.date < itemMinDate ? itemMinDate : (measurementInput.date > itemMaxDate ? itemMaxDate : measurementInput.date))
-                        : (latestItemMeasureDate && latestItemMeasureDate <= todayStr ? latestItemMeasureDate : (inizioLavoriVoice <= todayStr ? inizioLavoriVoice : todayStr));
+                        : itemMinDate;
 
                       return (
                         <div key={item.articleCode} className="p-4 border border-gray-200 dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 shadow-sm space-y-3">
@@ -1217,7 +1361,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                             <td className="p-1 align-middle">
                                               <EuropeanDateInput
                                                 value={editMeasureDraft.date}
-                                                min={inizioLavoriVoice}
+                                                min={editMinDate}
                                                 max={itemMaxDate}
                                                 onChange={val => setEditMeasureDraft(prev => prev ? { ...prev, date: val } : null)}
                                                 className="w-full p-1 text-[11px] font-mono font-bold bg-white dark:bg-gray-700 border border-amber-400 rounded text-gray-900 dark:text-white"

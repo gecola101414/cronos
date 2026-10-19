@@ -48,6 +48,7 @@ export interface Measurement {
   isReversed?: boolean; // Indica che la misurazione è stata stornata
   reversedById?: string; // ID della misurazione di storno associata
   reversesMeasurementId?: string; // ID della misurazione originale che questa riga storna
+  createdAt?: number; // Timestamp di inserimento per preservare l'ordine progressivo a parità di data
 }
 
 export type AccountingType = 'measure' | 'body'; // 'measure' = A Misura, 'body' = A Corpo

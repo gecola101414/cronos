@@ -20,7 +20,7 @@ const createMeasureRows = (group: WorkGroup, startProgressive: number) => {
   // Header del Gruppo (WBS)
   rows.push(
       <tr key={`grp-header-${group.id}`} className="bg-gray-100 dark:bg-gray-700 border-b border-gray-300 dark:border-gray-600 print-row">
-          <td colSpan={9} className="p-2 font-bold text-gray-800 dark:text-gray-200 uppercase tracking-wider pl-4">
+          <td colSpan={8} className="p-2 font-bold text-gray-800 dark:text-gray-200 uppercase tracking-wider pl-4">
               {group.name}
           </td>
       </tr>
@@ -32,7 +32,7 @@ const createMeasureRows = (group: WorkGroup, startProgressive: number) => {
       // Header Articolo
       rows.push(
           <tr key={`item-header-${item.articleCode}`} className="bg-gray-50 dark:bg-gray-800/30 border-b dark:border-gray-700 print-row">
-              <td colSpan={9} className="p-1 pl-6 font-semibold text-indigo-900 dark:text-indigo-300">
+              <td colSpan={8} className="p-1 pl-6 font-semibold text-indigo-900 dark:text-indigo-300">
                   {item.articleCode} - {item.description} <span className="font-normal text-gray-600">({item.unit})</span>
               </td>
           </tr>
@@ -45,10 +45,8 @@ const createMeasureRows = (group: WorkGroup, startProgressive: number) => {
           itemTotalQty += m.quantity;
           rows.push(
               <tr key={`${item.articleCode}-${idx}`} className="border-b border-gray-200 dark:border-gray-600 print-row hover:bg-gray-50">
-                  <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center text-gray-700">{currentProgressive}</td>
+                  <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center font-bold text-indigo-700">{currentProgressive}</td>
                   <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center">{format(parseISO(m.date), 'dd/MM/yy')}</td>
-                  {/* PATTO DI ACCIAIO: Terza colonna rappresenta il num ordine della voce nel computo */}
-                  <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center font-bold text-indigo-700">{item.originalIndex || '-'}</td>
                   <td className="p-1 border-r border-gray-300 dark:border-gray-600 pl-4 italic text-gray-800 dark:text-gray-300 truncate max-w-[250px]">{m.note || '-'}</td>
                   <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center">{m.factor || ''}</td>
                   <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center">{m.length || ''}</td>
@@ -63,7 +61,7 @@ const createMeasureRows = (group: WorkGroup, startProgressive: number) => {
       // Totale Articolo
       rows.push(
           <tr key={`item-total-${item.articleCode}`} className="bg-gray-50/80 dark:bg-gray-800/50 border-b border-gray-400 dark:border-gray-500 print-row">
-              <td colSpan={8} className="p-1 text-right pr-2 font-semibold text-gray-600">Totale {item.articleCode}</td>
+              <td colSpan={7} className="p-1 text-right pr-2 font-semibold text-gray-600">Totale {item.articleCode}</td>
               <td className="p-1 text-right font-bold pr-2 text-black">{numberFormatter.format(itemTotalQty)}</td>
           </tr>
       );
@@ -98,7 +96,7 @@ const createBodyGroupRows = (group: WorkGroup, startProgressive: number) => {
 
     rows.push(
         <tr key={`body-header-${group.id}`} className="bg-purple-50 dark:bg-purple-900/40 border-b border-purple-300 dark:border-purple-700 print-row">
-            <td colSpan={9} className="p-2 font-bold text-purple-900 dark:text-purple-100 uppercase tracking-wider pl-4">
+            <td colSpan={8} className="p-2 font-bold text-purple-900 dark:text-purple-100 uppercase tracking-wider pl-4">
                 {group.name} <span className="font-normal normal-case ml-2">- (Valore Totale WBS: {currencyFormatter.format(group.value)})</span>
             </td>
         </tr>
@@ -113,9 +111,6 @@ const createBodyGroupRows = (group: WorkGroup, startProgressive: number) => {
             <tr key={`body-row-${group.id}-${date}`} className="border-b border-gray-200 dark:border-gray-600 print-row hover:bg-purple-50 dark:hover:bg-purple-900/20">
                 <td className="p-2 border-r border-gray-300 dark:border-gray-600 text-center font-bold text-purple-900 dark:text-purple-400">{currentProgressive}</td>
                 <td className="p-2 border-r border-gray-300 dark:border-gray-600 text-center font-medium">{format(parseISO(date), 'dd/MM/yy')}</td>
-                
-                {/* PATTO DI ACCIAIO: Per lavori a corpo, la colonna Pos. indica il primo indice disponibile o il gruppo */}
-                <td className="p-2 border-r border-gray-300 dark:border-gray-600 text-center font-bold text-purple-700">WBS</td>
                 
                 <td className="p-2 border-r border-gray-300 dark:border-gray-600 font-bold text-gray-900 dark:text-gray-200">
                     {group.name}
@@ -137,7 +132,7 @@ const createBodyGroupRows = (group: WorkGroup, startProgressive: number) => {
 
     rows.push(
         <tr key={`body-total-${group.id}`} className="bg-purple-100 dark:bg-purple-900/20 border-t-2 border-purple-300 dark:border-purple-600 print-row">
-            <td colSpan={8} className="p-2 text-right pr-4 font-bold text-purple-900 dark:text-purple-300">
+            <td colSpan={7} className="p-2 text-right pr-4 font-bold text-purple-900 dark:text-purple-300">
                 Totale Avanzamento % Cumulato
             </td>
             <td className="p-2 text-right font-black pr-2 text-purple-900 dark:text-white bg-purple-200 dark:bg-purple-800">
@@ -183,16 +178,14 @@ const SalReportView: React.FC<{ documents: ProjectDocument[] }> = ({ documents }
       <table className="w-full text-[12px] border-collapse border border-black dark:border-gray-600 print-table table-fixed shadow-sm">
         <thead>
           <tr className="bg-gray-200 text-black dark:bg-gray-950 dark:text-white">
-            <th className="border-r border-black p-2 w-[5%] text-center font-bold">N.</th>
-            <th className="border-r border-black p-2 w-[8%] text-center font-bold">Data</th>
-            {/* PATTO DI ACCIAIO: Nuova colonna Pos. che rappresenta l'ordine nel computo */}
-            <th className="border-r border-black p-2 w-[5%] text-center font-bold">Pos.</th>
-            <th className="border-r border-black p-2 w-[37%] text-left pl-4 font-bold">Descrizione Lavori</th>
-            <th className="border-r border-black p-2 w-[5%] text-center font-bold">Fatt.</th>
-            <th className="border-r border-black p-2 w-[5%] text-center font-bold">Lung.</th>
-            <th className="border-r border-black p-2 w-[5%] text-center font-bold">Larg.</th>
-            <th className="border-r border-black p-2 w-[5%] text-center font-bold">Alt/Peso</th>
-            <th className="p-2 w-[15%] text-right pr-4 font-bold">Quantità</th>
+            <th className="border-r border-black p-2 w-[7%] text-center font-bold">Num. ord.</th>
+            <th className="border-r border-black p-2 w-[9%] text-center font-bold">Data</th>
+            <th className="border-r border-black p-2 w-[40%] text-left pl-4 font-bold">Descrizione Lavori</th>
+            <th className="border-r border-black p-2 w-[6%] text-center font-bold">Fatt.</th>
+            <th className="border-r border-black p-2 w-[6%] text-center font-bold">Lung.</th>
+            <th className="border-r border-black p-2 w-[6%] text-center font-bold">Larg.</th>
+            <th className="border-r border-black p-2 w-[6%] text-center font-bold">Alt/Peso</th>
+            <th className="p-2 w-[14%] text-right pr-4 font-bold">Quantità</th>
           </tr>
         </thead>
         <tbody className="bg-white dark:bg-gray-800 text-black dark:text-gray-200">
