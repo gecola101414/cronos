@@ -2,7 +2,7 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { fetchServerDateHeader } from './services/licenseService';
 import { saveToGoogleDrive } from './services/googleDriveService';
-import { WorkGroup, ProjectDocument, WorkItem, Risk, Expense, Dependency, Team, Worker, SavedProject, ContractConfig, SalEntry } from './types';
+import { WorkGroup, ProjectDocument, WorkItem, Risk, Expense, Dependency, Team, Worker, SavedProject, ContractConfig, SalEntry, PriceDepreciation } from './types';
 import GanttChart from './components/GanttChart';
 import Loader from './components/Loader';
 import Header from './components/Header';
@@ -36,16 +36,25 @@ const colorPalette = [
   '#E67E22', '#1ABC9C', '#3498DB', '#9B59B6', '#E74C3C',
 ];
 
-function isNewProjectFile(data: any): data is { id?: string, projectDocuments: ProjectDocument[], expenses: Expense[], projectName?: string, teams?: Team[], workers?: Worker[], lastSavedTime?: string, contractConfig?: ContractConfig, sals?: SalEntry[] } {
+function isNewProjectFile(data: any): data is { id?: string, projectDocuments: ProjectDocument[], expenses: Expense[], projectName?: string, teams?: Team[], workers?: Worker[], lastSavedTime?: string, contractConfig?: ContractConfig, sals?: SalEntry[], priceDepreciations?: PriceDepreciation[] } {
     return data && typeof data === 'object' && 'projectDocuments' in data && Array.isArray(data.projectDocuments);
 }
 
 function isRawJsonComputo(data: any): data is any[] {
-    return Array.isArray(data) && data.length > 0 && data[0].groupName !== undefined;
+    if (Array.isArray(data) && data.length > 0) {
+        return data[0].groupName !== undefined || data[0].items !== undefined || data[0].articleCode !== undefined || data[0].tariffCode !== undefined || data[0].categoria !== undefined;
+    }
+    if (data && typeof data === 'object') {
+        const arr = data.computo || data.groups || data.workGroups || data.items || data.articles;
+        return Array.isArray(arr) && arr.length > 0;
+    }
+    return false;
 }
 
 function isGecolaData(data: any): boolean {
-    return data && data.gecolaData && Array.isArray(data.gecolaData.categories) && Array.isArray(data.gecolaData.articles);
+    if (!data) return false;
+    const gec = data.gecolaData || data;
+    return gec && Array.isArray(gec.articles) && (Array.isArray(gec.categories) || Array.isArray(gec.groups));
 }
 
 const sanitizeDocuments = (documents: ProjectDocument[]): ProjectDocument[] => {
@@ -108,6 +117,7 @@ const App: React.FC = () => {
   const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
   const [contractConfig, setContractConfig] = useState<ContractConfig | undefined>(undefined);
   const [sals, setSals] = useState<SalEntry[]>([]);
+  const [priceDepreciations, setPriceDepreciations] = useState<PriceDepreciation[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [activeView, setActiveView] = useState<View>('dashboard');
@@ -139,13 +149,13 @@ const App: React.FC = () => {
   const saveCurrentProject = useCallback(() => {
       if (!currentProjectId || currentProjectId === 'shared-view' || isDemoMode) return;
       const existingProject = savedProjects.find(p => p.id === currentProjectId);
-      const projectData: SavedProject = { id: currentProjectId, name: projectName, location: existingProject?.location, status: existingProject?.status || 'active', lastModified: new Date().toISOString(), contractConfig, data: { projectDocuments, expenses, teams, workers, sals } };
+      const projectData: SavedProject = { id: currentProjectId, name: projectName, location: existingProject?.location, status: existingProject?.status || 'active', lastModified: new Date().toISOString(), contractConfig, data: { projectDocuments, expenses, teams, workers, sals, priceDepreciations } };
       setSavedProjects(prev => { const filtered = prev.filter(p => p.id !== currentProjectId); const updated = [...filtered, projectData].sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime()); localStorage.setItem('chronos_projects', JSON.stringify(updated)); return updated; });
-  }, [currentProjectId, projectName, projectDocuments, expenses, teams, workers, savedProjects, contractConfig, sals, isDemoMode]);
+  }, [currentProjectId, projectName, projectDocuments, expenses, teams, workers, savedProjects, contractConfig, sals, priceDepreciations, isDemoMode]);
 
   const handleUpdateSavedProject = useCallback((projectId: string, name: string, location: string) => { setSavedProjects(prev => { const updated = prev.map(p => p.id === projectId ? { ...p, name, location, lastModified: new Date().toISOString() } : p); localStorage.setItem('chronos_projects', JSON.stringify(updated)); return updated; }); }, []);
 
-  useEffect(() => { if (currentProjectId && !isShareMode && !isDemoMode && !isSessionExpired) { const timer = setTimeout(() => saveCurrentProject(), 2000); return () => clearTimeout(timer); } }, [projectDocuments, expenses, projectName, currentProjectId, isShareMode, isDemoMode, isSessionExpired, saveCurrentProject, teams, workers, contractConfig, sals]);
+  useEffect(() => { if (currentProjectId && !isShareMode && !isDemoMode && !isSessionExpired) { const timer = setTimeout(() => saveCurrentProject(), 2000); return () => clearTimeout(timer); } }, [projectDocuments, expenses, projectName, currentProjectId, isShareMode, isDemoMode, isSessionExpired, saveCurrentProject, teams, workers, contractConfig, sals, priceDepreciations]);
 
   const calculateRemainingDays = useCallback((activationDateStr: string | null, validityDaysStr: string | null, now: Date) => { if (!activationDateStr || !validityDaysStr) { setRemainingDays(null); return; } const validityDays = parseInt(validityDaysStr, 10); if (validityDays === 9999) { setRemainingDays(9999); return; } const expiryDate = addDays(new Date(activationDateStr), validityDays); setRemainingDays(Math.max(0, differenceInDays(expiryDate, now) + 1)); }, []);
   const handleReset = useCallback(() => { localStorage.removeItem('isChronosAILoggedIn'); localStorage.removeItem('isChronosAIAdmin'); localStorage.removeItem('activationDate'); localStorage.removeItem('licenseValidity'); localStorage.removeItem('chronosAIUserEmail'); window.location.href = window.location.origin + window.location.pathname; }, []);
@@ -164,6 +174,7 @@ const App: React.FC = () => {
                        setTeams(parsedData.teams || []);
                        setWorkers(parsedData.workers || []);
                        setSals(parsedData.sals || []);
+                       setPriceDepreciations(parsedData.priceDepreciations || []);
                        setProjectName(parsedData.projectName || "Progetto Condiviso");
                        if(parsedData.contractConfig) setContractConfig(parsedData.contractConfig);
                     }
@@ -237,18 +248,33 @@ const App: React.FC = () => {
                 if (jsonData.lastSavedTime) setLastSavedTime(jsonData.lastSavedTime);
                 if (jsonData.contractConfig) setContractConfig(jsonData.contractConfig);
                 if (jsonData.sals) setSals(jsonData.sals);
+                if (jsonData.priceDepreciations) setPriceDepreciations(jsonData.priceDepreciations);
                 if (jsonData.teams) setTeams(prev => { const map = new Map(prev.map(t => [t.id, t])); jsonData.teams?.forEach((t:any) => map.set(t.id, t)); return Array.from(map.values()); });
                 if (jsonData.workers) setWorkers(prev => { const map = new Map(prev.map(w => [w.id, w])); jsonData.workers?.forEach((w:any) => map.set(w.id, w)); return Array.from(map.values()); });
                 setCurrentProjectId(jsonData.id || crypto.randomUUID());
             }
         } 
         else if (isGecolaData(jsonData)) {
-            const gecola = jsonData.gecolaData;
+            const gecola = jsonData.gecolaData || jsonData;
+            const rawCategories = gecola.categories || gecola.groups || [];
+            const rawArticles: any[] = gecola.articles || gecola.items || [];
             let currentDate = new Date();
-            let globalItemCounter = 1; 
-            
-            const mappedGroups: WorkGroup[] = gecola.categories.map((cat: any, idx: number) => {
-                const groupArticles = gecola.articles.filter((art: any) => art.categoryCode === cat.code);
+            let globalItemCounter = 1;
+            const assignedArticles = new Set<any>();
+
+            const mappedGroups: WorkGroup[] = rawCategories.map((cat: any, idx: number) => {
+                const catCodeNorm = String(cat.code ?? cat.id ?? cat.codice ?? '').trim().toLowerCase();
+                const catNameNorm = String(cat.name ?? '').trim().toLowerCase();
+                
+                const groupArticles = rawArticles.filter((art: any) => {
+                    const artCatCode = String(art.categoryCode ?? art.categoryId ?? art.catCode ?? art.category ?? art.codiceCategoria ?? '').trim().toLowerCase();
+                    const artCatName = String(art.categoryName ?? art.categoria ?? art.category ?? '').trim().toLowerCase();
+                    const matches = (catCodeNorm && artCatCode === catCodeNorm) ||
+                                    (catNameNorm && (artCatCode === catNameNorm || artCatName === catNameNorm));
+                    if (matches) assignedArticles.add(art);
+                    return matches;
+                });
+
                 const totalValue = groupArticles.reduce((acc: number, art: any) => acc + ((art.unitPrice || 0) * (art.quantity || 0)), 0);
                 const teamSize = 2;
                 const workingDays = Math.max(3, Math.ceil(totalValue / (240 * teamSize)));
@@ -258,7 +284,7 @@ const App: React.FC = () => {
 
                 return {
                     id: crypto.randomUUID(),
-                    name: cat.name,
+                    name: cat.name || `Categoria ${idx + 1}`,
                     duration: workingDays,
                     teamSize: teamSize,
                     value: totalValue,
@@ -267,16 +293,16 @@ const App: React.FC = () => {
                     endDate: format(endDate, 'yyyy-MM-dd'),
                     progress: 0,
                     accountingType: 'measure',
-                    isSecurityCost: cat.type === 'safety' || cat.code.startsWith('S.'),
+                    isSecurityCost: cat.type === 'safety' || String(cat.code || '').startsWith('S.') || String(cat.name || '').toLowerCase().includes('sicurezza'),
                     items: groupArticles.map((art: any) => ({
-                        articleCode: art.code || art.id,
+                        articleCode: art.code || art.id || art.tariffCode || `VOCE.${globalItemCounter}`,
                         description: art.description || '',
                         quantity: art.quantity || 0,
                         unit: art.unit || 'n',
                         unitPrice: art.unitPrice || 0,
                         total: (art.unitPrice || 0) * (art.quantity || 0),
                         laborRate: art.laborRate || 0,
-                        laborValue: ((art.unitPrice || 0) * (art.quantity || 0)) * (art.laborRate / 100),
+                        laborValue: ((art.unitPrice || 0) * (art.quantity || 0)) * ((art.laborRate || 0) / 100),
                         measurements: [],
                         annotations: [],
                         variations: [],
@@ -285,6 +311,55 @@ const App: React.FC = () => {
                     }))
                 };
             }).filter((g: WorkGroup) => g.items.length > 0);
+
+            // Se ci sono articoli non agganciati alle categorie esplicite, li raggruppiamo per non perdere NESSUNA voce di computo!
+            const unassignedArticles = rawArticles.filter(art => !assignedArticles.has(art));
+            if (unassignedArticles.length > 0) {
+                const fallbackGroupsMap: Record<string, any[]> = {};
+                unassignedArticles.forEach(art => {
+                    const groupKey = art.categoryName || art.categoria || art.category || art.categoryCode || 'Altre Voci di Computo';
+                    if (!fallbackGroupsMap[groupKey]) fallbackGroupsMap[groupKey] = [];
+                    fallbackGroupsMap[groupKey].push(art);
+                });
+
+                Object.entries(fallbackGroupsMap).forEach(([groupName, items], fIdx) => {
+                    const totalVal = items.reduce((acc, art) => acc + ((art.unitPrice || 0) * (art.quantity || 0)), 0);
+                    const teamSize = 2;
+                    const workingDays = Math.max(3, Math.ceil(totalVal / (240 * teamSize)));
+                    const startDate = new Date(currentDate);
+                    const endDate = addDays(startDate, workingDays - 1);
+                    currentDate = addDays(endDate, 1);
+
+                    mappedGroups.push({
+                        id: crypto.randomUUID(),
+                        name: groupName,
+                        duration: workingDays,
+                        teamSize: teamSize,
+                        value: totalVal,
+                        color: colorPalette[(mappedGroups.length + fIdx) % colorPalette.length],
+                        startDate: format(startDate, 'yyyy-MM-dd'),
+                        endDate: format(endDate, 'yyyy-MM-dd'),
+                        progress: 0,
+                        accountingType: 'measure',
+                        isSecurityCost: groupName.toLowerCase().includes('sicurezza'),
+                        items: items.map(art => ({
+                            articleCode: art.code || art.id || art.tariffCode || `VOCE.${globalItemCounter}`,
+                            description: art.description || '',
+                            quantity: art.quantity || 0,
+                            unit: art.unit || 'n',
+                            unitPrice: art.unitPrice || 0,
+                            total: (art.unitPrice || 0) * (art.quantity || 0),
+                            laborRate: art.laborRate || 0,
+                            laborValue: ((art.unitPrice || 0) * (art.quantity || 0)) * ((art.laborRate || 0) / 100),
+                            measurements: [],
+                            annotations: [],
+                            variations: [],
+                            originalMeasurements: art.measurements?.map((m: any) => ({ ...m, id: m.id || crypto.randomUUID() })) || [],
+                            originalIndex: globalItemCounter++
+                        }))
+                    });
+                });
+            }
 
             const newDoc: ProjectDocument = {
                 fileName: finalDocName,
@@ -319,8 +394,32 @@ const App: React.FC = () => {
         else if (isRawJsonComputo(jsonData)) {
             let currentDate = new Date();
             let globalItemCounter = 1;
-            const mappedGroups: WorkGroup[] = jsonData.map((g, idx) => {
-                const totalValue = g.items.reduce((acc: number, item: any) => acc + (item.total || 0), 0);
+            const anyData = jsonData as any;
+            const rawList = Array.isArray(jsonData) 
+                ? jsonData 
+                : (anyData.computo || anyData.groups || anyData.workGroups || anyData.items || anyData.articles || []);
+            
+            let groupsToMap: { groupName: string; items: any[] }[] = [];
+            
+            // Se è già un array di gruppi con items
+            if (rawList.length > 0 && (rawList[0].groupName !== undefined || rawList[0].items !== undefined)) {
+                groupsToMap = rawList.map((g: any, idx: number) => ({
+                    groupName: g.groupName || g.name || `Gruppo ${idx + 1}`,
+                    items: g.items || []
+                }));
+            } else {
+                // Se è un array di voci di computo piatte, le raggruppiamo per categoria / gruppo
+                const groupedMap: Record<string, any[]> = {};
+                rawList.forEach((item: any) => {
+                    const groupKey = item.groupName || item.group || item.categoria || item.category || item.wbs || 'Lavorazioni Principali';
+                    if (!groupedMap[groupKey]) groupedMap[groupKey] = [];
+                    groupedMap[groupKey].push(item);
+                });
+                groupsToMap = Object.entries(groupedMap).map(([groupName, items]) => ({ groupName, items }));
+            }
+
+            const mappedGroups: WorkGroup[] = groupsToMap.map((g, idx) => {
+                const totalValue = g.items.reduce((acc: number, item: any) => acc + (item.total || ((item.price || item.unitPrice || 0) * (item.quantity || 0))), 0);
                 const teamSize = 2;
                 const workingDays = Math.max(5, Math.ceil(totalValue / (240 * teamSize)));
                 const startDate = new Date(currentDate);
@@ -338,14 +437,14 @@ const App: React.FC = () => {
                     endDate: format(endDate, 'yyyy-MM-dd'),
                     progress: 0,
                     accountingType: 'measure',
-                    isSecurityCost: g.groupName.startsWith('S.'),
+                    isSecurityCost: g.groupName.startsWith('S.') || g.groupName.toLowerCase().includes('sicurezza'),
                     items: g.items.map((i: any) => ({
-                        articleCode: i.tariffCode || `VOCE.${idx}`,
-                        description: i.description || '',
-                        quantity: i.quantity || 0,
-                        unit: i.unit || 'n',
-                        unitPrice: i.price || i.unitPrice || 0,
-                        total: i.total || 0,
+                        articleCode: i.tariffCode || i.articleCode || i.code || `VOCE.${globalItemCounter}`,
+                        description: i.description || i.descrizione || '',
+                        quantity: i.quantity || i.quantita || 0,
+                        unit: i.unit || i.um || 'n',
+                        unitPrice: i.price || i.unitPrice || i.prezzo || 0,
+                        total: i.total || i.totale || ((i.price || i.unitPrice || 0) * (i.quantity || 0)),
                         laborRate: i.laborRate || 0,
                         laborValue: i.laborAmount || i.laborValue || 0,
                         measurements: [],
@@ -434,7 +533,7 @@ const App: React.FC = () => {
     });
   }, [effectiveIsViewOnly]);
 
-  const handleOpenShareModal = () => { setShareableLink(`${window.location.origin}${window.location.pathname}?mode=view&data=${btoa(JSON.stringify({ projectDocuments, expenses, projectName, teams, workers, contractConfig, sals }))}`); setIsShareModalOpen(true); };
+  const handleOpenShareModal = () => { setShareableLink(`${window.location.origin}${window.location.pathname}?mode=view&data=${btoa(JSON.stringify({ projectDocuments, expenses, projectName, teams, workers, contractConfig, sals, priceDepreciations }))}`); setIsShareModalOpen(true); };
   
   const handleExportPdf = async () => {
     if (!currentProjectId) {
@@ -482,7 +581,7 @@ const App: React.FC = () => {
   };
 
   const handleExport = async () => {
-    const projectData = { id: currentProjectId, projectDocuments, expenses, projectName, teams, workers, contractConfig, sals, lastSavedTime: new Date().toISOString() };
+    const projectData = { id: currentProjectId, projectDocuments, expenses, projectName, teams, workers, contractConfig, sals, priceDepreciations, lastSavedTime: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(projectData, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob); const link = document.createElement('a');
     link.href = url; link.download = `${projectName.replace(/[^a-z0-9]/gi, '_')}.json`;
@@ -510,7 +609,7 @@ const App: React.FC = () => {
   const handleUpdateWorker = (w: Worker) => setWorkers(prev => prev.map(i => i.id === w.id ? w : i));
   const handleDeleteWorker = (id: string) => setWorkers(prev => prev.filter(w => w.id !== id));
 
-  const handleOpenProject = (p: SavedProject) => { setProjectDocuments(p.data.projectDocuments); setExpenses(p.data.expenses); setProjectName(p.name); setLastSavedTime(p.lastModified); if(p.contractConfig) setContractConfig(p.contractConfig); if(p.data.sals) setSals(p.data.sals); setCurrentProjectId(p.id); setActiveView('dashboard'); };
+  const handleOpenProject = (p: SavedProject) => { setProjectDocuments(p.data.projectDocuments); setExpenses(p.data.expenses); setProjectName(p.name); setLastSavedTime(p.lastModified); if(p.contractConfig) setContractConfig(p.contractConfig); if(p.data.sals) setSals(p.data.sals); setPriceDepreciations(p.data.priceDepreciations || []); setCurrentProjectId(p.id); setActiveView('dashboard'); };
   
   const handleCreateProject = () => { 
       if (fileInputRef.current) {
@@ -585,7 +684,7 @@ const App: React.FC = () => {
       case 'costs': return <CostsView expenses={expenses} workGroups={projectDocuments.flatMap(d => d.workGroups)} onAddExpense={handleAddExpense} onUpdateExpense={handleUpdateExpense} onDeleteExpense={handleDeleteExpense} isViewOnly={effectiveIsViewOnly} earnedValue={projectSummaryStats?.earnedValue ?? 0} />;
       case 'teams': return <TeamManagementView teams={teams} workers={workers} onAddTeam={handleAddTeam} onUpdateTeam={handleUpdateTeam} onDeleteTeam={handleDeleteTeam} onAddWorker={handleAddWorker} onUpdateWorker={handleUpdateWorker} onDeleteWorker={handleDeleteWorker} isViewOnly={effectiveIsViewOnly} />;
       case 'reports': return <ReportsView documents={projectDocuments} teams={teams} workers={workers} />;
-      case 'accounting': return <AccountingView documents={projectDocuments} projectName={projectName} contractConfig={contractConfig} onUpdateContractConfig={setContractConfig} sals={sals} onUpdateSals={setSals} activeTab={accountingTab} onTabChange={setAccountingTab} />;
+      case 'accounting': return <AccountingView documents={projectDocuments} projectName={projectName} contractConfig={contractConfig} onUpdateContractConfig={setContractConfig} sals={sals} onUpdateSals={setSals} activeTab={accountingTab} onTabChange={setAccountingTab} priceDepreciations={priceDepreciations} onUpdatePriceDepreciations={setPriceDepreciations} />;
       case 'help': return <UserManualView />;
       default: return null;
     }
@@ -601,10 +700,9 @@ const App: React.FC = () => {
               <Sidebar activeView={activeView} onViewChange={setActiveView} accountingTab={accountingTab} onAccountingTabChange={setAccountingTab} isProjectLoaded={isProjectLoaded} onLogout={handleReset} isViewOnly={effectiveIsViewOnly} onExitProject={handleExitProject} />
               <div className="flex-1 flex flex-col ml-64 min-w-0 h-full overflow-hidden">
                 <Header userEmail={userEmail} remainingDays={remainingDays} serverDate={serverDate} onImport={handleCreateProject} onExport={handleExport} onSaveToDrive={handleSaveToDrive} onShare={handleOpenShareModal} onExportPdf={handleExportPdf} isProjectLoaded={isProjectLoaded} isAdmin={isAdmin} onGenerateLicense={() => setIsGeneratorModalOpen(true)} isViewOnly={effectiveIsViewOnly} isShareMode={isShareMode} isDemoMode={isDemoMode} isSessionExpired={isSessionExpired} sessionSecondsRemaining={sessionSecondsRemaining} projectName={projectName} onUpdateProjectName={setProjectName} lastSavedTime={lastSavedTime} />
-                <main className={`flex-1 min-h-0 flex flex-col ${activeView === 'accounting' || activeView === 'measurements' ? 'p-1.5 md:p-2' : 'p-3 md:p-4'} overflow-hidden`}>
-                  <div className={`${activeView === 'accounting' || activeView === 'measurements' ? 'max-w-full' : 'max-w-7xl'} mx-auto w-full flex-1 flex flex-col min-h-0`}>
-                    {(activeView === 'summary') && isProjectLoaded && <ProjectSummary documents={projectDocuments} isViewOnly={effectiveIsViewOnly} salMarkers={projectDocuments[0]?.salMarkers ?? []} onSalMarkersChange={handleSetSalMarkers} onToggleDocumentVisibility={handleToggleDocumentVisibility} onToggleDocumentFreeze={handleToggleDocumentFreeze} onToggleDocumentLock={handleToggleDocumentLock} onRenameDocument={handleRenameDocument} onDeleteDocument={handleDeleteDocument} />}
-                      <div id="printable-content" className={`bg-white dark:bg-gray-800 shadow-xl rounded-xl overflow-hidden min-h-[400px] flex-1 flex flex-col ${(activeView === 'summary') && isProjectLoaded ? 'mt-3' : 'mt-0'}`}>{renderContent()}</div>
+                <main className={`flex-1 min-h-0 flex flex-col ${activeView === 'accounting' || activeView === 'measurements' || activeView === 'summary' ? 'p-1 md:p-1.5' : 'p-3 md:p-4'} overflow-hidden`}>
+                  <div className={`${activeView === 'accounting' || activeView === 'measurements' || activeView === 'summary' ? 'max-w-full' : 'max-w-7xl'} mx-auto w-full flex-1 flex flex-col min-h-0`}>
+                    <div id="printable-content" className="bg-white dark:bg-gray-800 shadow-xl rounded-xl overflow-hidden min-h-[400px] flex-1 flex flex-col mt-0">{renderContent()}</div>
                   </div>
                 </main>
               </div>
@@ -656,6 +754,7 @@ const App: React.FC = () => {
         teams={teams} 
         workers={workers} 
         initialTab={taskModalInitialTab}
+        priceDepreciations={priceDepreciations}
       />
       <ShareModal isOpen={isShareModalOpen} onClose={() => setIsShareModalOpen(false)} link={shareableLink} />
       {isAdmin && <LicenseGeneratorModal isOpen={isGeneratorModalOpen} onClose={() => setIsGeneratorModalOpen(false)} />}

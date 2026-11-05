@@ -49,6 +49,26 @@ export interface Measurement {
   reversedById?: string; // ID della misurazione di storno associata
   reversesMeasurementId?: string; // ID della misurazione originale che questa riga storna
   createdAt?: number; // Timestamp di inserimento per preservare l'ordine progressivo a parità di data
+  depreciationId?: string; // Collegamento alla determina di deprezzamento RUP
+  appliedUnitPrice?: number; // Prezzo unitario effettivo applicato (se deprezzato)
+  isDepreciated?: boolean; // Flag indicatore di applicazione prezzo deprezzato
+}
+
+export interface PriceDepreciation {
+  id: string;
+  articleCode: string;
+  itemDescription?: string;
+  workGroupId?: string;
+  workGroupName?: string;
+  unit?: string;
+  contractUnitPrice: number;
+  originalUnitPrice?: number; // Prezzo unitario di contratto originario
+  depreciatedUnitPrice: number;
+  maxDepreciatedQuantity: number;
+  determinaNumber: string; // e.g. "Determina RUP n. 14/2024"
+  determinaDate: string; // ISO format 'yyyy-MM-dd'
+  reason: string; // Motivazione tecnica/amministrativa
+  createdAt?: string | number; // ISO timestamp o millisecondi
 }
 
 export type AccountingType = 'measure' | 'body'; // 'measure' = A Misura, 'body' = A Corpo
@@ -168,6 +188,7 @@ export interface SavedProject {
     teams?: Team[];
     workers?: Worker[];
     sals?: SalEntry[]; // History of SALs
+    priceDepreciations?: PriceDepreciation[]; // NEW: Elenco deprezzamenti autorizzati dal RUP
   };
 }
 

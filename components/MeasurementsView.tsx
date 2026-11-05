@@ -23,10 +23,10 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
   const summaryRef = useRef<HTMLDivElement>(null);
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
   
-  // Signature state
   const [signatureDate, setSignatureDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [companyName, setCompanyName] = useState("Nome Impresa S.r.l.");
   const [directorName, setDirectorName] = useState("Arch. Mario Rossi");
+  const [displayScope, setDisplayScope] = useState<'all_items' | 'only_measured'>('all_items');
 
   const allDates = documents
     .flatMap(doc => doc.workGroups)
@@ -52,7 +52,10 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
     
   const totalAdvancementValue = allGroupsWithContext.reduce((acc, { group }) => {
     const measuredValue = group.items.reduce((itemAcc, item) => {
-        const itemMeasuredValue = (item.measurements || []).reduce((mAcc, m) => mAcc + (m.quantity * item.unitPrice), 0);
+        const itemMeasuredValue = (item.measurements || []).reduce((mAcc, m) => {
+          const price = m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice;
+          return mAcc + (m.quantity * price);
+        }, 0);
         return itemAcc + itemMeasuredValue;
     }, 0);
     return acc + measuredValue;
@@ -207,41 +210,61 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
     <div className="flex flex-col h-full flex-1 min-h-0 overflow-hidden">
        {/* Fixed Header */}
        <div className="flex-shrink-0 bg-gray-50 dark:bg-gray-900 px-3 md:px-4 py-2 border-b border-gray-200 dark:border-gray-700 no-print shadow-xs z-30">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-wrap justify-between items-center gap-3">
                 <div className="flex items-center gap-3 min-w-0">
                     <h1 className="text-base md:text-lg font-bold text-gray-800 dark:text-gray-100 truncate">
                         {projectName || "Nuovo Progetto"} <span className="font-normal text-gray-500 text-sm">- Brogliaccio Contabilità</span>
                     </h1>
                     {latestDate && (
                         <span className="text-xs text-indigo-600 dark:text-indigo-400 font-semibold whitespace-nowrap">
-                            • Aggiornato al {format(latestDate, 'dd MMMM yyyy', { locale: it })}
+                            • Misure al {format(latestDate, 'dd MMMM yyyy', { locale: it })}
                         </span>
                     )}
                 </div>
-                {latestDate && (
-                    <button
-                        onClick={handleSavePdf}
-                        disabled={isGeneratingPdf}
-                        className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 rounded-md hover:bg-indigo-700 flex items-center space-x-1.5 transition-colors disabled:bg-indigo-400 shadow-xs"
-                    >
-                        {isGeneratingPdf ? (
-                            <>
-                                <svg className="animate-spin -ml-1 mr-1.5 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                </svg>
-                                <span>Elaborazione...</span>
-                            </>
-                        ) : (
-                            <>
-                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fillRule="evenodd" d="M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V7.414A2 2 0 0015.414 6L12 2.586A2 2 0 0010.586 2H6zm5 6a1 1 0 10-2 0v3.586l-1.293-1.293a1 1 0 10-1.414 1.414l3 3a1 1 0 001.414 0l3-3a1 1 0 00-1.414-1.414L11 11.586V8z" clipRule="evenodd" />
-                                </svg>
-                                <span>Stampa PDF</span>
-                            </>
-                        )}
-                    </button>
-                )}
+
+                <div className="flex items-center gap-2 flex-wrap">
+                    <div className="inline-flex rounded-md bg-white dark:bg-gray-800 p-0.5 border border-gray-200 dark:border-gray-700">
+                        <button
+                            onClick={() => setDisplayScope('all_items')}
+                            className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${displayScope === 'all_items' ? 'bg-indigo-600 text-white shadow-xs' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+                            title="Visualizza tutte le categorie e voci del computo metrico"
+                        >
+                            📋 Tutte le Voci di Computo per Gruppi
+                        </button>
+                        <button
+                            onClick={() => setDisplayScope('only_measured')}
+                            className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${displayScope === 'only_measured' ? 'bg-indigo-600 text-white shadow-xs' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+                            title="Visualizza solo le voci con misure registrate a libretto"
+                        >
+                            🔍 Solo Voci Misurate a SAL
+                        </button>
+                    </div>
+
+                    {latestDate && (
+                        <button
+                            onClick={handleSavePdf}
+                            disabled={isGeneratingPdf}
+                            className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 rounded-md hover:bg-indigo-700 flex items-center space-x-1.5 transition-colors disabled:bg-indigo-400 shadow-xs"
+                        >
+                            {isGeneratingPdf ? (
+                                <>
+                                    <svg className="animate-spin -ml-1 mr-1.5 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    <span>Elaborazione...</span>
+                                </>
+                            ) : (
+                                <>
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fillRule="evenodd" d="M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V7.414A2 2 0 0015.414 6L12 2.586A2 2 0 0010.586 2H6zm5 6a1 1 0 10-2 0v3.586l-1.293-1.293a1 1 0 10-1.414 1.414l3 3a1 1 0 001.414 0l3-3a1 1 0 00-1.414-1.414L11 11.586V8z" clipRule="evenodd" />
+                                    </svg>
+                                    <span>Stampa PDF</span>
+                                </>
+                            )}
+                        </button>
+                    )}
+                </div>
             </div>
        </div>
        
@@ -251,12 +274,15 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
             {documents.map((doc, docIndex) => {
                 const docTotalMeasured = doc.workGroups.reduce((groupAcc, group) => {
                     return groupAcc + group.items.reduce((itemAcc, item) => {
-                        const itemMeasuredValue = (item.measurements || []).reduce((mAcc, m) => mAcc + (m.quantity * item.unitPrice), 0);
+                        const itemMeasuredValue = (item.measurements || []).reduce((mAcc, m) => {
+                            const price = m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice;
+                            return mAcc + (m.quantity * price);
+                        }, 0);
                         return itemAcc + itemMeasuredValue;
                     }, 0);
                 }, 0);
 
-                if(docTotalMeasured === 0) {
+                if (displayScope === 'only_measured' && docTotalMeasured === 0) {
                     return null;
                 }
 
@@ -269,11 +295,16 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                     <div className="space-y-6">
                     {doc.workGroups.map((group, groupIndex) => {
                         const groupTotalMeasured = group.items.reduce((itemAcc, item) => {
-                            const itemMeasuredValue = (item.measurements || []).reduce((mAcc, m) => mAcc + (m.quantity * item.unitPrice), 0);
+                            const itemMeasuredValue = (item.measurements || []).reduce((mAcc, m) => {
+                                const price = m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice;
+                                return mAcc + (m.quantity * price);
+                            }, 0);
                             return itemAcc + itemMeasuredValue;
                         }, 0);
 
-                        if (groupTotalMeasured === 0) {
+                        const groupTotalComputo = group.items.reduce((acc, it) => acc + (it.quantity * it.unitPrice), 0);
+
+                        if (displayScope === 'only_measured' && groupTotalMeasured === 0) {
                             return null;
                         }
 
@@ -286,18 +317,48 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                                     Inizio Attività: {format(parseISO(group.officialStartDate || group.startDate), 'dd MMMM yyyy', { locale: it })}
                                 </span>
                             </div>
-                            <span className="font-normal text-base text-indigo-600 dark:text-indigo-400 self-center">
-                                {currencyFormatter.format(groupTotalMeasured)}
-                            </span>
+                            <div className="text-right">
+                                <span className="font-bold text-base text-indigo-600 dark:text-indigo-400 block">
+                                    Misurato: {currencyFormatter.format(groupTotalMeasured)}
+                                </span>
+                                <span className="text-xs font-normal text-gray-500 dark:text-gray-400">
+                                    Computo: {currencyFormatter.format(groupTotalComputo)}
+                                </span>
+                            </div>
                             </h3>
                             <div className="space-y-4">
                             {group.items.map((item, itemIndex) => {
-                                if (!item.measurements || item.measurements.length === 0) {
-                                return null;
+                                const hasMeasurements = item.measurements && item.measurements.length > 0;
+                                if (displayScope === 'only_measured' && !hasMeasurements) {
+                                    return null;
                                 }
                                 
-                                const itemTotalQuantity = item.measurements.reduce((acc, m) => acc + m.quantity, 0);
-                                const itemTotalMeasured = itemTotalQuantity * item.unitPrice;
+                                const itemTotalQuantity = (item.measurements || []).reduce((acc, m) => acc + m.quantity, 0);
+                                const itemTotalMeasured = (item.measurements || []).reduce((acc, m) => {
+                                    const price = m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice;
+                                    return acc + (m.quantity * price);
+                                }, 0);
+
+                                if (!hasMeasurements) {
+                                    return (
+                                        <div key={itemIndex} className="border border-gray-200 dark:border-gray-700 rounded-lg p-3 bg-white dark:bg-gray-800 shadow-2xs">
+                                            <div className="flex flex-wrap items-start justify-between gap-2">
+                                                <div>
+                                                    <span className="font-mono font-bold text-indigo-700 dark:text-indigo-300 mr-2">{item.articleCode}</span>
+                                                    <span className="text-xs text-gray-700 dark:text-gray-300 font-medium">{item.description}</span>
+                                                </div>
+                                                <div className="flex items-center gap-3 text-xs font-mono flex-wrap">
+                                                    <span className="text-gray-500">Q.tà Computo: <strong className="text-gray-800 dark:text-gray-200">{numberFormatter.format(item.quantity)} {item.unit}</strong></span>
+                                                    <span className="text-gray-500">Prezzo: <strong className="text-gray-800 dark:text-gray-200">{currencyFormatter.format(item.unitPrice)}</strong></span>
+                                                    <span className="text-gray-500">Importo Computo: <strong className="text-gray-800 dark:text-gray-200">{currencyFormatter.format(item.quantity * item.unitPrice)}</strong></span>
+                                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-700">
+                                                        In attesa di misura a Libretto
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                }
 
                                 return (
                                 <div key={itemIndex} className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden break-inside-avoid">
@@ -356,9 +417,18 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                                                     <div className="text-center text-xs text-gray-400">-</div>
                                                 )}
                                             </td>
-                                            <td className="px-4 py-2 text-right align-top font-medium">{numberFormatter.format(m.quantity)} <span className="text-xs text-gray-500">{item.unit}</span></td>
-                                            <td className="px-4 py-2 text-right align-top">{currencyFormatter.format(item.unitPrice)}</td>
-                                            <td className="px-4 py-2 text-right font-semibold text-gray-800 dark:text-gray-200 align-top">{currencyFormatter.format(m.quantity * item.unitPrice)}</td>
+                                            <td className="px-4 py-2 text-right align-top font-medium">
+                                                {numberFormatter.format(m.quantity)} <span className="text-xs text-gray-500">{item.unit}</span>
+                                            </td>
+                                            <td className="px-4 py-2 text-right align-top">
+                                                {m.isDepreciated && (
+                                                    <span className="block text-[10px] text-amber-600 dark:text-amber-400 font-bold">⚖️ Det. RUP</span>
+                                                )}
+                                                {currencyFormatter.format(m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice)}
+                                            </td>
+                                            <td className="px-4 py-2 text-right font-semibold text-gray-800 dark:text-gray-200 align-top">
+                                                {currencyFormatter.format(m.quantity * (m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice))}
+                                            </td>
                                             </tr>
                                         )})}
                                         </tbody>
@@ -379,11 +449,11 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                                     </table>
                                     </div>
                                 </div>
-                                )
+                                );
                             })}
                             </div>
                         </div>
-                        )
+                        );
                     })}
                     <div className="mt-6 pt-4 border-t-2 border-indigo-500">
                         <div className="flex justify-end items-center">
@@ -393,7 +463,7 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                     </div>
                     </div>
                 </div>
-                )
+                );
             })}
          </div>
         

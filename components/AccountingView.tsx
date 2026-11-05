@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { ProjectDocument, ContractConfig, SalEntry, WorkGroup } from '../types';
+import { ProjectDocument, ContractConfig, SalEntry, WorkGroup, PriceDepreciation } from '../types';
 import { format, parseISO, startOfDay, isAfter, endOfDay, isValid } from 'date-fns';
 import { it } from 'date-fns/locale/it';
 import { EuropeanDateInput } from './EuropeanDateInput';
@@ -9,7 +9,7 @@ import { EuropeanDateInput } from './EuropeanDateInput';
 declare const jspdf: any;
 declare const html2canvas: any;
 
-export type AccountingTab = 'libretto' | 'register' | 'summary' | 'sal_technical' | 'payment_cert' | 'settings';
+export type AccountingTab = 'libretto' | 'register' | 'summary' | 'sal_technical' | 'payment_cert' | 'depreciation' | 'settings';
 
 interface AccountingViewProps {
   documents: ProjectDocument[];
@@ -21,6 +21,8 @@ interface AccountingViewProps {
   onToggleGroupSecurity?: (groupId: string) => void; 
   activeTab?: AccountingTab;
   onTabChange?: (tab: AccountingTab) => void;
+  priceDepreciations?: PriceDepreciation[];
+  onUpdatePriceDepreciations?: (depreciations: PriceDepreciation[]) => void;
 }
 
 const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
@@ -54,21 +56,50 @@ interface AccountingEntry {
     isSecurityCost: boolean; 
     accountingType: 'measure' | 'body';
     createdAt?: number;
+    depreciationId?: string;
+    isDepreciated?: boolean;
+}
+
+interface SummaryMeasurementLine {
+    id: string;
+    progressiveIndex: number; // Richiamo / Num. ord. libretto
+    date: string;
+    salNumber?: number;
+    salLabel?: string;
+    isPreviousSal: boolean;
+    measurementNote: string;
+    factor?: number;
+    length?: number;
+    width?: number;
+    height?: number;
+    quantity: number;
+    unitPrice: number;
+    amount: number;
 }
 
 interface SummaryEntry {
     articleCode: string;
-    wbsName: string; 
+    originalIndex?: number;
+    wbsName: string;
+    groupName?: string;
     description: string;
     unit: string;
     unitPrice: number;
     estimatedQuantity: number; 
     previousQuantity: number;
+    previousAmount: number;
     currentQuantity: number;
+    currentAmount: number;
     totalQuantity: number; 
     totalAmount: number;
     progressPercent: number; 
     accountingType: 'measure' | 'body';
+    isSecurityCost: boolean;
+    previousLines: SummaryMeasurementLine[];
+    currentLines: SummaryMeasurementLine[];
+    allLines: SummaryMeasurementLine[];
+    residualQuantity?: number;
+    residualAmount?: number;
 }
 
 const useOnClickOutside = (ref: React.RefObject<HTMLElement>, handler: (event: MouseEvent | TouchEvent) => void) => {
@@ -134,7 +165,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
     onUpdateSals,
     onToggleGroupSecurity,
     activeTab: externalActiveTab,
-    onTabChange
+    onTabChange,
+    priceDepreciations = [],
+    onUpdatePriceDepreciations
 }) => {
   const [internalTab, setInternalTab] = useState<AccountingTab>('libretto');
   const activeTab = externalActiveTab ?? internalTab;
@@ -179,6 +212,362 @@ const AccountingView: React.FC<AccountingViewProps> = ({
   const [filters, setFilters] = useState({ code: '', wbs: '', description: '', dateFrom: '', dateTo: '' });
   const [activePopover, setActivePopover] = useState<string | null>(null);
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [summaryMode, setSummaryMode] = useState<'analytical' | 'synthetic'>('analytical');
+  const [summaryScope, setSummaryScope] = useState<'all_computo' | 'only_measured'>('all_computo');
+  const [summaryGrouping, setSummaryGrouping] = useState<'grouped_by_wbs' | 'flat'>('grouped_by_wbs');
+  const [deprModalItemSearch, setDeprModalItemSearch] = useState('');
+  const [deprModalCategoryFilter, setDeprModalCategoryFilter] = useState('all');
+
+  // Stato per la gestione dei Deprezzamenti Prezzo (Determina del RUP)
+  const [isDeprModalOpen, setIsDeprModalOpen] = useState(false);
+  const [editingDeprId, setEditingDeprId] = useState<string | null>(null);
+  const [deprSearchQuery, setDeprSearchQuery] = useState('');
+  const [formNotice, setFormNotice] = useState<string | null>(null);
+
+  const [deprForm, setDeprForm] = useState<{
+    articleCode: string;
+    determinaNumber: string;
+    determinaDate: string;
+    reason: string;
+    depreciatedUnitPrice: string;
+    maxDepreciatedQuantity: string;
+  }>({
+    articleCode: '',
+    determinaNumber: '',
+    determinaDate: format(new Date(), 'yyyy-MM-dd'),
+    reason: '',
+    depreciatedUnitPrice: '',
+    maxDepreciatedQuantity: ''
+  });
+
+  // Elenco completo e univoco di tutte le voci di computo presenti nel progetto
+  const allComputoItems = useMemo(() => {
+    const list: {
+      articleCode: string;
+      description: string;
+      unit: string;
+      unitPrice: number;
+      totalQuantity: number;
+      groupName: string;
+      originalIndex?: number;
+    }[] = [];
+    const seen = new Set<string>();
+
+    documents.forEach(doc => {
+      doc.workGroups.forEach(wg => {
+        wg.items.forEach(it => {
+          if (!seen.has(it.articleCode)) {
+            seen.add(it.articleCode);
+            list.push({
+              articleCode: it.articleCode,
+              description: it.description,
+              unit: it.unit,
+              unitPrice: it.unitPrice,
+              totalQuantity: it.quantity,
+              groupName: wg.name,
+              originalIndex: it.originalIndex
+            });
+          }
+        });
+      });
+    });
+
+    return list.sort((a, b) => {
+      if (a.originalIndex !== undefined && b.originalIndex !== undefined && a.originalIndex !== b.originalIndex) {
+        return a.originalIndex - b.originalIndex;
+      }
+      return a.articleCode.localeCompare(b.articleCode);
+    });
+  }, [documents]);
+
+  // Categorie uniche estratte dal computo per i filtri di selezione
+  const computoCategories = useMemo(() => {
+    const map = new Map<string, number>();
+    allComputoItems.forEach(item => {
+      const grp = item.groupName || 'Altre Lavorazioni';
+      map.set(grp, (map.get(grp) || 0) + 1);
+    });
+    return Array.from(map.entries()).map(([name, count]) => ({ name, count }));
+  }, [allComputoItems]);
+
+  // Voci di computo filtrate per la selezione nel modale di deprezzamento
+  const filteredDeprModalItems = useMemo(() => {
+    return allComputoItems.filter(item => {
+      if (deprModalCategoryFilter !== 'all' && item.groupName !== deprModalCategoryFilter) {
+        return false;
+      }
+      if (deprModalItemSearch.trim()) {
+        const q = deprModalItemSearch.toLowerCase();
+        const codeMatch = item.articleCode.toLowerCase().includes(q);
+        const descMatch = item.description.toLowerCase().includes(q);
+        const groupMatch = (item.groupName || '').toLowerCase().includes(q);
+        return codeMatch || descMatch || groupMatch;
+      }
+      return true;
+    });
+  }, [allComputoItems, deprModalCategoryFilter, deprModalItemSearch]);
+
+  // Calcolo dell'utilizzo di ciascun deprezzamento a registro/libretto
+  const getDeprUsage = (deprId: string) => {
+    let usedQty = 0;
+    let occurrences = 0;
+    documents.forEach(doc => {
+      doc.workGroups.forEach(wg => {
+        wg.items.forEach(it => {
+          (it.measurements || []).forEach(m => {
+            if (m.depreciationId === deprId) {
+              usedQty += m.quantity;
+              occurrences++;
+            }
+          });
+        });
+      });
+    });
+    return {
+      usedQty: Math.max(0, Math.round(usedQty * 1000) / 1000),
+      occurrences
+    };
+  };
+
+  const handleOpenNewDeprModal = () => {
+    setEditingDeprId(null);
+    setFormNotice(null);
+    setDeprModalItemSearch('');
+    setDeprModalCategoryFilter('all');
+    const firstItem = allComputoItems.length > 0 ? allComputoItems[0] : null;
+    setDeprForm({
+      articleCode: firstItem ? firstItem.articleCode : '',
+      determinaNumber: '',
+      determinaDate: format(new Date(), 'yyyy-MM-dd'),
+      reason: '',
+      depreciatedUnitPrice: '',
+      maxDepreciatedQuantity: firstItem ? firstItem.totalQuantity.toString() : ''
+    });
+    setIsDeprModalOpen(true);
+  };
+
+  const handleEditDepr = (depr: PriceDepreciation) => {
+    setEditingDeprId(depr.id);
+    setFormNotice(null);
+    setDeprModalItemSearch('');
+    setDeprModalCategoryFilter('all');
+    setDeprForm({
+      articleCode: depr.articleCode,
+      determinaNumber: depr.determinaNumber,
+      determinaDate: depr.determinaDate,
+      reason: depr.reason,
+      depreciatedUnitPrice: depr.depreciatedUnitPrice.toString(),
+      maxDepreciatedQuantity: depr.maxDepreciatedQuantity.toString()
+    });
+    setIsDeprModalOpen(true);
+  };
+
+  const handleSaveDepreciation = (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormNotice(null);
+
+    if (!deprForm.articleCode) {
+      setFormNotice('Seleziona una voce dal computo metrico.');
+      return;
+    }
+    if (!deprForm.determinaNumber.trim()) {
+      setFormNotice('Inserisci il numero o estremi della Determina del RUP.');
+      return;
+    }
+    if (!deprForm.determinaDate) {
+      setFormNotice('Inserisci la data della Determina del RUP.');
+      return;
+    }
+    if (!deprForm.reason.trim()) {
+      setFormNotice('Specifica la motivazione tecnica del RUP per il deprezzamento.');
+      return;
+    }
+
+    const selectedItem = allComputoItems.find(i => i.articleCode === deprForm.articleCode);
+    if (!selectedItem) {
+      setFormNotice('Voce di computo selezionata non trovata.');
+      return;
+    }
+
+    const deprPrice = parseFloat(deprForm.depreciatedUnitPrice.replace(',', '.'));
+    if (isNaN(deprPrice) || deprPrice <= 0) {
+      setFormNotice('Inserisci un prezzo deprezzato valido maggiore di zero.');
+      return;
+    }
+    if (deprPrice >= selectedItem.unitPrice) {
+      setFormNotice(`Il prezzo deprezzato (€ ${numberFormatter.format(deprPrice)}) deve essere inferiore al prezzo contrattuale (€ ${numberFormatter.format(selectedItem.unitPrice)}).`);
+      return;
+    }
+
+    const maxQty = parseFloat(deprForm.maxDepreciatedQuantity.replace(',', '.'));
+    if (isNaN(maxQty) || maxQty <= 0) {
+      setFormNotice('Inserisci una quantità massima deprezzata valida maggiore di zero.');
+      return;
+    }
+
+    const newDepr: PriceDepreciation = {
+      id: editingDeprId || crypto.randomUUID(),
+      articleCode: selectedItem.articleCode,
+      itemDescription: selectedItem.description,
+      unit: selectedItem.unit,
+      determinaNumber: deprForm.determinaNumber.trim(),
+      determinaDate: deprForm.determinaDate,
+      reason: deprForm.reason.trim(),
+      contractUnitPrice: selectedItem.unitPrice,
+      originalUnitPrice: selectedItem.unitPrice,
+      depreciatedUnitPrice: deprPrice,
+      maxDepreciatedQuantity: maxQty,
+      createdAt: new Date().toISOString()
+    };
+
+    let updated: PriceDepreciation[];
+    if (editingDeprId) {
+      updated = priceDepreciations.map(d => d.id === editingDeprId ? newDepr : d);
+    } else {
+      updated = [...priceDepreciations, newDepr];
+    }
+
+    onUpdatePriceDepreciations?.(updated);
+    setIsDeprModalOpen(false);
+    setEditingDeprId(null);
+  };
+
+  const handleDeleteDepreciation = (depr: PriceDepreciation) => {
+    const { usedQty, occurrences } = getDeprUsage(depr.id);
+    if (usedQty > 0 || occurrences > 0) {
+      alert(`⚠️ Impossibile eliminare: questa Determina del RUP è già stata applicata in contabilità su ${occurrences} misurazione/i per complessivi ${numberFormatter.format(usedQty)}. È necessario stornare o eliminare prima le relative misure.`);
+      return;
+    }
+    if (confirm(`Sei sicuro di voler eliminare la Determina del RUP ${depr.determinaNumber} per la voce ${depr.articleCode}?`)) {
+      const updated = priceDepreciations.filter(d => d.id !== depr.id);
+      onUpdatePriceDepreciations?.(updated);
+    }
+  };
+
+  const handlePrintDeprActPdf = (depr: PriceDepreciation) => {
+    try {
+      const { jsPDF } = jspdf;
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const item = allComputoItems.find(i => i.articleCode === depr.articleCode);
+      const { usedQty } = getDeprUsage(depr.id);
+      const remainingQty = Math.max(0, Math.round((depr.maxDepreciatedQuantity - usedQty) * 1000) / 1000);
+      const origPrice = depr.originalUnitPrice ?? depr.contractUnitPrice ?? item?.unitPrice ?? 0;
+      const unitSaving = origPrice - depr.depreciatedUnitPrice;
+      const totalSaving = depr.maxDepreciatedQuantity * unitSaving;
+      const discountPct = origPrice > 0 ? (unitSaving / origPrice) * 100 : 0;
+
+      // Intestazione Formale
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(13);
+      doc.setTextColor(30, 41, 59);
+      doc.text("VERBALE DI DEPREZZAMENTO E DETERMINAZIONE NUOVO PREZZO", pageWidth / 2, 22, { align: 'center' });
+      doc.setFontSize(9.5);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(71, 85, 105);
+      doc.text("Art. 114 D.Lgs. 36/2023 - Accettazione di lavorazioni/provviste con riduzione del prezzo", pageWidth / 2, 28, { align: 'center' });
+
+      doc.setDrawColor(203, 213, 225);
+      doc.setLineWidth(0.4);
+      doc.line(15, 32, pageWidth - 15, 32);
+
+      // Info Quadro
+      doc.setFontSize(9);
+      doc.setTextColor(15, 23, 42);
+      doc.setFont('helvetica', 'bold');
+      doc.text("OGGETTO LAVORI:", 15, 39);
+      doc.setFont('helvetica', 'normal');
+      doc.text(projectName || "Lavori di Appalto", 55, 39);
+
+      doc.setFont('helvetica', 'bold');
+      doc.text("PROVVEDIMENTO RUP:", 15, 45);
+      doc.setFont('helvetica', 'normal');
+      doc.text(`Determina N. ${depr.determinaNumber} del ${format(parseISO(depr.determinaDate), 'dd/MM/yyyy')}`, 55, 45);
+
+      doc.setFont('helvetica', 'bold');
+      doc.text("IMPRESA APPALTATRICE:", 15, 51);
+      doc.setFont('helvetica', 'normal');
+      doc.text(localConfig.contractorName || "Impresa Appaltatrice", 55, 51);
+
+      if ((doc as any).autoTable) {
+        (doc as any).autoTable({
+          startY: 56,
+          margin: { left: 15, right: 15 },
+          head: [['Voce di Computo', 'U.M.', 'Tariffa Contratto', 'Tariffa Deprezzata', 'Ribasso %', 'Q.tà Autorizzata', 'Economia Ente (€)']],
+          body: [[
+            `${depr.articleCode}\n${item?.description || ''}`,
+            item?.unit || 'cad',
+            currencyFormatter.format(origPrice),
+            currencyFormatter.format(depr.depreciatedUnitPrice),
+            `-${discountPct.toFixed(2)}%`,
+            numberFormatter.format(depr.maxDepreciatedQuantity),
+            currencyFormatter.format(totalSaving)
+          ]],
+          headStyles: { fillColor: [49, 46, 129], textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 8 },
+          bodyStyles: { fontSize: 8.5, textColor: [30, 41, 59] },
+          columnStyles: {
+            0: { cellWidth: 70 },
+            1: { halign: 'center', cellWidth: 12 },
+            2: { halign: 'right', cellWidth: 22 },
+            3: { halign: 'right', cellWidth: 22, fontStyle: 'bold', textColor: [180, 83, 9] },
+            4: { halign: 'center', cellWidth: 18, fontStyle: 'bold', textColor: [185, 28, 28] },
+            5: { halign: 'right', cellWidth: 18, fontStyle: 'bold' },
+            6: { halign: 'right', cellWidth: 22, fontStyle: 'bold', textColor: [4, 120, 87] }
+          }
+        });
+
+        const finalY = (doc as any).lastAutoTable.finalY || 100;
+
+        // Motivazione RUP Box
+        doc.setFillColor(248, 250, 252);
+        doc.setDrawColor(203, 213, 225);
+        doc.rect(15, finalY + 6, pageWidth - 30, 28, 'FD');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8.5);
+        doc.setTextColor(71, 85, 105);
+        doc.text("MOTIVAZIONE TECNICA E GIURIDICA DEL RUP (Art. 114 D.Lgs. 36/2023):", 18, finalY + 12);
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(8);
+        doc.setTextColor(30, 41, 59);
+        const splitReason = doc.splitTextToSize(depr.reason, pageWidth - 36);
+        doc.text(splitReason, 18, finalY + 17);
+
+        // Stato di Contabilizzazione Box
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8.5);
+        doc.setTextColor(15, 23, 42);
+        doc.text("STATO ATTUALE DI CONTABILIZZAZIONE:", 15, finalY + 41);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(8);
+        doc.text(`- Quantità autorizzata con Determina RUP: ${numberFormatter.format(depr.maxDepreciatedQuantity)} ${item?.unit || ''}`, 20, finalY + 47);
+        doc.text(`- Quantità già allibata a Registro Contabilità: ${numberFormatter.format(usedQty)} ${item?.unit || ''}`, 20, finalY + 52);
+        doc.text(`- Quantità residua ancora applicabile: ${numberFormatter.format(remainingQty)} ${item?.unit || ''}`, 20, finalY + 57);
+
+        // Signatures
+        const sigY = finalY + 75;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8.5);
+        doc.text("L'Impresa Appaltatrice", 25, sigY);
+        doc.text("Il Direttore dei Lavori", pageWidth / 2, sigY, { align: 'center' });
+        doc.text("Il Responsabile Unico del Progetto", pageWidth - 25, sigY, { align: 'right' });
+
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(7.5);
+        doc.setTextColor(120);
+        doc.text("(per presa visione ed accettazione)", 25, sigY + 4);
+
+        doc.setDrawColor(150);
+        doc.line(20, sigY + 18, 55, sigY + 18);
+        doc.line(pageWidth / 2 - 20, sigY + 18, pageWidth / 2 + 20, sigY + 18);
+        doc.line(pageWidth - 55, sigY + 18, pageWidth - 15, sigY + 18);
+      }
+
+      doc.save(`Determina_Deprezzamento_${depr.determinaNumber.replace(/[^a-z0-9]/gi, '_')}.pdf`);
+    } catch (err) {
+      console.error(err);
+      alert("Errore nella generazione del verbale di deprezzamento.");
+    }
+  };
 
   const contentRef = useRef<HTMLDivElement>(null);
   const certificateRef = useRef<HTMLDivElement>(null);
@@ -265,7 +654,8 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                   group.items.forEach(item => {
                       if (item.measurements) {
                           item.measurements.forEach((m, mIdx) => {
-                              const debit = m.quantity * item.unitPrice;
+                              const effectivePrice = m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice;
+                              const debit = m.quantity * effectivePrice;
 
                               entries.push({
                                   id: m.id,
@@ -277,7 +667,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                   measurementNote: m.note,
                                   unit: item.unit,
                                   quantity: m.quantity,
-                                  unitPrice: item.unitPrice,
+                                  unitPrice: effectivePrice,
                                   debit: debit,
                                   progressive: 0, 
                                   groupName: group.name,
@@ -285,7 +675,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                   factor: m.factor, length: m.length, width: m.width, height: m.height,
                                   isSecurityCost: isSecurity,
                                   accountingType: 'measure',
-                                  createdAt: m.createdAt || (mIdx + 1)
+                                  createdAt: m.createdAt || (mIdx + 1),
+                                  depreciationId: m.depreciationId,
+                                  isDepreciated: m.isDepreciated
                               });
                           });
                       }
@@ -359,6 +751,18 @@ const AccountingView: React.FC<AccountingViewProps> = ({
   const currentSalData = useMemo(() => calculateTotalsAtDate(salReferenceDate), [salReferenceDate, accountingRegistry, localConfig, documents]);
   const filteredRegistry = currentSalData.entries;
 
+  const activeRegisterEntries = useMemo(() => {
+      let running = 0;
+      return filteredRegistry.map((entry, idx) => {
+          running = round2(running + entry.debit);
+          return {
+              ...entry,
+              registerOrderIndex: idx + 1,
+              runningProgressive: running
+          };
+      });
+  }, [filteredRegistry]);
+
   const salCumulativeValuesMap = useMemo(() => {
       const map = new Map<string, number>();
       sals.forEach(sal => {
@@ -418,49 +822,184 @@ const AccountingView: React.FC<AccountingViewProps> = ({
 
   const accountingSummary = useMemo(() => {
       const summaryMap = new Map<string, SummaryEntry>();
-      
-      // Calcoliamo su tutto lo storico fino al SAL corrente
+      const sortedSalsAsc = [...sals].sort((a, b) => a.number - b.number);
+      const activeSalObj = sals.find(s => s.id === activeSalId);
+      const currentSalNumber = activeSalObj?.number ?? (sortedSalsAsc.length > 0 ? sortedSalsAsc[sortedSalsAsc.length - 1].number : 1);
+
+      // 1. Se è attiva la visualizzazione completa, popoliamo TUTTE le voci dal computo strutturato
+      if (summaryScope === 'all_computo') {
+          documents.forEach(doc => {
+              doc.workGroups.forEach(group => {
+                  if (group.accountingType === 'body') {
+                      const bodyCode = `A.CORPO.${group.id.substring(0,5)}`.toUpperCase();
+                      if (!summaryMap.has(bodyCode)) {
+                          summaryMap.set(bodyCode, {
+                              articleCode: bodyCode,
+                              originalIndex: 0,
+                              wbsName: group.name,
+                              groupName: group.name,
+                              description: `Lavori a Corpo: ${group.name}`,
+                              unit: '%',
+                              unitPrice: group.value,
+                              estimatedQuantity: 1,
+                              previousQuantity: 0,
+                              previousAmount: 0,
+                              currentQuantity: 0,
+                              currentAmount: 0,
+                              totalQuantity: 0,
+                              totalAmount: 0,
+                              progressPercent: 0,
+                              accountingType: 'body',
+                              isSecurityCost: group.isSecurityCost || false,
+                              previousLines: [],
+                              currentLines: [],
+                              allLines: [],
+                              residualQuantity: 1,
+                              residualAmount: group.value
+                          });
+                      }
+                  } else {
+                      group.items.forEach(item => {
+                          if (!summaryMap.has(item.articleCode)) {
+                              summaryMap.set(item.articleCode, {
+                                  articleCode: item.articleCode,
+                                  originalIndex: item.originalIndex,
+                                  wbsName: group.name,
+                                  groupName: group.name,
+                                  description: item.description,
+                                  unit: item.unit,
+                                  unitPrice: item.unitPrice,
+                                  estimatedQuantity: item.quantity,
+                                  previousQuantity: 0,
+                                  previousAmount: 0,
+                                  currentQuantity: 0,
+                                  currentAmount: 0,
+                                  totalQuantity: 0,
+                                  totalAmount: 0,
+                                  progressPercent: 0,
+                                  accountingType: 'measure',
+                                  isSecurityCost: group.isSecurityCost || false,
+                                  previousLines: [],
+                                  currentLines: [],
+                                  allLines: [],
+                                  residualQuantity: item.quantity,
+                                  residualAmount: item.quantity * item.unitPrice
+                              });
+                          }
+                      });
+                  }
+              });
+          });
+      }
+
+      // 2. Integriamo tutte le misure effettivamente contabilizzate a libretto fino a salReferenceDate
       accountingRegistry
         .filter(e => e.date.localeCompare(salReferenceDate) <= 0)
         .forEach(entry => {
           if (!summaryMap.has(entry.articleCode)) {
               summaryMap.set(entry.articleCode, { 
                   articleCode: entry.articleCode, 
+                  originalIndex: entry.originalIndex,
                   wbsName: entry.groupName, 
+                  groupName: entry.groupName,
                   description: entry.accountingType === 'body' ? entry.groupName : entry.description, 
                   unit: entry.unit, 
                   unitPrice: entry.unitPrice, 
-                  estimatedQuantity: 0, 
+                  estimatedQuantity: entry.accountingType === 'body' ? 1 : (boqTotals.get(entry.articleCode) || 0), 
                   previousQuantity: 0,
+                  previousAmount: 0,
                   currentQuantity: 0,
+                  currentAmount: 0,
                   totalQuantity: 0, 
                   totalAmount: 0, 
                   progressPercent: 0, 
-                  accountingType: entry.accountingType 
+                  accountingType: entry.accountingType,
+                  isSecurityCost: entry.isSecurityCost,
+                  previousLines: [],
+                  currentLines: [],
+                  allLines: [],
+                  residualQuantity: 0,
+                  residualAmount: 0
               });
           }
           const current = summaryMap.get(entry.articleCode)!;
           const isCurrentPeriod = entry.date.localeCompare(previousSalDate) > 0;
           
+          let salLabel: string | undefined = undefined;
+          let isPreviousSal = false;
+
+          if (currentSalNumber === 1) {
+              salLabel = undefined;
+              isPreviousSal = false;
+          } else {
+              if (!isCurrentPeriod) {
+                  const matchingSal = sortedSalsAsc.find(s => entry.date.localeCompare(s.date) <= 0);
+                  const salNum = matchingSal?.number || 1;
+                  salLabel = `SAL ${salNum}`;
+                  isPreviousSal = true;
+              } else {
+                  salLabel = undefined;
+                  isPreviousSal = false;
+              }
+          }
+
+          const lineAmount = round2(entry.quantity * entry.unitPrice);
+          const lineItem: SummaryMeasurementLine = {
+              id: entry.id,
+              progressiveIndex: entry.progressiveIndex,
+              date: entry.date,
+              salNumber: isPreviousSal ? sortedSalsAsc.find(s => entry.date.localeCompare(s.date) <= 0)?.number : undefined,
+              salLabel,
+              isPreviousSal,
+              measurementNote: entry.measurementNote || entry.description,
+              factor: entry.factor,
+              length: entry.length,
+              width: entry.width,
+              height: entry.height,
+              quantity: entry.quantity,
+              unitPrice: entry.unitPrice,
+              amount: lineAmount
+          };
+
           if (isCurrentPeriod) {
               current.currentQuantity += entry.quantity;
+              current.currentAmount = round2(current.currentAmount + lineAmount);
+              current.currentLines.push(lineItem);
           } else {
               current.previousQuantity += entry.quantity;
+              current.previousAmount = round2(current.previousAmount + lineAmount);
+              current.previousLines.push(lineItem);
           }
+          current.allLines.push(lineItem);
           
-          current.totalQuantity += entry.quantity;
-          current.totalAmount += entry.debit;
+          current.totalQuantity = current.previousQuantity + current.currentQuantity;
+          current.totalAmount = round2(current.previousAmount + current.currentAmount);
       });
 
       return Array.from(summaryMap.values()).map(item => {
-          if (item.accountingType === 'body') {
-              return { ...item, estimatedQuantity: 1, progressPercent: item.totalQuantity * 100 };
-          } else {
-              const estimated = boqTotals.get(item.articleCode) || 0;
-              return { ...item, estimatedQuantity: estimated, progressPercent: estimated > 0 ? (item.totalQuantity / estimated) * 100 : 0 };
+          const estimated = item.accountingType === 'body' ? 1 : (boqTotals.get(item.articleCode) || item.estimatedQuantity || 0);
+          const progressPercent = estimated > 0 ? (item.totalQuantity / estimated) * 100 : 0;
+          const residualQuantity = Math.max(0, Math.round((estimated - item.totalQuantity) * 1000) / 1000);
+          const residualAmount = Math.max(0, Math.round((estimated * item.unitPrice - item.totalAmount) * 100) / 100);
+          return {
+              ...item,
+              estimatedQuantity: estimated,
+              progressPercent,
+              residualQuantity,
+              residualAmount
+          };
+      }).filter(item => {
+          if (summaryScope === 'only_measured') {
+              return item.totalQuantity > 0 || item.allLines.length > 0;
           }
-      }).sort((a, b) => a.articleCode.localeCompare(b.articleCode));
-  }, [accountingRegistry, salReferenceDate, previousSalDate, boqTotals]);
+          return true;
+      }).sort((a, b) => {
+          if (a.originalIndex !== undefined && b.originalIndex !== undefined && a.originalIndex !== b.originalIndex) {
+              return a.originalIndex - b.originalIndex;
+          }
+          return a.articleCode.localeCompare(b.articleCode);
+      });
+  }, [accountingRegistry, salReferenceDate, previousSalDate, boqTotals, sals, activeSalId, summaryScope, documents]);
 
   const applyFilters = (entry: any) => {
       const codeMatch = entry.articleCode.toLowerCase().includes(filters.code.toLowerCase());
@@ -511,49 +1050,51 @@ const AccountingView: React.FC<AccountingViewProps> = ({
   const generateAccountingPdf = (type: 'libretto' | 'register' | 'summary') => {
     setIsGeneratingPdf(true);
     try {
-      const doc = new jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const orientation = type === 'register' ? 'landscape' : 'portrait';
+      const doc = new jspdf.jsPDF({ orientation, unit: 'mm', format: 'a4' });
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
 
       // Cover Page
       doc.setFont('helvetica', 'bold');
-      doc.setFontSize(24);
-      doc.text(projectName || 'Progetto', pageWidth / 2, 60, { align: 'center' });
+      doc.setFontSize(22);
+      doc.text(projectName || 'Progetto', pageWidth / 2, 55, { align: 'center' });
       
-      doc.setFontSize(18);
+      doc.setFontSize(16);
       const titles = {
         libretto: 'Libretto delle Misure',
         register: 'Registro di Contabilità',
         summary: 'Sommario del Registro'
       };
-      doc.text(titles[type], pageWidth / 2, 80, { align: 'center' });
+      doc.text(titles[type], pageWidth / 2, 75, { align: 'center' });
       
       const sal = sals.find(s => s.id === activeSalId);
       if (sal) {
-        doc.setFontSize(14);
+        doc.setFontSize(13);
         doc.setFont('helvetica', 'normal');
-        doc.text(`Stato Avanzamento Lavori N. ${sal.number}`, pageWidth / 2, 100, { align: 'center' });
-        doc.text(`Situazione contabile a tutto il ${format(parseISO(sal.date), 'dd/MM/yyyy')}`, pageWidth / 2, 110, { align: 'center' });
+        doc.text(`Stato Avanzamento Lavori N. ${sal.number}`, pageWidth / 2, 95, { align: 'center' });
+        doc.text(`Situazione contabile a tutto il ${format(parseISO(sal.date), 'dd/MM/yyyy')}`, pageWidth / 2, 105, { align: 'center' });
       }
 
       if (localConfig.contractorName) {
-        doc.setFontSize(12);
-        doc.text(`Impresa Appaltatrice: ${localConfig.contractorName}`, pageWidth / 2, 130, { align: 'center' });
+        doc.setFontSize(11);
+        doc.text(`Impresa Appaltatrice: ${localConfig.contractorName}`, pageWidth / 2, 125, { align: 'center' });
       }
       
       if (localConfig.contractCode) {
-        doc.text(`CIG/CUP: ${localConfig.contractCode}`, pageWidth / 2, 140, { align: 'center' });
+        doc.text(`CIG/CUP: ${localConfig.contractCode}`, pageWidth / 2, 135, { align: 'center' });
       }
 
-      // Footer cover
-      doc.setFontSize(10);
-      doc.text("Generato con Chronos AI", pageWidth / 2, pageHeight - 20, { align: 'center' });
+      doc.setFontSize(9);
+      doc.setTextColor(120);
+      doc.text("Generato con Chronos AI - D.Lgs. 36/2023", pageWidth / 2, pageHeight - 18, { align: 'center' });
 
       doc.addPage();
 
-      // Table generation
       let columns: any[] = [];
       let rows: any[] = [];
+      let columnStyles: any = {};
+      let grandTotal = 0;
 
       if (type === 'libretto') {
         columns = [
@@ -564,97 +1105,279 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           { header: 'U.M.', dataKey: 'um' },
           { header: 'Quantità', dataKey: 'qty' }
         ];
+        columnStyles = {
+          idx: { halign: 'center', cellWidth: 18 },
+          date: { halign: 'center', cellWidth: 22 },
+          code: { fontStyle: 'bold', cellWidth: 28 },
+          desc: { cellWidth: 80 },
+          um: { halign: 'center', cellWidth: 14 },
+          qty: { halign: 'right', cellWidth: 24 }
+        };
         rows = filteredLibretto.filter(applyFilters).map(e => ({
           idx: e.progressiveIndex,
-          date: format(parseISO(e.date), 'dd/MM/yy'),
+          date: format(parseISO(e.date), 'dd/MM/yyyy'),
           code: e.articleCode,
           desc: `${e.description}${e.measurementNote ? '\nNote: ' + e.measurementNote : ''}`,
           um: e.unit,
-          qty: e.accountingType === 'body' ? percentFormatter.format(e.quantity) : numberFormatter.format(e.quantity)
+          qty: e.accountingType === 'body' ? percentFormatter.format(e.quantity) : numberFormatter.format(e.quantity),
+          rawCumulativeAmount: 0
         }));
       } else if (type === 'register') {
         columns = [
-          { header: 'Num. ord.', dataKey: 'idx' },
+          { header: 'N. Reg.', dataKey: 'regIdx' },
           { header: 'Data', dataKey: 'date' },
-          { header: 'Descrizione', dataKey: 'desc' },
+          { header: 'Rif. Libretto', dataKey: 'libIdx' },
+          { header: 'Codice Articolo', dataKey: 'code' },
+          { header: 'Designazione dei Lavori e delle Provviste', dataKey: 'desc' },
           { header: 'U.M.', dataKey: 'um' },
-          { header: 'Q.tà', dataKey: 'qty' },
-          { header: 'Prezzo', dataKey: 'price' },
-          { header: 'Importo', dataKey: 'total' }
+          { header: 'Quantità', dataKey: 'qty' },
+          { header: 'Prezzo Unit.', dataKey: 'price' },
+          { header: 'Importo Debito', dataKey: 'amount' },
+          { header: 'Totale Prog.', dataKey: 'prog' }
         ];
-        rows = filteredRegistry.filter(applyFilters).map(e => ({
-          idx: e.progressiveIndex,
-          date: format(parseISO(e.date), 'dd/MM/yy'),
-          desc: e.description,
-          um: e.unit,
-          qty: e.accountingType === 'body' ? percentFormatter.format(e.quantity) : numberFormatter.format(e.quantity),
-          price: currencyFormatter.format(e.unitPrice),
-          total: currencyFormatter.format(e.debit)
-        }));
+        columnStyles = {
+          regIdx: { halign: 'center', cellWidth: 14 },
+          date: { halign: 'center', cellWidth: 20 },
+          libIdx: { halign: 'center', cellWidth: 22 },
+          code: { fontStyle: 'bold', cellWidth: 28 },
+          desc: { cellWidth: 85 },
+          um: { halign: 'center', cellWidth: 12 },
+          qty: { halign: 'right', cellWidth: 20 },
+          price: { halign: 'right', cellWidth: 24 },
+          amount: { halign: 'right', cellWidth: 24, fontStyle: 'bold' },
+          prog: { halign: 'right', cellWidth: 24, fontStyle: 'bold' }
+        };
+        const visibleEntries = activeRegisterEntries.filter(applyFilters);
+        grandTotal = visibleEntries.length > 0 ? visibleEntries[visibleEntries.length - 1].runningProgressive : 0;
+
+        rows = visibleEntries.map(e => {
+          const fmtQty = e.accountingType === 'body' ? percentFormatter.format(e.quantity) : numberFormatter.format(e.quantity);
+          const dims = (e.accountingType !== 'body' && (e.factor !== undefined || e.length !== undefined || e.width !== undefined || e.height !== undefined))
+            ? `\n([${[
+                e.factor !== undefined ? `F:${numberFormatter.format(e.factor)}` : null,
+                e.length !== undefined ? `L:${numberFormatter.format(e.length)}` : null,
+                e.width !== undefined ? `l:${numberFormatter.format(e.width)}` : null,
+                e.height !== undefined ? `H:${numberFormatter.format(e.height)}` : null
+              ].filter(Boolean).join(' × ')}])`
+            : '';
+
+          return {
+            regIdx: e.registerOrderIndex,
+            date: format(parseISO(e.date), 'dd/MM/yyyy'),
+            libIdx: `Lib. #${e.progressiveIndex}`,
+            code: e.articleCode,
+            desc: `${e.description}${e.measurementNote ? '\nNote: ' + e.measurementNote : ''}${dims}`,
+            um: e.unit,
+            qty: fmtQty,
+            price: currencyFormatter.format(e.unitPrice),
+            amount: currencyFormatter.format(e.debit),
+            prog: currencyFormatter.format(e.runningProgressive),
+            rawCumulativeAmount: e.runningProgressive
+          };
+        });
       } else if (type === 'summary') {
         columns = [
-          { header: 'Codice', dataKey: 'code' },
-          { header: 'Descrizione', dataKey: 'desc' },
+          { header: 'N. / Rif. Lib.', dataKey: 'idx' },
+          { header: 'Data / SAL', dataKey: 'date' },
+          { header: 'Codice Articolo / Designazione Lavori', dataKey: 'desc' },
           { header: 'U.M.', dataKey: 'um' },
-          { header: 'Prezzo', dataKey: 'price' },
-          { header: 'Q.tà Prec.', dataKey: 'qPrev' },
-          { header: 'Q.tà Att.', dataKey: 'qCurr' },
-          { header: 'Q.tà Tot.', dataKey: 'qTotal' },
-          { header: 'Importo', dataKey: 'total' }
+          { header: 'Quantità', dataKey: 'qty' },
+          { header: 'Prezzo Unit.', dataKey: 'price' },
+          { header: 'Importo Tot.', dataKey: 'amount' }
         ];
-        rows = accountingSummary.filter(applyFilters).map(e => ({
-          code: e.articleCode,
-          desc: e.description,
-          um: e.unit,
-          price: currencyFormatter.format(e.unitPrice),
-          qPrev: e.accountingType === 'body' ? percentFormatter.format(e.previousQuantity) : numberFormatter.format(e.previousQuantity),
-          qCurr: e.accountingType === 'body' ? percentFormatter.format(e.currentQuantity) : numberFormatter.format(e.currentQuantity),
-          qTotal: e.accountingType === 'body' ? percentFormatter.format(e.totalQuantity) : numberFormatter.format(e.totalQuantity),
-          total: currencyFormatter.format(e.totalAmount)
-        }));
+        columnStyles = {
+          idx: { halign: 'center', cellWidth: 20 },
+          date: { halign: 'center', cellWidth: 22 },
+          desc: { cellWidth: 70 },
+          um: { halign: 'center', cellWidth: 12 },
+          qty: { halign: 'right', cellWidth: 18 },
+          price: { halign: 'right', cellWidth: 20 },
+          amount: { halign: 'right', cellWidth: 24, fontStyle: 'bold' }
+        };
+
+        const visibleItems = accountingSummary.filter(applyFilters);
+        let runningSum = 0;
+        rows = [];
+
+        visibleItems.forEach((item, artIdx) => {
+          const fmtQty = (q: number) => item.accountingType === 'body' ? percentFormatter.format(q) : numberFormatter.format(q);
+          const allLines = item.allLines || [...item.previousLines, ...item.currentLines];
+
+          if (summaryMode === 'analytical') {
+            // Riga Intestazione Articolo
+            rows.push({
+              idx: `${artIdx + 1}`,
+              date: item.wbsName,
+              desc: `${item.articleCode}\n${item.description}`,
+              um: item.unit,
+              qty: '',
+              price: currencyFormatter.format(item.unitPrice),
+              amount: '',
+              rawCumulativeAmount: runningSum
+            });
+
+            // Righe Misure associate
+            allLines.forEach(line => {
+              const dims = (item.accountingType !== 'body' && (line.factor !== undefined || line.length !== undefined || line.width !== undefined || line.height !== undefined))
+                ? ` ([${[
+                    line.factor !== undefined ? `F:${numberFormatter.format(line.factor)}` : null,
+                    line.length !== undefined ? `L:${numberFormatter.format(line.length)}` : null,
+                    line.width !== undefined ? `l:${numberFormatter.format(line.width)}` : null,
+                    line.height !== undefined ? `H:${numberFormatter.format(line.height)}` : null
+                  ].filter(Boolean).join(' × ')}])`
+                : '';
+
+              rows.push({
+                idx: `Lib. #${line.progressiveIndex}`,
+                date: `${format(parseISO(line.date), 'dd/MM/yyyy')}${line.salLabel ? '\n(' + line.salLabel + ')' : ''}`,
+                desc: `   ${line.measurementNote}${dims}`,
+                um: item.unit,
+                qty: fmtQty(line.quantity),
+                price: '',
+                amount: '',
+                rawCumulativeAmount: runningSum
+              });
+            });
+
+            // Riga SOMMANO
+            runningSum = round2(runningSum + item.totalAmount);
+            rows.push({
+              idx: '',
+              date: '',
+              desc: `SOMMANO (${item.articleCode})`,
+              um: item.unit,
+              qty: fmtQty(item.totalQuantity),
+              price: currencyFormatter.format(item.unitPrice),
+              amount: currencyFormatter.format(item.totalAmount),
+              rawCumulativeAmount: runningSum
+            });
+          } else {
+            // Sintetico
+            runningSum = round2(runningSum + item.totalAmount);
+            const libRefs = allLines.map(l => `#${l.progressiveIndex}${l.salLabel ? ' (' + l.salLabel + ')' : ''}`).join(', ');
+            rows.push({
+              idx: `${artIdx + 1}`,
+              date: libRefs,
+              desc: `[${item.wbsName}] ${item.articleCode} - ${item.description}`,
+              um: item.unit,
+              qty: fmtQty(item.totalQuantity),
+              price: currencyFormatter.format(item.unitPrice),
+              amount: currencyFormatter.format(item.totalAmount),
+              rawCumulativeAmount: runningSum
+            });
+          }
+        });
+        grandTotal = runningSum;
       }
 
+      // AutoTable render with margins dedicated for Riporto / A Riporto
       (doc as any).autoTable({
         columns: columns,
         body: rows,
-        startY: 25,
-        margin: { top: 30, bottom: 20, left: 15, right: 15 },
-        styles: { fontSize: 8, cellPadding: 2, overflow: 'linebreak', font: 'helvetica' },
-        headStyles: { fillColor: [40, 40, 40], textColor: 255, fontStyle: 'bold', halign: 'center' },
-        columnStyles: {
-          idx: { halign: 'center', cellWidth: 16 },
-          date: { halign: 'center', cellWidth: 20 },
-          code: { fontStyle: 'bold', cellWidth: 25 },
-          um: { halign: 'center', cellWidth: 12 },
-          qty: { halign: 'right', cellWidth: 20 },
-          price: { halign: 'right', cellWidth: 25 },
-          total: { halign: 'right', cellWidth: 30, fontStyle: 'bold' },
-          qPrev: { halign: 'right', cellWidth: 18 },
-          qCurr: { halign: 'right', cellWidth: 18 },
-          qTotal: { halign: 'right', cellWidth: 18, fontStyle: 'bold' }
-        },
-        alternateRowStyles: { fillColor: [245, 245, 245] },
+        startY: 32,
+        margin: { top: 32, bottom: 25, left: 12, right: 12 },
+        styles: { fontSize: 7.5, cellPadding: 2, overflow: 'linebreak', font: 'helvetica' },
+        headStyles: { fillColor: [45, 55, 72], textColor: 255, fontStyle: 'bold', halign: 'center' },
+        columnStyles: columnStyles,
+        alternateRowStyles: { fillColor: [248, 250, 252] },
         didDrawPage: (data: any) => {
-          // Header on every page
-          doc.setFontSize(9);
+          // Intestazione in cima ad ogni pagina
+          doc.setFontSize(8.5);
           doc.setFont('helvetica', 'bold');
           doc.setTextColor(40);
-          doc.text(`${projectName}`, 15, 15);
+          doc.text(`${projectName || 'Progetto'}`, 12, 14);
           doc.setFont('helvetica', 'normal');
-          doc.text(`${titles[type]} - SAL N. ${sal?.number || ''}`, 15, 20);
+          doc.text(`${titles[type]} - Situazione al ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')} (SAL N. ${sal?.number || 'Bozza'})`, 12, 19);
           
-          doc.setDrawColor(0);
-          doc.setLineWidth(0.5);
-          doc.line(15, 22, pageWidth - 15, 22);
+          doc.setDrawColor(200, 200, 200);
+          doc.setLineWidth(0.4);
+          doc.line(12, 21.5, pageWidth - 12, 21.5);
 
-          // Footer
-          const str = "Pagina " + doc.internal.getNumberOfPages();
-          doc.setFontSize(8);
-          doc.setTextColor(100);
-          doc.text(str, pageWidth - 25, pageHeight - 10);
-          doc.text(`Data stampa: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 15, pageHeight - 10);
+          // Data stampa in fondo alla pagina
+          doc.setFontSize(7.5);
+          doc.setTextColor(120);
+          doc.text(`Data stampa: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 12, pageHeight - 8);
+          doc.text(`Doc: ${titles[type]}`, pageWidth / 2, pageHeight - 8, { align: 'center' });
         }
       });
+
+      // Post-Processing: Riporto e A Riporto pagina per pagina
+      const totalDocPages = (doc as any).internal.getNumberOfPages();
+      const lastTable = (doc as any).lastAutoTable;
+      const tablePagesCount = lastTable ? lastTable.pageCount : (totalDocPages - 1);
+
+      const getPageCumulative = (tablePageNum: number) => {
+        const pageRows = (lastTable?.rows || []).filter((r: any) => r.pageNumber === tablePageNum);
+        const rev = [...pageRows].reverse();
+        const found = rev.find((r: any) => r.raw && typeof r.raw.rawCumulativeAmount === 'number');
+        return found ? found.raw.rawCumulativeAmount : grandTotal;
+      };
+
+      for (let p = 1; p <= tablePagesCount; p++) {
+        const docPage = p + 1; // pagina 1 è la copertina
+        if (docPage > totalDocPages) break;
+        doc.setPage(docPage);
+
+        if (tablePagesCount > 1) {
+          // RIPORTO a inizio pagina (dalla seconda pagina del documento)
+          if (p > 1) {
+            const prevCum = getPageCumulative(p - 1);
+            doc.setFillColor(248, 250, 252);
+            doc.setDrawColor(203, 213, 225);
+            doc.setLineWidth(0.3);
+            doc.rect(12, 23.5, pageWidth - 24, 6.5, 'FD');
+
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(8);
+            doc.setTextColor(71, 85, 105);
+            doc.text('RIPORTO DALLA PAGINA PRECEDENTE', 16, 27.8);
+
+            doc.setFontSize(8.5);
+            doc.setTextColor(15, 23, 42);
+            doc.text(currencyFormatter.format(prevCum), pageWidth - 16, 27.8, { align: 'right' });
+          }
+
+          // A RIPORTO a fine pagina (fino alla penultima pagina)
+          if (p < tablePagesCount) {
+            const currCum = getPageCumulative(p);
+            doc.setFillColor(248, 250, 252);
+            doc.setDrawColor(203, 213, 225);
+            doc.setLineWidth(0.3);
+            doc.rect(12, pageHeight - 23.5, pageWidth - 24, 6.5, 'FD');
+
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(8);
+            doc.setTextColor(71, 85, 105);
+            doc.text('A RIPORTO ALLA PAGINA SUCCESSIVA', 16, pageHeight - 19.2);
+
+            doc.setFontSize(8.5);
+            doc.setTextColor(15, 23, 42);
+            doc.text(currencyFormatter.format(currCum), pageWidth - 16, pageHeight - 19.2, { align: 'right' });
+          }
+        }
+
+        // Ultima pagina: TOTALE PROGRESSIVO GENERALE
+        if (p === tablePagesCount && grandTotal > 0) {
+          doc.setFillColor(238, 242, 255);
+          doc.setDrawColor(99, 102, 241);
+          doc.setLineWidth(0.4);
+          doc.rect(12, pageHeight - 23.5, pageWidth - 24, 7, 'FD');
+
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(8.5);
+          doc.setTextColor(49, 46, 129);
+          doc.text(`TOTALE PROGRESSIVO GENERALE A TUTTO IL SAL N. ${sal?.number || 'CORRENTE'}`, 16, pageHeight - 19);
+
+          doc.setFontSize(9.5);
+          doc.text(currencyFormatter.format(grandTotal), pageWidth - 16, pageHeight - 19, { align: 'right' });
+        }
+
+        // Paginazione a fondo pagina
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.5);
+        doc.setTextColor(120);
+        doc.text(`Pagina ${p} di ${tablePagesCount} (Doc. ${docPage}/${totalDocPages})`, pageWidth - 12, pageHeight - 8, { align: 'right' });
+      }
 
       doc.save(`${projectName?.replace(/[^a-z0-9]/gi, '_') || 'document'}_${titles[type].replace(/[^a-z0-9]/gi, '_')}.pdf`);
     } catch (err) {
@@ -715,13 +1438,13 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       },
       register: {
           title: 'Registro di Contabilità',
-          subtitle: `Situazione cumulativa al ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')}`,
-          badge: 'Documento Fiscale - Registro Cronologico'
+          subtitle: `Situazione progressiva a tutto il ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')} (SAL N. ${sals.find(s => s.id === activeSalId)?.number || 'Bozza'})`,
+          badge: 'Documento Fiscale - Registro Progressivo'
       },
       summary: {
-          title: 'Sommario del Registro',
-          subtitle: `Riepilogo per articolo - SAL N. ${sals.find(s => s.id === activeSalId)?.number || 'Bozza'}`,
-          badge: 'Analisi Avanzamento per Categoria'
+          title: 'Sommario del Registro di Contabilità',
+          subtitle: `Riepilogo progressivo per articolo a tutto il SAL N. ${sals.find(s => s.id === activeSalId)?.number || 'Bozza'} (${format(parseISO(salReferenceDate), 'dd/MM/yyyy')})`,
+          badge: 'Sommario Progressivo'
       },
       sal_technical: {
           title: 'Stato Avanzamento Lavori (Riepilogo)',
@@ -732,6 +1455,11 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           title: 'Certificato di Pagamento',
           subtitle: activeSalId ? `Rata di Acconto N. ${sals.find(s => s.id === activeSalId)?.number} al ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')}` : 'Bozza Certificato',
           badge: 'Liquidazione Rata'
+      },
+      depreciation: {
+          title: 'Deprezzamento di Prezzo (Determina del RUP)',
+          subtitle: 'Atti autorizzativi di riduzione prezzi e gestione quote ex art. 114 D.Lgs. 36/2023',
+          badge: 'Atti Amministrativi RUP'
       },
       settings: {
           title: 'Impostazioni Contratto & Gestione SAL',
@@ -911,82 +1639,625 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             )}
             
             {activeTab === 'register' && (
-                <div className="flex-grow p-2 overflow-hidden flex flex-col min-h-0">
+                <div className="flex-grow p-2 overflow-hidden flex flex-col min-h-0 gap-2">
+                    {/* Barra di filtro pulita stile Computo */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-gray-50 dark:bg-gray-800/80 rounded-lg border border-gray-200 dark:border-gray-700 flex-shrink-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                            <input
+                                type="text"
+                                value={filters.code}
+                                onChange={e => setFilters(prev => ({ ...prev, code: e.target.value }))}
+                                placeholder="Filtra codice articolo..."
+                                className="px-2.5 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 focus:ring-1 focus:ring-indigo-500 outline-none w-44"
+                            />
+                            <input
+                                type="text"
+                                value={filters.description}
+                                onChange={e => setFilters(prev => ({ ...prev, description: e.target.value }))}
+                                placeholder="Filtra descrizione / nota..."
+                                className="px-2.5 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 focus:ring-1 focus:ring-indigo-500 outline-none w-52"
+                            />
+                        </div>
+                        {(() => {
+                            const visibleEntries = activeRegisterEntries.filter(applyFilters);
+                            const totalProg = visibleEntries.length > 0 ? visibleEntries[visibleEntries.length - 1].runningProgressive : 0;
+                            return (
+                                <div className="flex items-center gap-2 text-xs">
+                                    <span className="text-gray-500 dark:text-gray-400 font-medium">Totale Progressivo Registro a tutto il SAL N. {sals.find(s => s.id === activeSalId)?.number || 'Corrente'}:</span>
+                                    <span className="font-mono font-bold text-sm text-indigo-700 dark:text-indigo-300">{currencyFormatter.format(totalProg)}</span>
+                                </div>
+                            );
+                        })()}
+                    </div>
+
                     <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-xs border border-gray-200 dark:border-gray-700 flex-grow overflow-auto min-h-0">
-                        <table className="w-full text-sm text-left text-gray-600 dark:text-gray-300 border-collapse">
-                        <thead className="text-xs text-gray-700 dark:text-gray-200 uppercase bg-gray-100 dark:bg-gray-700 sticky top-0 z-10 shadow-xs">
-                            <tr><th className="px-3 py-2.5 w-20 text-center border-r dark:border-gray-600 text-indigo-600 dark:text-indigo-400">Num. ord.</th><th className="px-3 py-2.5 w-24">Data</th><th className="px-3 py-2.5 w-32">WBS</th><th className="px-3 py-2.5">Descrizione</th><th className="px-3 py-2.5 w-16 text-center">U.M.</th><th className="px-3 py-2.5 text-right w-24">Q.tà</th><th className="px-3 py-2.5 text-right w-24">Prezzo</th><th className="px-3 py-2.5 text-right w-32 font-bold">Importo</th></tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-                            {filteredRegistry.filter(applyFilters).map((entry, idx) => {
-                                const isCurrentPeriod = entry.date.localeCompare(previousSalDate) > 0;
-                                return (
-                                    <tr key={idx} className={`hover:bg-gray-50 dark:hover:bg-gray-700/40 ${entry.isSecurityCost ? 'bg-green-50 dark:bg-green-900/20' : entry.accountingType === 'body' ? 'bg-purple-50/50 dark:bg-purple-900/20' : ''} ${isCurrentPeriod ? 'border-l-4 border-l-indigo-500' : 'opacity-75'}`}>
-                                        <td className="px-3 py-2 text-center font-bold text-indigo-700 dark:text-indigo-400 border-r dark:border-gray-600">{entry.progressiveIndex}</td>
-                                        <td className="px-3 py-2">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
-                                        <td className="px-3 py-2 text-xs uppercase font-bold">{entry.groupName}</td>
-                                        <td className="px-3 py-2 truncate max-w-md">
-                                            {entry.description}
-                                            {isCurrentPeriod && <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-700 uppercase tracking-tighter">Nuovo</span>}
-                                        </td>
-                                        <td className="px-3 py-2 text-center">{entry.unit}</td>
-                                        <td className="px-3 py-2 text-right">{entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity)}</td>
-                                        <td className="px-3 py-2 text-right">{currencyFormatter.format(entry.unitPrice)}</td>
-                                        <td className="px-3 py-2 text-right font-bold">{currencyFormatter.format(entry.debit)}</td>
-                                    </tr>
-                                );
-                            })}
-                        </tbody>
-                    </table>
+                        <table className="w-full text-xs text-left text-gray-700 dark:text-gray-200 border-collapse">
+                            <thead className="text-[11px] text-gray-600 dark:text-gray-300 uppercase bg-gray-100 dark:bg-gray-700 sticky top-0 z-10 border-b border-gray-300 dark:border-gray-600">
+                                <tr>
+                                    <th className="px-2 py-2 w-16 text-center border-r border-gray-200 dark:border-gray-600">N. Ord.</th>
+                                    <th className="px-2 py-2 w-24 text-center border-r border-gray-200 dark:border-gray-600">Data</th>
+                                    <th className="px-2.5 py-2 w-28 text-center border-r border-gray-200 dark:border-gray-600">Rif. Libretto</th>
+                                    <th className="px-2.5 py-2 w-32 border-r border-gray-200 dark:border-gray-600">Codice Art.</th>
+                                    <th className="px-3 py-2 border-r border-gray-200 dark:border-gray-600">Designazione dei Lavori e delle Provviste</th>
+                                    <th className="px-2 py-2 w-12 text-center border-r border-gray-200 dark:border-gray-600">U.M.</th>
+                                    <th className="px-2.5 py-2 text-right w-24 border-r border-gray-200 dark:border-gray-600 font-bold">Quantità</th>
+                                    <th className="px-2.5 py-2 text-right w-24 border-r border-gray-200 dark:border-gray-600">Prezzo Unit.</th>
+                                    <th className="px-3 py-2 text-right w-28 border-r border-gray-200 dark:border-gray-600 font-bold">Importo</th>
+                                    <th className="px-3 py-2 text-right w-32 font-black bg-indigo-50/50 dark:bg-indigo-900/20">Totale Prog.</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                                {activeRegisterEntries.filter(applyFilters).map((entry) => {
+                                    const fmtQty = entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity);
+                                    const hasDims = entry.accountingType !== 'body' && (entry.factor !== undefined || entry.length !== undefined || entry.width !== undefined || entry.height !== undefined);
+
+                                    return (
+                                        <tr 
+                                            key={entry.id} 
+                                            className="bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700/40 text-gray-700 dark:text-gray-300 transition-colors"
+                                        >
+                                            <td className="px-2 py-2 text-center font-bold text-gray-700 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                {entry.registerOrderIndex}
+                                            </td>
+                                            <td className="px-2 py-2 text-center font-mono text-[11px] text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                {format(parseISO(entry.date), 'dd/MM/yyyy')}
+                                            </td>
+                                            <td className="px-2.5 py-2 text-center border-r border-gray-200 dark:border-gray-700 align-top">
+                                                <span className="inline-block px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 font-mono font-bold text-[10px] border border-gray-300 dark:border-gray-600">
+                                                    Lib. #{entry.progressiveIndex}
+                                                </span>
+                                            </td>
+                                            <td className="px-2.5 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                <div>{entry.articleCode}</div>
+                                                <div className="text-[10px] font-sans font-normal text-gray-400 uppercase mt-0.5">{entry.groupName}</div>
+                                            </td>
+                                            <td className="px-3 py-2 text-gray-900 dark:text-gray-100 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                <div className="font-semibold">{entry.description}</div>
+                                                {entry.measurementNote && (
+                                                    <div className="italic text-gray-600 dark:text-gray-300 text-[11px] mt-0.5">
+                                                        {entry.measurementNote}
+                                                    </div>
+                                                )}
+                                                {hasDims && (
+                                                    <div className="font-mono text-[10px] text-gray-400 mt-0.5">
+                                                        ({[
+                                                            entry.factor !== undefined ? `F:${numberFormatter.format(entry.factor)}` : null,
+                                                            entry.length !== undefined ? `L:${numberFormatter.format(entry.length)}` : null,
+                                                            entry.width !== undefined ? `l:${numberFormatter.format(entry.width)}` : null,
+                                                            entry.height !== undefined ? `H/P:${numberFormatter.format(entry.height)}` : null
+                                                        ].filter(Boolean).join(' × ')})
+                                                    </div>
+                                                )}
+                                            </td>
+                                            <td className="px-2 py-2 text-center font-mono text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                {entry.unit}
+                                            </td>
+                                            <td className="px-2.5 py-2 text-right font-mono font-bold text-gray-900 dark:text-white border-r border-gray-200 dark:border-gray-700 align-top">
+                                                {fmtQty}
+                                            </td>
+                                            <td className="px-2.5 py-2 text-right font-mono text-gray-700 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                {entry.isDepreciated && (
+                                                    <span className="block text-[9px] font-sans font-black text-amber-600 dark:text-amber-400" title="Prezzo unitario deprezzato autorizzato con Determina RUP">
+                                                        ⚖️ Det. RUP
+                                                    </span>
+                                                )}
+                                                {currencyFormatter.format(entry.unitPrice)}
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono font-bold text-gray-900 dark:text-white border-r border-gray-200 dark:border-gray-700 align-top">
+                                                {currencyFormatter.format(entry.debit)}
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono font-black text-indigo-700 dark:text-indigo-300 bg-indigo-50/40 dark:bg-indigo-900/20 align-top">
+                                                {currencyFormatter.format(entry.runningProgressive)}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                            <tfoot>
+                                {(() => {
+                                    const visibleEntries = activeRegisterEntries.filter(applyFilters);
+                                    const totalProg = visibleEntries.length > 0 ? visibleEntries[visibleEntries.length - 1].runningProgressive : 0;
+                                    return (
+                                        <tr className="bg-gray-100 dark:bg-gray-700 font-bold border-t-2 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white">
+                                            <td colSpan={9} className="px-3 py-2.5 text-right uppercase tracking-wider text-xs border-r border-gray-200 dark:border-gray-600">
+                                                IMPORTO TOTALE PROGRESSIVO DEL REGISTRO A TUTTO IL SAL N. {sals.find(s => s.id === activeSalId)?.number || 'CORRENTE'}
+                                            </td>
+                                            <td className="px-3 py-2.5 text-right font-mono text-sm font-black text-indigo-700 dark:text-indigo-300 bg-indigo-100/50 dark:bg-indigo-900/40">
+                                                {currencyFormatter.format(totalProg)}
+                                            </td>
+                                        </tr>
+                                    );
+                                })()}
+                            </tfoot>
+                        </table>
+                    </div>
                 </div>
-            </div>
-        )}
+            )}
 
             {activeTab === 'summary' && (
-                <div className="flex-grow p-2 overflow-hidden flex flex-col min-h-0">
-                    <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-xs border border-gray-200 dark:border-gray-700 flex-grow overflow-auto min-h-0">
-                        <table className="w-full text-sm text-left text-gray-600 dark:text-gray-300 border-collapse">
-                        <thead className="text-xs text-gray-700 dark:text-gray-200 uppercase bg-gray-100 dark:bg-gray-700 sticky top-0 z-10 shadow-xs">
-                            <tr>
-                                <th className="px-3 py-2.5 border-r dark:border-gray-600">Codice Articolo</th>
-                                <th className="px-3 py-2.5 border-r dark:border-gray-600">WBS</th>
-                                <th className="px-3 py-2.5">Descrizione</th>
-                                <th className="px-3 py-2.5 w-16 text-center">U.M.</th>
-                                <th className="px-3 py-2.5 text-right w-24">Prezzo</th>
-                                <th className="px-3 py-2.5 text-right w-24 bg-gray-50 dark:bg-gray-700">Q.tà Prec.</th>
-                                <th className="px-3 py-2.5 text-right w-24 bg-indigo-50 dark:bg-indigo-900/30">Q.tà Att.</th>
-                                <th className="px-3 py-2.5 text-right w-24 font-bold">Q.tà Tot.</th>
-                                <th className="px-3 py-2.5 text-right w-32 font-bold">Importo</th>
-                                <th className="px-3 py-2.5 text-center w-28">%</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-                            {accountingSummary.filter(applyFilters).map((item, idx) => (
-                                <tr key={idx} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
-                                    <td className="px-3 py-2 font-mono text-xs border-r dark:border-gray-700">{item.articleCode}</td>
-                                    <td className="px-3 py-2 text-xs uppercase font-bold border-r dark:border-gray-700">{item.wbsName}</td>
-                                    <td className="px-3 py-2 truncate max-w-xs">{item.description}</td>
-                                    <td className="px-3 py-2 text-center">{item.unit}</td>
-                                    <td className="px-3 py-2 text-right">{currencyFormatter.format(item.unitPrice)}</td>
-                                    <td className="px-3 py-2 text-right bg-gray-50 dark:bg-gray-800">{item.accountingType === 'body' ? percentFormatter.format(item.previousQuantity) : numberFormatter.format(item.previousQuantity)}</td>
-                                    <td className="px-3 py-2 text-right bg-indigo-50 dark:bg-indigo-900/20 font-semibold">{item.accountingType === 'body' ? percentFormatter.format(item.currentQuantity) : numberFormatter.format(item.currentQuantity)}</td>
-                                    <td className="px-3 py-2 text-right font-bold">{item.accountingType === 'body' ? percentFormatter.format(item.totalQuantity) : numberFormatter.format(item.totalQuantity)}</td>
-                                    <td className="px-3 py-2 text-right font-bold">{currencyFormatter.format(item.totalAmount)}</td>
-                                    <td className="px-3 py-2 text-center">
-                                        <div className="flex items-center gap-2">
-                                            <div className="flex-1 h-1.5 bg-gray-200 dark:bg-gray-600 rounded-full overflow-hidden">
-                                                <div className="h-full bg-green-500" style={{ width: `${Math.min(100, item.progressPercent)}%` }}></div>
-                                            </div>
-                                            <span className="text-[10px] font-bold min-w-[35px]">{item.progressPercent.toFixed(1)}%</span>
+                <div className="flex-grow p-2 overflow-hidden flex flex-col min-h-0 gap-2">
+                    {/* Barra strumenti pulita Sommario del Registro */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-gray-50 dark:bg-gray-800/80 rounded-lg border border-gray-200 dark:border-gray-700 flex-shrink-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                            {/* Modalità Analitico / Sintetico */}
+                            <div className="inline-flex rounded-md bg-white dark:bg-gray-700 p-0.5 border border-gray-200 dark:border-gray-600">
+                                <button
+                                    onClick={() => setSummaryMode('analytical')}
+                                    className={`px-2.5 py-1 text-xs font-bold rounded transition-colors ${summaryMode === 'analytical' ? 'bg-indigo-600 text-white shadow-xs' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600'}`}
+                                >
+                                    Sommario Analitico (Dettaglio Misure)
+                                </button>
+                                <button
+                                    onClick={() => setSummaryMode('synthetic')}
+                                    className={`px-2.5 py-1 text-xs font-bold rounded transition-colors ${summaryMode === 'synthetic' ? 'bg-indigo-600 text-white shadow-xs' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600'}`}
+                                >
+                                    Sommario Sintetico (Totali Voci)
+                                </button>
+                            </div>
+
+                            {/* Ambito Computo Completo vs Solo Misurate */}
+                            <div className="inline-flex rounded-md bg-white dark:bg-gray-700 p-0.5 border border-gray-200 dark:border-gray-600">
+                                <button
+                                    onClick={() => setSummaryScope('all_computo')}
+                                    className={`px-2.5 py-1 text-xs font-bold rounded transition-colors ${summaryScope === 'all_computo' ? 'bg-emerald-600 text-white shadow-xs' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600'}`}
+                                    title="Mostra l'intero Computo Metrico strutturato (tutte le categorie e le voci)"
+                                >
+                                    📋 Tutte le Voci di Computo
+                                </button>
+                                <button
+                                    onClick={() => setSummaryScope('only_measured')}
+                                    className={`px-2.5 py-1 text-xs font-bold rounded transition-colors ${summaryScope === 'only_measured' ? 'bg-emerald-600 text-white shadow-xs' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600'}`}
+                                    title="Mostra solo le voci che hanno almeno una registrazione di misura"
+                                >
+                                    🔍 Solo Voci Misurate a SAL
+                                </button>
+                            </div>
+
+                            {/* Raggruppamento per Gruppi / Categorie */}
+                            <div className="inline-flex rounded-md bg-white dark:bg-gray-700 p-0.5 border border-gray-200 dark:border-gray-600">
+                                <button
+                                    onClick={() => setSummaryGrouping('grouped_by_wbs')}
+                                    className={`px-2.5 py-1 text-xs font-bold rounded transition-colors ${summaryGrouping === 'grouped_by_wbs' ? 'bg-violet-600 text-white shadow-xs' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600'}`}
+                                    title="Struttura il sommario raggruppato per Gruppi di Lavoro / Categorie WBS"
+                                >
+                                    📁 Strutturato per Gruppi
+                                </button>
+                                <button
+                                    onClick={() => setSummaryGrouping('flat')}
+                                    className={`px-2.5 py-1 text-xs font-bold rounded transition-colors ${summaryGrouping === 'flat' ? 'bg-violet-600 text-white shadow-xs' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600'}`}
+                                    title="Elenco continuo tabellare unico"
+                                >
+                                    📄 Elenco Singolo
+                                </button>
+                            </div>
+
+                            <input
+                                type="text"
+                                value={filters.code}
+                                onChange={e => setFilters(prev => ({ ...prev, code: e.target.value }))}
+                                placeholder="Filtra codice articolo..."
+                                className="px-2.5 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 focus:ring-1 focus:ring-indigo-500 outline-none w-36"
+                            />
+                            <input
+                                type="text"
+                                value={filters.description}
+                                onChange={e => setFilters(prev => ({ ...prev, description: e.target.value }))}
+                                placeholder="Filtra descrizione..."
+                                className="px-2.5 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 focus:ring-1 focus:ring-indigo-500 outline-none w-40"
+                            />
+                        </div>
+
+                        {(() => {
+                            const visibleItems = accountingSummary.filter(applyFilters);
+                            const totProg = round2(visibleItems.reduce((acc, i) => acc + i.totalAmount, 0));
+                            const totComputo = round2(visibleItems.reduce((acc, i) => acc + (i.estimatedQuantity * i.unitPrice), 0));
+                            return (
+                                <div className="flex items-center gap-3 text-xs flex-wrap">
+                                    <span className="text-gray-500 dark:text-gray-400">
+                                        Voci visualizzate: <strong className="text-gray-800 dark:text-gray-100 font-bold">{visibleItems.length}</strong>
+                                    </span>
+                                    {summaryScope === 'all_computo' && (
+                                        <div className="flex items-center gap-1.5">
+                                            <span className="text-gray-500">Valore Computo:</span>
+                                            <span className="font-mono font-bold text-gray-700 dark:text-gray-200">{currencyFormatter.format(totComputo)}</span>
                                         </div>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
+                                    )}
+                                    <div className="flex items-center gap-1.5 bg-indigo-50 dark:bg-indigo-950/40 px-2 py-1 rounded-md border border-indigo-200 dark:border-indigo-800">
+                                        <span className="font-semibold text-gray-700 dark:text-gray-300">Contabilizzato SAL N. {sals.find(s => s.id === activeSalId)?.number || '1'}:</span>
+                                        <span className="font-mono font-black text-indigo-700 dark:text-indigo-300">{currencyFormatter.format(totProg)}</span>
+                                    </div>
+                                </div>
+                            );
+                        })()}
+                    </div>
+
+                    <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-xs border border-gray-200 dark:border-gray-700 flex-grow overflow-auto min-h-0">
+                        {summaryGrouping === 'grouped_by_wbs' ? (
+                            /* VISUALIZZAZIONE STRUTTURATA PER GRUPPI / CATEGORIE */
+                            <div className="divide-y divide-gray-200 dark:divide-gray-700">
+                                {(() => {
+                                    const filteredItems = accountingSummary.filter(applyFilters);
+                                    // Raggruppamento per groupName / wbsName
+                                    const grouped = new Map<string, SummaryEntry[]>();
+                                    filteredItems.forEach(item => {
+                                        const grp = item.groupName || item.wbsName || 'Altre Lavorazioni';
+                                        if (!grouped.has(grp)) grouped.set(grp, []);
+                                        grouped.get(grp)!.push(item);
+                                    });
+
+                                    if (grouped.size === 0) {
+                                        return (
+                                            <div className="p-8 text-center text-gray-500 text-xs">
+                                                Nessuna voce presente con i filtri attivi. Prova a selezionare "Tutte le Voci di Computo" o azzerare la ricerca.
+                                            </div>
+                                        );
+                                    }
+
+                                    let globalCounter = 0;
+
+                                    return Array.from(grouped.entries()).map(([groupName, groupItems]) => {
+                                        const groupTotComputo = round2(groupItems.reduce((acc, i) => acc + (i.estimatedQuantity * i.unitPrice), 0));
+                                        const groupTotAccounted = round2(groupItems.reduce((acc, i) => acc + i.totalAmount, 0));
+                                        const groupTotResidual = Math.max(0, round2(groupTotComputo - groupTotAccounted));
+                                        const groupProgress = groupTotComputo > 0 ? (groupTotAccounted / groupTotComputo) * 100 : 0;
+
+                                        return (
+                                            <div key={groupName} className="mb-4 last:mb-0">
+                                                {/* INTESTAZIONE GRUPPO / WBS */}
+                                                <div className="bg-gradient-to-r from-gray-100 to-indigo-50/50 dark:from-gray-700 dark:to-indigo-950/30 px-3 py-2 border-b border-gray-300 dark:border-gray-600 flex flex-wrap items-center justify-between gap-2">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="p-1 rounded bg-indigo-600 text-white text-xs">📁</span>
+                                                        <h3 className="font-black text-xs md:text-sm text-gray-900 dark:text-white uppercase tracking-tight">
+                                                            {groupName}
+                                                        </h3>
+                                                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 dark:bg-indigo-900/60 text-indigo-800 dark:text-indigo-200">
+                                                            {groupItems.length} {groupItems.length === 1 ? 'voce' : 'voci'}
+                                                        </span>
+                                                    </div>
+                                                    <div className="flex items-center gap-3 text-[11px] font-mono flex-wrap">
+                                                        <span className="text-gray-500">Computo: <strong className="text-gray-800 dark:text-gray-200">{currencyFormatter.format(groupTotComputo)}</strong></span>
+                                                        <span className="text-indigo-600 dark:text-indigo-400">Contabilizzato: <strong className="font-bold">{currencyFormatter.format(groupTotAccounted)}</strong> ({groupProgress.toFixed(1)}%)</span>
+                                                        <span className="text-emerald-600 dark:text-emerald-400">Residuo: <strong>{currencyFormatter.format(groupTotResidual)}</strong></span>
+                                                    </div>
+                                                </div>
+
+                                                {/* TABELLA DELLE VOCI DEL GRUPPO */}
+                                                <table className="w-full text-xs text-left text-gray-700 dark:text-gray-200 border-collapse">
+                                                    <thead className="text-[10px] text-gray-600 dark:text-gray-300 uppercase bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+                                                        <tr>
+                                                            <th className="px-2 py-1.5 w-12 text-center border-r border-gray-200 dark:border-gray-700">N.</th>
+                                                            <th className="px-2.5 py-1.5 w-32 border-r border-gray-200 dark:border-gray-700">Articolo Elenco</th>
+                                                            <th className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-700">Designazione dei Lavori</th>
+                                                            <th className="px-2.5 py-1.5 w-48 border-r border-gray-200 dark:border-gray-700">Richiami Libretto e SAL</th>
+                                                            <th className="px-2 py-1.5 w-12 text-center border-r border-gray-200 dark:border-gray-700">U.M.</th>
+                                                            <th className="px-2.5 py-1.5 text-right w-24 border-r border-gray-200 dark:border-gray-700">Q.tà Contab.</th>
+                                                            <th className="px-2.5 py-1.5 text-right w-24 border-r border-gray-200 dark:border-gray-700">Prezzo Unit.</th>
+                                                            <th className="px-3 py-1.5 text-right w-28 font-bold">Importo Contab.</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                                                        {groupItems.map(item => {
+                                                            globalCounter++;
+                                                            const idx = globalCounter;
+                                                            const fmtQty = (q: number) => item.accountingType === 'body' ? percentFormatter.format(q) : numberFormatter.format(q);
+                                                            const allLines = item.allLines || [...item.previousLines, ...item.currentLines];
+                                                            const hasMeasures = allLines.length > 0;
+
+                                                            return (
+                                                                <React.Fragment key={item.articleCode}>
+                                                                    <tr className="bg-white dark:bg-gray-800 hover:bg-gray-50/80 dark:hover:bg-gray-700/30 transition-colors">
+                                                                        <td className="px-2 py-2 text-center font-bold text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                                            {idx}
+                                                                        </td>
+                                                                        <td className="px-2.5 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                                            <div>{item.articleCode}</div>
+                                                                            {item.isSecurityCost && (
+                                                                                <span className="inline-block mt-0.5 px-1 py-0.2 bg-red-100 text-red-800 rounded text-[9px] font-sans font-bold">Oneri Sicurezza</span>
+                                                                            )}
+                                                                        </td>
+                                                                        <td className="px-3 py-2 text-gray-900 dark:text-gray-100 border-r border-gray-200 dark:border-gray-700 align-top font-medium">
+                                                                            <div>{item.description}</div>
+                                                                            {!hasMeasures && (
+                                                                                <div className="text-[10px] text-gray-400 dark:text-gray-500 mt-1 flex items-center gap-2">
+                                                                                    <span>Q.tà a Computo: <strong>{fmtQty(item.estimatedQuantity)} {item.unit}</strong></span>
+                                                                                    <span>•</span>
+                                                                                    <span className="text-amber-600 dark:text-amber-400 font-semibold">In attesa di misura nel Libretto</span>
+                                                                                </div>
+                                                                            )}
+                                                                        </td>
+                                                                        <td className="px-2.5 py-2 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                                            {hasMeasures ? (
+                                                                                <div className="flex flex-wrap gap-1">
+                                                                                    {allLines.map(line => (
+                                                                                        <span
+                                                                                            key={line.id}
+                                                                                            title={`Data: ${format(parseISO(line.date), 'dd/MM/yyyy')} - Q.tà: ${fmtQty(line.quantity)} - ${line.measurementNote}`}
+                                                                                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono border ${
+                                                                                                line.isPreviousSal
+                                                                                                    ? 'bg-amber-50 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300 border-amber-200 dark:border-amber-700'
+                                                                                                    : 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 border-gray-300 dark:border-gray-600'
+                                                                                            }`}
+                                                                                        >
+                                                                                            <strong>Lib. #{line.progressiveIndex}</strong>
+                                                                                            {line.salLabel && <span className="font-bold text-amber-700 dark:text-amber-400">({line.salLabel})</span>}
+                                                                                        </span>
+                                                                                    ))}
+                                                                                </div>
+                                                                            ) : (
+                                                                                <span className="text-[10px] text-gray-400 italic">Nessuna misura</span>
+                                                                            )}
+                                                                        </td>
+                                                                        <td className="px-2 py-2 text-center font-mono text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                                            {item.unit}
+                                                                        </td>
+                                                                        <td className="px-2.5 py-2 text-right font-mono font-bold text-gray-900 dark:text-white border-r border-gray-200 dark:border-gray-700 align-top">
+                                                                            {hasMeasures ? fmtQty(item.totalQuantity) : (
+                                                                                <span className="text-gray-400 font-normal">0,00</span>
+                                                                            )}
+                                                                        </td>
+                                                                        <td className="px-2.5 py-2 text-right font-mono text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                                            {currencyFormatter.format(item.unitPrice)}
+                                                                        </td>
+                                                                        <td className="px-3 py-2 text-right font-mono font-bold text-gray-900 dark:text-white bg-gray-50/50 dark:bg-gray-700/20 align-top">
+                                                                            {hasMeasures ? currencyFormatter.format(item.totalAmount) : (
+                                                                                <span className="text-gray-400 font-normal">€ 0,00</span>
+                                                                            )}
+                                                                        </td>
+                                                                    </tr>
+
+                                                                    {/* Dettaglio righe di misura se analitico */}
+                                                                    {summaryMode === 'analytical' && hasMeasures && (
+                                                                        <>
+                                                                            {allLines.map(line => {
+                                                                                const hasDims = item.accountingType !== 'body' && (line.factor !== undefined || line.length !== undefined || line.width !== undefined || line.height !== undefined);
+                                                                                return (
+                                                                                    <tr key={`sum-line-${line.id}`} className="bg-gray-50/40 dark:bg-gray-800/40 text-gray-600 dark:text-gray-400 text-[11px]">
+                                                                                        <td className="px-2 py-1 border-r border-gray-200 dark:border-gray-700 text-center"></td>
+                                                                                        <td className="px-2.5 py-1 border-r border-gray-200 dark:border-gray-700 font-mono">
+                                                                                            {format(parseISO(line.date), 'dd/MM/yyyy')}
+                                                                                        </td>
+                                                                                        <td className="px-3 py-1 border-r border-gray-200 dark:border-gray-700 italic pl-6">
+                                                                                            {line.measurementNote}
+                                                                                            {hasDims && (
+                                                                                                <span className="ml-2 not-italic font-mono text-[10px] text-gray-400">
+                                                                                                    ({[
+                                                                                                        line.factor !== undefined ? `F:${numberFormatter.format(line.factor)}` : null,
+                                                                                                        line.length !== undefined ? `L:${numberFormatter.format(line.length)}` : null,
+                                                                                                        line.width !== undefined ? `l:${numberFormatter.format(line.width)}` : null,
+                                                                                                        line.height !== undefined ? `H/P:${numberFormatter.format(line.height)}` : null
+                                                                                                    ].filter(Boolean).join(' × ')})
+                                                                                                </span>
+                                                                                            )}
+                                                                                        </td>
+                                                                                        <td className="px-2.5 py-1 border-r border-gray-200 dark:border-gray-700 text-center">
+                                                                                            <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 font-mono font-bold text-[10px]">
+                                                                                                Lib. #{line.progressiveIndex}
+                                                                                            </span>
+                                                                                        </td>
+                                                                                        <td className="px-2 py-1 text-center font-mono border-r border-gray-200 dark:border-gray-700 text-[10px]">
+                                                                                            {item.unit}
+                                                                                        </td>
+                                                                                        <td className="px-2.5 py-1 text-right font-mono font-semibold text-gray-700 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700">
+                                                                                            {fmtQty(line.quantity)}
+                                                                                        </td>
+                                                                                        <td className="px-2.5 py-1 border-r border-gray-200 dark:border-gray-700"></td>
+                                                                                        <td className="px-3 py-1"></td>
+                                                                                    </tr>
+                                                                                );
+                                                                            })}
+                                                                            <tr className="bg-gray-100/60 dark:bg-gray-700/40 text-[11px] font-bold border-t border-b border-gray-200 dark:border-gray-600">
+                                                                                <td colSpan={2} className="px-2 py-1 border-r border-gray-200 dark:border-gray-700"></td>
+                                                                                <td className="px-3 py-1 border-r border-gray-200 dark:border-gray-700 uppercase text-gray-600 dark:text-gray-300">
+                                                                                    SOMMANO {item.unit}
+                                                                                </td>
+                                                                                <td className="px-2.5 py-1 border-r border-gray-200 dark:border-gray-700 text-center font-mono text-[10px] text-gray-400">
+                                                                                    {item.articleCode}
+                                                                                </td>
+                                                                                <td className="px-2 py-1 text-center font-mono border-r border-gray-200 dark:border-gray-700">
+                                                                                    {item.unit}
+                                                                                </td>
+                                                                                <td className="px-2.5 py-1 text-right font-mono text-indigo-700 dark:text-indigo-300 border-r border-gray-200 dark:border-gray-700 font-black">
+                                                                                    {fmtQty(item.totalQuantity)}
+                                                                                </td>
+                                                                                <td className="px-2.5 py-1 text-right font-mono text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700">
+                                                                                    {currencyFormatter.format(item.unitPrice)}
+                                                                                </td>
+                                                                                <td className="px-3 py-1 text-right font-mono font-black text-indigo-700 dark:text-indigo-300 bg-indigo-50/50 dark:bg-indigo-950/30">
+                                                                                    {currencyFormatter.format(item.totalAmount)}
+                                                                                </td>
+                                                                            </tr>
+                                                                        </>
+                                                                    )}
+                                                                </React.Fragment>
+                                                            );
+                                                        })}
+                                                    </tbody>
+                                                    <tfoot>
+                                                        <tr className="bg-gray-100 dark:bg-gray-700/80 font-bold border-t border-gray-300 dark:border-gray-600 text-gray-800 dark:text-gray-200">
+                                                            <td colSpan={5} className="px-3 py-1.5 text-right uppercase text-[11px] border-r border-gray-200 dark:border-gray-600">
+                                                                Subtotale {groupName}
+                                                            </td>
+                                                            <td colSpan={2} className="px-2.5 py-1.5 text-right text-[11px] border-r border-gray-200 dark:border-gray-600 font-mono">
+                                                                Residuo: {currencyFormatter.format(groupTotResidual)}
+                                                            </td>
+                                                            <td className="px-3 py-1.5 text-right font-mono font-black text-indigo-700 dark:text-indigo-300 bg-indigo-100/40 dark:bg-indigo-950/40">
+                                                                {currencyFormatter.format(groupTotAccounted)}
+                                                            </td>
+                                                        </tr>
+                                                    </tfoot>
+                                                </table>
+                                            </div>
+                                        );
+                                    });
+                                })()}
+                            </div>
+                        ) : (
+                            /* VISUALIZZAZIONE TABELLARE CONTINUA SINGOLA */
+                            <table className="w-full text-xs text-left text-gray-700 dark:text-gray-200 border-collapse">
+                                <thead className="text-[11px] text-gray-600 dark:text-gray-300 uppercase bg-gray-100 dark:bg-gray-700 sticky top-0 z-10 border-b border-gray-300 dark:border-gray-600">
+                                    <tr>
+                                        <th className="px-2.5 py-2.5 w-14 text-center border-r border-gray-200 dark:border-gray-600">N.</th>
+                                        <th className="px-3 py-2.5 w-36 border-r border-gray-200 dark:border-gray-600">Articolo di Elenco</th>
+                                        <th className="px-3 py-2.5 border-r border-gray-200 dark:border-gray-600">Designazione dei Lavori</th>
+                                        <th className="px-3 py-2.5 w-56 border-r border-gray-200 dark:border-gray-600">Richiami Libretto e SAL</th>
+                                        <th className="px-2 py-2.5 w-14 text-center border-r border-gray-200 dark:border-gray-600">U.M.</th>
+                                        <th className="px-3 py-2.5 text-right w-28 border-r border-gray-200 dark:border-gray-600 font-bold">Quantità Tot.</th>
+                                        <th className="px-3 py-2.5 text-right w-28 border-r border-gray-200 dark:border-gray-600">Prezzo Unit.</th>
+                                        <th className="px-3 py-2.5 text-right w-32 font-bold">Importo Totale</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                                    {accountingSummary.filter(applyFilters).map((item, idx) => {
+                                        const fmtQty = (q: number) => item.accountingType === 'body' ? percentFormatter.format(q) : numberFormatter.format(q);
+                                        const allLines = item.allLines || [...item.previousLines, ...item.currentLines];
+
+                                        return (
+                                            <React.Fragment key={item.articleCode}>
+                                                <tr className="bg-gray-50/90 dark:bg-gray-700/40 border-t-2 border-gray-300 dark:border-gray-600">
+                                                    <td className="px-2.5 py-2 text-center font-bold text-gray-700 dark:text-gray-200 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                        {idx + 1}
+                                                    </td>
+                                                    <td className="px-3 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                        <div>{item.articleCode}</div>
+                                                        <div className="text-[10px] font-sans font-normal text-gray-400 uppercase mt-0.5">{item.wbsName}</div>
+                                                    </td>
+                                                    <td className="px-3 py-2 text-gray-900 dark:text-gray-100 border-r border-gray-200 dark:border-gray-700 align-top font-semibold">
+                                                        <div>{item.description}</div>
+                                                    </td>
+                                                    <td className="px-3 py-2 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                        <div className="flex flex-wrap gap-1">
+                                                            {allLines.map(line => (
+                                                                <span
+                                                                    key={line.id}
+                                                                    title={`Data: ${format(parseISO(line.date), 'dd/MM/yyyy')} - Q.tà: ${fmtQty(line.quantity)} - ${line.measurementNote}`}
+                                                                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono border ${
+                                                                        line.isPreviousSal
+                                                                            ? 'bg-amber-50 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300 border-amber-200 dark:border-amber-700'
+                                                                            : 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 border-gray-300 dark:border-gray-600'
+                                                                    }`}
+                                                                >
+                                                                    <strong>Lib. #{line.progressiveIndex}</strong>
+                                                                    {line.salLabel && <span className="font-bold text-amber-700 dark:text-amber-400">({line.salLabel})</span>}
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-2 py-2 text-center font-mono text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                        {item.unit}
+                                                    </td>
+                                                    <td className="px-3 py-2 text-right font-mono font-bold text-gray-900 dark:text-white border-r border-gray-200 dark:border-gray-700 align-top">
+                                                        {summaryMode === 'synthetic' ? fmtQty(item.totalQuantity) : ''}
+                                                    </td>
+                                                    <td className="px-3 py-2 text-right font-mono text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                                        {currencyFormatter.format(item.unitPrice)}
+                                                    </td>
+                                                    <td className="px-3 py-2 text-right font-mono font-bold text-gray-900 dark:text-white bg-gray-50/60 dark:bg-gray-700/30 align-top">
+                                                        {summaryMode === 'synthetic' ? currencyFormatter.format(item.totalAmount) : ''}
+                                                    </td>
+                                                </tr>
+
+                                                {summaryMode === 'analytical' && (
+                                                    <>
+                                                        {allLines.map(line => {
+                                                            const hasDims = item.accountingType !== 'body' && (line.factor !== undefined || line.length !== undefined || line.width !== undefined || line.height !== undefined);
+
+                                                            return (
+                                                                <tr 
+                                                                    key={`sum-line-${line.id}`} 
+                                                                    className="bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700/30 text-gray-700 dark:text-gray-300 text-xs"
+                                                                >
+                                                                    <td className="px-2.5 py-1.5 border-r border-gray-200 dark:border-gray-700 text-center text-gray-400"></td>
+                                                                    <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-700 font-mono text-[11px] text-gray-600 dark:text-gray-300">
+                                                                        {format(parseISO(line.date), 'dd/MM/yyyy')}
+                                                                    </td>
+                                                                    <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-700 pl-6 italic text-gray-600 dark:text-gray-300">
+                                                                        {line.measurementNote}
+                                                                        {hasDims && (
+                                                                            <span className="ml-2 not-italic font-mono text-[10px] text-gray-400">
+                                                                                ({[
+                                                                                    line.factor !== undefined ? `F:${numberFormatter.format(line.factor)}` : null,
+                                                                                    line.length !== undefined ? `L:${numberFormatter.format(line.length)}` : null,
+                                                                                    line.width !== undefined ? `l:${numberFormatter.format(line.width)}` : null,
+                                                                                    line.height !== undefined ? `H/P:${numberFormatter.format(line.height)}` : null
+                                                                                ].filter(Boolean).join(' × ')})
+                                                                            </span>
+                                                                        )}
+                                                                    </td>
+                                                                    <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-700 text-center">
+                                                                        <div className="inline-flex items-center gap-1 justify-center">
+                                                                            <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 font-mono font-bold text-[10px] border border-gray-300 dark:border-gray-600">
+                                                                                Lib. #{line.progressiveIndex}
+                                                                            </span>
+                                                                            {line.salLabel && (
+                                                                                <span className="px-1.5 py-0.5 rounded font-bold text-[10px] bg-amber-50 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-700">
+                                                                                    {line.salLabel}
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                    </td>
+                                                                    <td className="px-2 py-1.5 text-center font-mono text-gray-500 dark:text-gray-400 border-r border-gray-200 dark:border-gray-700 text-[11px]">
+                                                                        {item.unit}
+                                                                    </td>
+                                                                    <td className="px-3 py-1.5 text-right font-mono font-semibold text-gray-800 dark:text-gray-200 border-r border-gray-200 dark:border-gray-700">
+                                                                        {fmtQty(line.quantity)}
+                                                                    </td>
+                                                                    <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-700"></td>
+                                                                    <td className="px-3 py-1.5"></td>
+                                                                </tr>
+                                                            );
+                                                        })}
+
+                                                        <tr className="bg-gray-100/70 dark:bg-gray-700/50 font-bold border-t border-b-2 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white">
+                                                            <td className="px-2.5 py-1.5 border-r border-gray-200 dark:border-gray-600"></td>
+                                                            <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-600 font-mono text-center text-[10px] text-gray-500 dark:text-gray-400">
+                                                                {allLines.length} {allLines.length === 1 ? 'misura' : 'misure'}
+                                                            </td>
+                                                            <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-600 text-right uppercase tracking-wider text-[11px] text-gray-700 dark:text-gray-200">
+                                                                SOMMANO {item.unit}
+                                                            </td>
+                                                            <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-600 text-center font-mono text-[10px] text-gray-400">
+                                                                {item.articleCode}
+                                                            </td>
+                                                            <td className="px-2 py-1.5 text-center border-r border-gray-200 dark:border-gray-600 font-mono">
+                                                                {item.unit}
+                                                            </td>
+                                                            <td className="px-3 py-1.5 text-right border-r border-gray-200 dark:border-gray-600 font-mono font-black text-indigo-700 dark:text-indigo-300">
+                                                                {fmtQty(item.totalQuantity)}
+                                                            </td>
+                                                            <td className="px-3 py-1.5 text-right border-r border-gray-200 dark:border-gray-600 font-mono text-gray-700 dark:text-gray-200">
+                                                                {currencyFormatter.format(item.unitPrice)}
+                                                            </td>
+                                                            <td className="px-3 py-1.5 text-right font-mono font-black text-gray-900 dark:text-white bg-indigo-50/40 dark:bg-indigo-900/20">
+                                                                {currencyFormatter.format(item.totalAmount)}
+                                                            </td>
+                                                        </tr>
+                                                    </>
+                                                )}
+                                            </React.Fragment>
+                                        );
+                                    })}
+                                </tbody>
+                                <tfoot>
+                                    {(() => {
+                                        const visibleItems = accountingSummary.filter(applyFilters);
+                                        const totProg = round2(visibleItems.reduce((acc, i) => acc + i.totalAmount, 0));
+                                        return (
+                                            <tr className="bg-gray-100 dark:bg-gray-700 font-bold border-t-2 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white">
+                                                <td colSpan={7} className="px-3 py-2.5 text-right uppercase tracking-wider text-xs border-r border-gray-200 dark:border-gray-600">
+                                                    IMPORTO TOTALE PROGRESSIVO A TUTTO IL SAL N. {sals.find(s => s.id === activeSalId)?.number || 'CORRENTE'}
+                                                </td>
+                                                <td className="px-3 py-2.5 text-right font-mono text-sm font-black text-indigo-700 dark:text-indigo-300 bg-indigo-100/50 dark:bg-indigo-900/40">
+                                                    {currencyFormatter.format(totProg)}
+                                                </td>
+                                            </tr>
+                                        );
+                                    })()}
+                                </tfoot>
+                            </table>
+                        )}
+                    </div>
                 </div>
-            </div>
-        )}
+            )}
 
             {activeTab === 'payment_cert' && (
                 <div className="flex-grow overflow-auto bg-gray-100 dark:bg-gray-900 p-3 md:p-5 flex justify-center min-h-0">
@@ -1007,6 +2278,654 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                         </table>
                     </div>
                 </div>
+            )}
+
+            {activeTab === 'depreciation' && (
+              <div className="flex-grow p-3 md:p-5 overflow-y-auto flex flex-col min-h-0 space-y-4">
+                {/* 1. KPI Bar */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div className="p-3 bg-gradient-to-br from-indigo-50 to-indigo-100/60 dark:from-indigo-950/40 dark:to-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded-xl shadow-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-black uppercase text-indigo-700 dark:text-indigo-300 tracking-wider">Determine RUP</span>
+                      <span className="text-base">⚖️</span>
+                    </div>
+                    <div className="text-2xl font-black text-gray-900 dark:text-white mt-1">
+                      {priceDepreciations.length}
+                    </div>
+                    <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+                      {priceDepreciations.filter(d => {
+                        const { usedQty } = getDeprUsage(d.id);
+                        return (d.maxDepreciatedQuantity - usedQty) > 0.0001;
+                      }).length} attive con residuo disponibile
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-gradient-to-br from-emerald-50 to-emerald-100/60 dark:from-emerald-950/40 dark:to-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-xl shadow-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-black uppercase text-emerald-700 dark:text-emerald-300 tracking-wider">Risparmio Maturato</span>
+                      <span className="text-base">📉</span>
+                    </div>
+                    <div className="text-2xl font-black text-emerald-700 dark:text-emerald-300 mt-1 font-mono">
+                      {currencyFormatter.format(
+                        priceDepreciations.reduce((acc, d) => {
+                          const { usedQty } = getDeprUsage(d.id);
+                          const orig = d.originalUnitPrice ?? d.contractUnitPrice ?? 0;
+                          return acc + (usedQty * (orig - d.depreciatedUnitPrice));
+                        }, 0)
+                      )}
+                    </div>
+                    <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+                      Minore spesa effettiva a registro contabilità
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-gradient-to-br from-amber-50 to-amber-100/60 dark:from-amber-950/40 dark:to-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl shadow-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-black uppercase text-amber-700 dark:text-amber-300 tracking-wider">Risparmio Previsto (Max)</span>
+                      <span className="text-base">💰</span>
+                    </div>
+                    <div className="text-2xl font-black text-amber-800 dark:text-amber-300 mt-1 font-mono">
+                      {currencyFormatter.format(
+                        priceDepreciations.reduce((acc, d) => {
+                          const orig = d.originalUnitPrice ?? d.contractUnitPrice ?? 0;
+                          return acc + (d.maxDepreciatedQuantity * (orig - d.depreciatedUnitPrice));
+                        }, 0)
+                      )}
+                    </div>
+                    <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+                      Economia potenziale deliberata dal RUP
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-gradient-to-br from-purple-50 to-purple-100/60 dark:from-purple-950/40 dark:to-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-xl shadow-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-black uppercase text-purple-700 dark:text-purple-300 tracking-wider">Misure Allibate</span>
+                      <span className="text-base">📊</span>
+                    </div>
+                    <div className="text-2xl font-black text-purple-800 dark:text-purple-300 mt-1 font-mono">
+                      {priceDepreciations.reduce((acc, d) => acc + getDeprUsage(d.id).occurrences, 0)}
+                    </div>
+                    <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+                      Righe a libretto a prezzo deprezzato
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. Barra Azioni & Ricerca */}
+                <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-xs">
+                  <div className="flex items-center gap-2 flex-1 min-w-[240px]">
+                    <div className="relative flex-1 max-w-md">
+                      <input
+                        type="text"
+                        value={deprSearchQuery}
+                        onChange={e => setDeprSearchQuery(e.target.value)}
+                        placeholder="Cerca per codice articolo, determina, motivazione..."
+                        className="w-full pl-9 pr-3 py-1.5 text-xs bg-gray-50 dark:bg-gray-700/60 border border-gray-300 dark:border-gray-600 rounded-lg text-gray-800 dark:text-gray-200 focus:ring-1 focus:ring-indigo-500 outline-none"
+                      />
+                      <svg className="w-4 h-4 text-gray-400 absolute left-2.5 top-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                      </svg>
+                    </div>
+                    <span className="text-xs text-gray-400 hidden md:inline">
+                      {priceDepreciations.length} atti registrati
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleOpenNewDeprModal}
+                      className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" /></svg>
+                      <span>Nuovo Deprezzamento (Determina RUP)</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 3. Elenco Atti di Deprezzamento */}
+                {priceDepreciations.length === 0 ? (
+                  <div className="p-12 text-center bg-white dark:bg-gray-800 rounded-2xl border-2 border-dashed border-gray-300 dark:border-gray-700 space-y-4">
+                    <div className="w-16 h-16 mx-auto bg-amber-50 dark:bg-amber-950/40 rounded-full flex items-center justify-center text-3xl">
+                      ⚖️
+                    </div>
+                    <div className="max-w-md mx-auto space-y-2">
+                      <h3 className="text-base font-bold text-gray-900 dark:text-white">Nessun atto di deprezzamento registrato</h3>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                        Ai sensi dell'art. 114 del D.Lgs. 36/2023, quando una fornitura o lavorazione presenta parziali difformità o vizi tollerabili senza pregiudizio all'opera, il RUP può autorizzarne l'accettazione con motivata Determina e contestuale riduzione del prezzo.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleOpenNewDeprModal}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold inline-flex items-center gap-2 shadow-sm"
+                    >
+                      <span>Crea Primo Deprezzamento</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 gap-4">
+                    {priceDepreciations
+                      .filter(d => {
+                        if (!deprSearchQuery) return true;
+                        const q = deprSearchQuery.toLowerCase();
+                        const item = allComputoItems.find(i => i.articleCode === d.articleCode);
+                        return (
+                          d.articleCode.toLowerCase().includes(q) ||
+                          d.determinaNumber.toLowerCase().includes(q) ||
+                          d.reason.toLowerCase().includes(q) ||
+                          (item?.description && item.description.toLowerCase().includes(q))
+                        );
+                      })
+                      .map((depr) => {
+                        const item = allComputoItems.find(i => i.articleCode === depr.articleCode);
+                        const { usedQty, occurrences } = getDeprUsage(depr.id);
+                        const remainingQty = Math.max(0, Math.round((depr.maxDepreciatedQuantity - usedQty) * 1000) / 1000);
+                        const pctUsed = depr.maxDepreciatedQuantity > 0 ? Math.min(100, (usedQty / depr.maxDepreciatedQuantity) * 100) : 0;
+                        const origPrice = depr.originalUnitPrice ?? depr.contractUnitPrice ?? item?.unitPrice ?? 0;
+                        const unitSaving = origPrice - depr.depreciatedUnitPrice;
+                        const actualSaving = usedQty * unitSaving;
+                        const maxPotentialSaving = depr.maxDepreciatedQuantity * unitSaving;
+                        const discountPct = origPrice > 0 ? (unitSaving / origPrice) * 100 : 0;
+
+                        return (
+                          <div
+                            key={depr.id}
+                            className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 shadow-xs hover:shadow-md transition-shadow space-y-3"
+                          >
+                            {/* Card Top: Estremi Determina & Azioni */}
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-gray-100 dark:border-gray-700">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-100 dark:bg-amber-950/70 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 text-xs font-black uppercase">
+                                  ⚖️ Det. RUP N. {depr.determinaNumber}
+                                </span>
+                                <span className="text-xs text-gray-500 dark:text-gray-400 font-bold">
+                                  del {format(parseISO(depr.determinaDate), 'dd/MM/yyyy')}
+                                </span>
+                                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
+                                  Art. {depr.articleCode}
+                                </span>
+                                {item?.groupName && (
+                                  <span className="text-[10px] font-medium text-gray-500 uppercase bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded">
+                                    {item.groupName}
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex items-center gap-1.5 self-end sm:self-auto">
+                                <button
+                                  type="button"
+                                  onClick={() => handlePrintDeprActPdf(depr)}
+                                  className="px-2.5 py-1 text-xs font-bold text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg flex items-center gap-1 transition-colors"
+                                  title="Stampa Verbale Determina RUP in PDF"
+                                >
+                                  📄 <span className="hidden sm:inline">Verbale PDF</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleEditDepr(depr)}
+                                  className="px-2.5 py-1 text-xs font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 rounded-lg border border-indigo-200 dark:border-indigo-800 transition-colors"
+                                  title="Modifica Determina"
+                                >
+                                  ✏️ Modifica
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteDepreciation(depr)}
+                                  className="px-2.5 py-1 text-xs font-bold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/50 rounded-lg border border-red-200 dark:border-red-800 transition-colors"
+                                  title="Elimina Determina"
+                                >
+                                  🗑️
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Descrizione voce */}
+                            <p className="text-xs text-gray-700 dark:text-gray-300 leading-relaxed font-medium">
+                              {item?.description || 'Descrizione voce non disponibile'}
+                            </p>
+
+                            {/* Motivazione Determina RUP */}
+                            <div className="p-2.5 bg-amber-50/60 dark:bg-amber-950/30 rounded-lg border border-amber-200 dark:border-amber-900/60 text-xs">
+                              <span className="font-bold text-amber-900 dark:text-amber-200 uppercase text-[10px] block mb-0.5">
+                                Motivazione del RUP (Determina):
+                              </span>
+                              <span className="text-gray-700 dark:text-gray-300 italic">
+                                "{depr.reason}"
+                              </span>
+                            </div>
+
+                            {/* Confronto Prezzi & Quantità */}
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 bg-gray-50 dark:bg-gray-700/30 p-3 rounded-lg border border-gray-200 dark:border-gray-700 text-xs">
+                              <div>
+                                <span className="text-[10px] text-gray-400 uppercase font-bold block">Prezzo Contratto</span>
+                                <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                                  {currencyFormatter.format(origPrice)} / {item?.unit || 'cad'}
+                                </span>
+                              </div>
+
+                              <div>
+                                <span className="text-[10px] text-amber-700 dark:text-amber-400 uppercase font-black block">Nuovo Prezzo Deprezzato</span>
+                                <span className="text-sm font-black text-amber-900 dark:text-amber-200">
+                                  {currencyFormatter.format(depr.depreciatedUnitPrice)} / {item?.unit || 'cad'}
+                                  <span className="ml-1 text-xs font-bold text-red-600">(-{discountPct.toFixed(1)}%)</span>
+                                </span>
+                              </div>
+
+                              <div>
+                                <span className="text-[10px] text-gray-400 uppercase font-bold block">Quantità Autorizzata</span>
+                                <span className="text-sm font-bold text-gray-900 dark:text-white">
+                                  {numberFormatter.format(depr.maxDepreciatedQuantity)} {item?.unit || 'cad'}
+                                </span>
+                                <span className="block text-[10px] text-gray-500">
+                                  (Residuo: <strong className="text-emerald-600 dark:text-emerald-400">{numberFormatter.format(remainingQty)}</strong>)
+                                </span>
+                              </div>
+
+                              <div>
+                                <span className="text-[10px] text-emerald-700 dark:text-emerald-400 uppercase font-black block">Risparmio Conseguito</span>
+                                <span className="text-sm font-mono font-black text-emerald-700 dark:text-emerald-400">
+                                  {currencyFormatter.format(actualSaving)}
+                                </span>
+                                <span className="block text-[10px] text-gray-500">
+                                  su max {currencyFormatter.format(maxPotentialSaving)}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Barra di Avanzamento Utilizzo Quota Deprezzata */}
+                            <div className="space-y-1">
+                              <div className="flex justify-between items-center text-[10px] font-bold">
+                                <span className="text-gray-600 dark:text-gray-400">
+                                  Contabilizzato a prezzo deprezzato: {numberFormatter.format(usedQty)} di {numberFormatter.format(depr.maxDepreciatedQuantity)} {item?.unit || 'cad'} ({occurrences} misure)
+                                </span>
+                                <span className={remainingQty > 0 ? 'text-indigo-600 dark:text-indigo-400' : 'text-purple-600 dark:text-purple-400'}>
+                                  {remainingQty > 0 ? `Disponibile: ${numberFormatter.format(remainingQty)} ${item?.unit || 'cad'}` : 'Quota interamente utilizzata'} ({pctUsed.toFixed(0)}%)
+                                </span>
+                              </div>
+                              <div className="w-full bg-gray-200 dark:bg-gray-700 h-2 rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full transition-all duration-300 ${remainingQty > 0 ? 'bg-amber-500' : 'bg-purple-600'}`}
+                                  style={{ width: `${pctUsed}%` }}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+
+                {/* MODALE INSERIMENTO / MODIFICA DETERMINA DEPREZZAMENTO (AMPIO E STRUTTURATO) */}
+                {isDeprModalOpen && (
+                  <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-hidden animate-fade-in">
+                    <div className="bg-white dark:bg-gray-800 rounded-2xl w-full max-w-5xl h-[92vh] max-h-[900px] shadow-2xl border border-gray-200 dark:border-gray-700 flex flex-col overflow-hidden">
+                      {/* 1. TESTATA FISSA DEL MODALE */}
+                      <div className="flex-shrink-0 p-4 md:px-6 md:py-4 bg-gradient-to-r from-amber-600 via-amber-700 to-indigo-700 text-white flex justify-between items-center shadow-sm">
+                        <div className="min-w-0 pr-4">
+                          <h3 className="text-base md:text-lg font-black uppercase tracking-tight flex items-center gap-2 truncate">
+                            <span className="p-1 rounded-md bg-white/20">⚖️</span>
+                            <span>{editingDeprId ? 'Modifica Atto di Deprezzamento Prezzo' : 'Nuovo Deprezzamento di Prezzo (Determina del RUP)'}</span>
+                          </h3>
+                          <p className="text-[11px] md:text-xs text-amber-100 mt-0.5 truncate">
+                            Accettazione fornitura o lavorazione con riduzione del prezzo contrattuale (ex art. 114 D.Lgs. 36/2023)
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsDeprModalOpen(false)}
+                          className="flex-shrink-0 text-white/80 hover:text-white hover:bg-white/10 rounded-full w-8 h-8 flex items-center justify-center text-lg transition-colors"
+                          title="Chiudi"
+                        >
+                          ✕
+                        </button>
+                      </div>
+
+                      {/* 2. FORM PRINCIPALE CON BODY SCROLLABILE E FOOTER BLOCCATO */}
+                      <form onSubmit={handleSaveDepreciation} className="flex-1 flex flex-col min-h-0 overflow-hidden">
+                        {/* CORPO DEL FORM SCROLLABILE */}
+                        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 min-h-0">
+                          {formNotice && (
+                            <div className="p-3 bg-red-50 dark:bg-red-950/60 border border-red-300 dark:border-red-800 text-red-800 dark:text-red-200 text-xs rounded-xl font-bold flex items-center gap-2">
+                              <span>⚠️</span>
+                              <span>{formNotice}</span>
+                            </div>
+                          )}
+
+                          {/* 1. ESPLORATORE E SELEZIONE DELLA VOCE DAL COMPUTO METRICO */}
+                          <div className="space-y-3 bg-gray-50/80 dark:bg-gray-900/40 p-4 rounded-2xl border border-gray-200 dark:border-gray-700">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div>
+                                <label className="block text-xs font-black uppercase text-gray-800 dark:text-gray-200">
+                                  1. Seleziona la Voce di Computo da Deprezzare:
+                                </label>
+                                <span className="text-[11px] text-gray-500 dark:text-gray-400">
+                                  Sfoglia l'intero computo strutturato per categoria o cerca per codice/descrizione
+                                </span>
+                              </div>
+
+                              <span className="text-xs font-mono font-bold px-2.5 py-1 rounded-full bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300">
+                                {filteredDeprModalItems.length} di {allComputoItems.length} voci disponibili
+                              </span>
+                            </div>
+
+                            {/* BARRA RICERCA E FILTRO CATEGORIA */}
+                            <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                              <div className="sm:col-span-7 relative">
+                                <input
+                                  type="text"
+                                  value={deprModalItemSearch}
+                                  onChange={e => setDeprModalItemSearch(e.target.value)}
+                                  placeholder="🔍 Cerca codice (es. OP.01), descrizione (es. intonaco, scavo)..."
+                                  className="w-full pl-9 pr-3 py-2 text-xs bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-xl text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                                />
+                                <svg className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                </svg>
+                              </div>
+
+                              <div className="sm:col-span-5">
+                                <select
+                                  value={deprModalCategoryFilter}
+                                  onChange={e => setDeprModalCategoryFilter(e.target.value)}
+                                  className="w-full px-3 py-2 text-xs font-semibold bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-xl text-gray-800 dark:text-gray-200 focus:ring-2 focus:ring-indigo-500 outline-none"
+                                >
+                                  <option value="all">📁 Tutte le Categorie ({allComputoItems.length} voci)</option>
+                                  {computoCategories.map(cat => (
+                                    <option key={cat.name} value={cat.name}>
+                                      📁 {cat.name} ({cat.count} voci)
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            </div>
+
+                            {/* TABELLA SCROLLABILE DELLE VOCI DI COMPUTO */}
+                            <div className="border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden bg-white dark:bg-gray-800 shadow-2xs">
+                              <div className="max-h-60 overflow-y-auto">
+                                <table className="w-full text-xs text-left border-collapse">
+                                  <thead className="text-[10px] uppercase font-bold text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700/80 sticky top-0 z-10 border-b border-gray-200 dark:border-gray-600">
+                                    <tr>
+                                      <th className="px-3 py-2 w-32 border-r border-gray-200 dark:border-gray-600">Codice</th>
+                                      <th className="px-3 py-2 w-44 border-r border-gray-200 dark:border-gray-600">Gruppo / Categoria</th>
+                                      <th className="px-3 py-2 border-r border-gray-200 dark:border-gray-600">Descrizione Lavorazione</th>
+                                      <th className="px-2 py-2 w-14 text-center border-r border-gray-200 dark:border-gray-600">U.M.</th>
+                                      <th className="px-3 py-2 w-28 text-right border-r border-gray-200 dark:border-gray-600">Prezzo Contr.</th>
+                                      <th className="px-3 py-2 w-24 text-right border-r border-gray-200 dark:border-gray-600">Q.tà Computo</th>
+                                      <th className="px-2.5 py-2 w-24 text-center">Selezione</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                                    {filteredDeprModalItems.length === 0 ? (
+                                      <tr>
+                                        <td colSpan={7} className="p-6 text-center text-gray-500 dark:text-gray-400">
+                                          Nessuna voce trovata con i filtri impostati. Prova a modificare i termini di ricerca o la categoria.
+                                        </td>
+                                      </tr>
+                                    ) : (
+                                      filteredDeprModalItems.map(itm => {
+                                        const isSelected = deprForm.articleCode === itm.articleCode;
+                                        return (
+                                          <tr
+                                            key={itm.articleCode}
+                                            onClick={() => {
+                                              if (editingDeprId) return;
+                                              setDeprForm(prev => ({
+                                                ...prev,
+                                                articleCode: itm.articleCode,
+                                                maxDepreciatedQuantity: itm.totalQuantity.toString()
+                                              }));
+                                            }}
+                                            className={`transition-colors cursor-pointer text-xs ${
+                                              isSelected
+                                                ? 'bg-indigo-50 dark:bg-indigo-950/60 font-semibold text-indigo-950 dark:text-indigo-100'
+                                                : 'hover:bg-gray-50 dark:hover:bg-gray-700/40 text-gray-700 dark:text-gray-300'
+                                            }`}
+                                          >
+                                            <td className="px-3 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                              {itm.articleCode}
+                                            </td>
+                                            <td className="px-3 py-2 text-[11px] text-gray-500 dark:text-gray-400 border-r border-gray-200 dark:border-gray-700 align-top uppercase truncate max-w-[170px]" title={itm.groupName}>
+                                              {itm.groupName}
+                                            </td>
+                                            <td className="px-3 py-2 text-gray-800 dark:text-gray-200 border-r border-gray-200 dark:border-gray-700 align-top leading-tight">
+                                              {itm.description}
+                                            </td>
+                                            <td className="px-2 py-2 text-center font-mono text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                              {itm.unit}
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono font-bold text-gray-800 dark:text-gray-200 border-r border-gray-200 dark:border-gray-700 align-top">
+                                              {currencyFormatter.format(itm.unitPrice)}
+                                            </td>
+                                            <td className="px-3 py-2 text-right font-mono font-bold text-gray-700 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
+                                              {numberFormatter.format(itm.totalQuantity)}
+                                            </td>
+                                            <td className="px-2.5 py-2 text-center align-top">
+                                              {isSelected ? (
+                                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-black bg-indigo-600 text-white shadow-2xs">
+                                                  ✓ Attiva
+                                                </span>
+                                              ) : (
+                                                <button
+                                                  type="button"
+                                                  disabled={Boolean(editingDeprId)}
+                                                  onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setDeprForm(prev => ({
+                                                      ...prev,
+                                                      articleCode: itm.articleCode,
+                                                      maxDepreciatedQuantity: itm.totalQuantity.toString()
+                                                    }));
+                                                  }}
+                                                  className="px-2 py-0.5 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/40 rounded transition-colors"
+                                                >
+                                                  Seleziona
+                                                </button>
+                                              )}
+                                            </td>
+                                          </tr>
+                                        );
+                                      })
+                                    )}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+
+                            {/* SCHEDA RIASSUNTIVA VOCE SELEZIONATA */}
+                            {(() => {
+                              const itm = allComputoItems.find(i => i.articleCode === deprForm.articleCode);
+                              if (!itm) return null;
+                              return (
+                                <div className="p-3.5 bg-gradient-to-r from-indigo-50 to-amber-50/50 dark:from-indigo-950/40 dark:to-amber-950/20 rounded-xl border border-indigo-200 dark:border-indigo-800 text-xs space-y-2">
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-mono font-black text-sm text-indigo-700 dark:text-indigo-300 bg-white dark:bg-gray-800 px-2 py-0.5 rounded border border-indigo-200 dark:border-indigo-700">
+                                        {itm.articleCode}
+                                      </span>
+                                      <span className="text-[11px] font-bold uppercase px-2 py-0.5 rounded bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300">
+                                        {itm.groupName}
+                                      </span>
+                                    </div>
+                                    <span className="text-[11px] text-emerald-700 dark:text-emerald-400 font-bold flex items-center gap-1">
+                                      <span>✓</span> Voce pronta per la Determina di Deprezzamento
+                                    </span>
+                                  </div>
+
+                                  <p className="text-gray-800 dark:text-gray-200 text-xs leading-relaxed font-medium bg-white/70 dark:bg-gray-800/70 p-2.5 rounded-lg border border-indigo-100 dark:border-indigo-900/40">
+                                    {itm.description}
+                                  </p>
+
+                                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-1 text-xs">
+                                    <div className="bg-white/80 dark:bg-gray-800/80 p-2 rounded-lg border border-gray-200 dark:border-gray-700">
+                                      <span className="text-[10px] text-gray-400 uppercase font-bold block">Prezzo Contrattuale</span>
+                                      <span className="font-mono font-black text-indigo-700 dark:text-indigo-300 text-sm">
+                                        {currencyFormatter.format(itm.unitPrice)} <span className="text-xs font-normal text-gray-500">/ {itm.unit}</span>
+                                      </span>
+                                    </div>
+                                    <div className="bg-white/80 dark:bg-gray-800/80 p-2 rounded-lg border border-gray-200 dark:border-gray-700">
+                                      <span className="text-[10px] text-gray-400 uppercase font-bold block">Q.tà a Computo</span>
+                                      <span className="font-mono font-black text-gray-800 dark:text-gray-100 text-sm">
+                                        {numberFormatter.format(itm.totalQuantity)} <span className="text-xs font-normal text-gray-500">{itm.unit}</span>
+                                      </span>
+                                    </div>
+                                    <div className="bg-white/80 dark:bg-gray-800/80 p-2 rounded-lg border border-gray-200 dark:border-gray-700 col-span-2 sm:col-span-1">
+                                      <span className="text-[10px] text-gray-400 uppercase font-bold block">Importo Totale Contratto</span>
+                                      <span className="font-mono font-black text-gray-800 dark:text-gray-100 text-sm">
+                                        {currencyFormatter.format(itm.totalQuantity * itm.unitPrice)}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })()}
+                          </div>
+
+                          {/* 2. ESTREMI DETERMINA DEL RUP */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div>
+                              <label className="block text-xs font-black uppercase text-gray-700 dark:text-gray-300 mb-1.5">
+                                2. Numero / Identificativo Determina RUP:
+                              </label>
+                              <input
+                                type="text"
+                                required
+                                value={deprForm.determinaNumber}
+                                onChange={e => setDeprForm({ ...deprForm, determinaNumber: e.target.value })}
+                                placeholder="Es. Det. RUP n. 45/2024"
+                                className="w-full p-2.5 text-xs bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-xl font-bold text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-xs font-black uppercase text-gray-700 dark:text-gray-300 mb-1.5">
+                                Data Determina RUP:
+                              </label>
+                              <EuropeanDateInput
+                                value={deprForm.determinaDate}
+                                onChange={val => setDeprForm({ ...deprForm, determinaDate: val })}
+                                className="w-full p-2.5 text-xs bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-xl font-bold text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                              />
+                            </div>
+                          </div>
+
+                          {/* 3. MOTIVAZIONE TECNICA DEL PROVVEDIMENTO RUP */}
+                          <div>
+                            <label className="block text-xs font-black uppercase text-gray-700 dark:text-gray-300 mb-1.5">
+                              3. Motivazione del Provvedimento RUP:
+                            </label>
+                            <textarea
+                              required
+                              rows={3}
+                              value={deprForm.reason}
+                              onChange={e => setDeprForm({ ...deprForm, reason: e.target.value })}
+                              placeholder="Es. Fornitura con caratteristiche parzialmente difformi rispetto alle specifiche di progetto ma tecnicamente accettabili senza pregiudizio statico o funzionale dell'opera, autorizzata con riduzione di prezzo concordata..."
+                              className="w-full p-2.5 text-xs bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-xl text-gray-900 dark:text-white resize-none focus:ring-2 focus:ring-indigo-500 outline-none"
+                            />
+                          </div>
+
+                          {/* 4. NUOVO PREZZO E QUANTITÀ MASSIMA */}
+                          {(() => {
+                            const itm = allComputoItems.find(i => i.articleCode === deprForm.articleCode);
+                            const origPrice = itm?.unitPrice || 0;
+                            const deprPrice = parseFloat(deprForm.depreciatedUnitPrice.replace(',', '.')) || 0;
+                            const maxQty = parseFloat(deprForm.maxDepreciatedQuantity.replace(',', '.')) || 0;
+                            const unitReduction = Math.max(0, origPrice - deprPrice);
+                            const discountPct = origPrice > 0 ? (unitReduction / origPrice) * 100 : 0;
+                            const totalOrig = maxQty * origPrice;
+                            const totalDepr = maxQty * deprPrice;
+                            const totalSavings = Math.max(0, totalOrig - totalDepr);
+
+                            return (
+                              <div className="space-y-4 pt-2 border-t border-gray-200 dark:border-gray-700">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                  <div>
+                                    <label className="block text-xs font-black uppercase text-amber-800 dark:text-amber-300 mb-1.5">
+                                      4. Nuovo Prezzo Deprezzato (€ / {itm?.unit || 'cad'}):
+                                    </label>
+                                    <input
+                                      type="text"
+                                      required
+                                      value={deprForm.depreciatedUnitPrice}
+                                      onChange={e => setDeprForm({ ...deprForm, depreciatedUnitPrice: e.target.value })}
+                                      placeholder="Es. 85.50"
+                                      className="w-full p-2.5 text-xs font-mono font-black text-amber-900 dark:text-amber-100 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 rounded-xl focus:ring-2 focus:ring-amber-500 outline-none"
+                                    />
+                                    {deprPrice > 0 && origPrice > 0 && (
+                                      <span className={`block text-[11px] font-bold mt-1.5 ${deprPrice < origPrice ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600'}`}>
+                                        {deprPrice < origPrice 
+                                          ? `Riduzione: -${discountPct.toFixed(2)}% (-€ ${numberFormatter.format(unitReduction)} / ${itm?.unit})`
+                                          : 'Attenzione: deve essere inferiore al prezzo contrattuale!'}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div>
+                                    <label className="block text-xs font-black uppercase text-gray-700 dark:text-gray-300 mb-1.5">
+                                      5. Quantità Massima Deprezzata ({itm?.unit || 'cad'}):
+                                    </label>
+                                    <input
+                                      type="text"
+                                      required
+                                      value={deprForm.maxDepreciatedQuantity}
+                                      onChange={e => setDeprForm({ ...deprForm, maxDepreciatedQuantity: e.target.value })}
+                                      placeholder={itm ? `Max: ${numberFormatter.format(itm.totalQuantity)}` : 'Quantità...'}
+                                      className="w-full p-2.5 text-xs font-mono font-bold bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-xl text-gray-900 dark:text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                                    />
+                                    <span className="block text-[10px] text-gray-400 mt-1">
+                                      Limite massimo di quantità che sarà possibile contabilizzare a questo prezzo scontato
+                                    </span>
+                                  </div>
+                                </div>
+
+                                {/* Quadro Economico Provvedimento */}
+                                {deprPrice > 0 && maxQty > 0 && (
+                                  <div className="p-4 bg-emerald-50 dark:bg-emerald-950/30 rounded-2xl border border-emerald-200 dark:border-emerald-800 text-xs space-y-2">
+                                    <span className="font-black text-emerald-900 dark:text-emerald-200 uppercase text-[11px] block">
+                                      Quadro Economico del Deprezzamento:
+                                    </span>
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                                      <div className="bg-white/80 dark:bg-gray-800/80 p-2.5 rounded-xl border border-emerald-100 dark:border-emerald-900/60">
+                                        <span className="text-[10px] text-gray-500 uppercase font-bold block">Prezzo Originario</span>
+                                        <span className="font-mono font-bold text-gray-700 dark:text-gray-200">{currencyFormatter.format(totalOrig)}</span>
+                                      </div>
+                                      <div className="bg-white/80 dark:bg-gray-800/80 p-2.5 rounded-xl border border-amber-200 dark:border-amber-800">
+                                        <span className="text-[10px] text-amber-700 dark:text-amber-400 uppercase font-bold block">Nuovo Valore Deprezzato</span>
+                                        <span className="font-mono font-bold text-amber-800 dark:text-amber-300">{currencyFormatter.format(totalDepr)}</span>
+                                      </div>
+                                      <div className="bg-emerald-100/80 dark:bg-emerald-900/60 p-2.5 rounded-xl border border-emerald-300 dark:border-emerald-700">
+                                        <span className="text-[10px] text-emerald-800 dark:text-emerald-300 uppercase font-black block">Risparmio Stazione Appaltante</span>
+                                        <span className="font-mono font-black text-emerald-700 dark:text-emerald-300 text-sm">{currencyFormatter.format(totalSavings)}</span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </div>
+
+                        {/* 3. FOOTER FISSO DEL MODALE (SEMPRE VISIBILE IN BASSO) */}
+                        <div className="flex-shrink-0 p-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-850 flex justify-end items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => setIsDeprModalOpen(false)}
+                            className="px-4 py-2 text-xs font-bold text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-xl transition-colors"
+                          >
+                            Annulla
+                          </button>
+                          <button
+                            type="submit"
+                            className="px-6 py-2.5 text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-lg shadow-indigo-600/30 transition-all active:scale-95 flex items-center gap-2 uppercase tracking-wider"
+                          >
+                            <span>Salva Atto di Deprezzamento</span>
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
         </div>
     </div>

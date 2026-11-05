@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { WorkGroup, WorkItem, Measurement, Dependency, DependencyType, Team, Worker, Annotation, Variation, ProjectDocument } from '../types';
+import { WorkGroup, WorkItem, Measurement, Dependency, DependencyType, Team, Worker, Annotation, Variation, ProjectDocument, PriceDepreciation } from '../types';
 import { format, parseISO, addDays, parse, isValid } from 'date-fns';
 
 import { EuropeanDateInput } from './EuropeanDateInput';
@@ -19,6 +19,7 @@ interface TaskModalProps {
   teams: Team[];
   workers: Worker[];
   initialTab?: 'measurements' | 'planning' | 'dependencies';
+  priceDepreciations?: PriceDepreciation[];
 }
 
 interface ExtendedMeasurement extends Measurement {
@@ -45,12 +46,13 @@ interface MeasurementInputState {
     width: string;
     height: string;
     sourceBoqId?: string;
+    selectedDepreciationId?: string;
 }
 
 export interface SingleBoqMeasure {
   id: string;
   articleCode: string;
-  index: number;
+  index: number | string;
   description: string;
   factor?: number;
   length?: number;
@@ -60,11 +62,12 @@ export interface SingleBoqMeasure {
   measuredQuantity: number;
   missingToClose: number;
   isClosed: boolean;
+  isVariant?: boolean;
+  variantNumber?: string;
 }
 
 const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2 });
 const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 3 });
-
 const DAILY_RATE_PER_PERSON = 240;
 const ITALIAN_HOLIDAYS = ['01-01', '06-01', '25-04', '01-05', '02-06', '15-08', '01-11', '08-12', '25-12', '26-12'];
 
@@ -81,12 +84,23 @@ const getBoqRowQuantity = (l: any): number => {
     return f * len * w * h;
 };
 
-// Helper per estrarre tutte le singole misure di computo per ciascuna voce
+// Helper per formattare l'etichetta delle perizie di variante
+const formatVariationLabel = (num: string): string => {
+  const clean = String(num || '').trim();
+  if (!clean) return 'Variante';
+  if (/^var/i.test(clean) || /^variante/i.test(clean)) return clean;
+  if (!isNaN(Number(clean))) return `Variante n. ${clean}`;
+  return `Variante ${clean}`;
+};
+
+// Helper per estrarre tutte le singole misure di computo per ciascuna voce (inclusi i carichi di perizia/variante)
 export const getSingleBoqMeasuresForItem = (item: ExtendedWorkItem): SingleBoqMeasure[] => {
-  const varTotal = (item.variations || []).reduce((acc, v) => v.type === 'increase' ? acc + v.quantity : acc - v.quantity, 0);
+  const result: SingleBoqMeasure[] = [];
+  const variationsList = item.variations || [];
   
+  // 1. Misure di Computo Originario / Principale
   if (item.originalMeasurements && item.originalMeasurements.length > 0) {
-    return item.originalMeasurements.map((b: any, bIdx: number) => {
+    item.originalMeasurements.forEach((b: any, bIdx: number) => {
       const boqId = b.id || `boq_${item.articleCode}_${bIdx}`;
       const boqDesc = b.description || b.note || b.designazioneLavori || `Misura #${bIdx + 1}`;
       const expectedQty = Math.round(getBoqRowQuantity(b) * 1000) / 1000;
@@ -99,7 +113,7 @@ export const getSingleBoqMeasuresForItem = (item: ExtendedWorkItem): SingleBoqMe
       const missingToClose = Math.max(0, Math.round((expectedQty - measuredQty) * 1000) / 1000);
       const isClosed = measuredQty >= (expectedQty - 0.001);
 
-      return {
+      result.push({
         id: boqId,
         articleCode: item.articleCode,
         index: bIdx + 1,
@@ -111,34 +125,112 @@ export const getSingleBoqMeasuresForItem = (item: ExtendedWorkItem): SingleBoqMe
         expectedQuantity: expectedQty,
         measuredQuantity: measuredQty,
         missingToClose,
-        isClosed
-      };
+        isClosed,
+        isVariant: false
+      });
     });
   } else {
-    const expectedQty = Math.round((item.quantity + varTotal) * 1000) / 1000;
-    const measuredQty = Math.round(((item.measurements || []).reduce((acc, m) => acc + m.quantity, 0)) * 1000) / 1000;
+    // Se non ci sono sottomisure del progettista, la quota di progetto contrattuale base
+    const baseExpectedQty = Math.round(item.quantity * 1000) / 1000;
+    const baseBoqId = `${item.articleCode}_base_computo`;
+    const baseMeasuredQty = Math.round(((item.measurements || []).reduce((acc, m) => {
+      if (m.sourceBoqId === baseBoqId || m.sourceBoqId === `${item.articleCode}_main` || (!m.sourceBoqId && !m.note?.includes('Variante'))) return acc + m.quantity;
+      return acc;
+    }, 0)) * 1000) / 1000;
+    const missingToClose = Math.max(0, Math.round((baseExpectedQty - baseMeasuredQty) * 1000) / 1000);
+    const isClosed = baseMeasuredQty >= (baseExpectedQty - 0.001);
+
+    result.push({
+      id: baseBoqId,
+      articleCode: item.articleCode,
+      index: 1,
+      description: item.description || 'Misura integrale di progetto (Computo base)',
+      expectedQuantity: baseExpectedQty,
+      measuredQuantity: baseMeasuredQty,
+      missingToClose,
+      isClosed,
+      isVariant: false
+    });
+  }
+
+  // 2. Voci caricate in Perizia di Variante (es. Variante n. 1) con evidenza della quantità caricata
+  variationsList.forEach((v, vIdx) => {
+    const varBoqId = `var_${v.id || vIdx}_${item.articleCode}`;
+    const varLabel = formatVariationLabel(v.number);
+    const varSignedQty = v.type === 'increase' ? v.quantity : -v.quantity;
+    const expectedQty = Math.round(Math.abs(varSignedQty) * 1000) / 1000;
+
+    const measuredQty = Math.round(((item.measurements || []).reduce((acc, m) => {
+      if (m.sourceBoqId === varBoqId || (!m.sourceBoqId && m.note && m.note.includes(varLabel))) {
+        return acc + m.quantity;
+      }
+      return acc;
+    }, 0)) * 1000) / 1000;
+
     const missingToClose = Math.max(0, Math.round((expectedQty - measuredQty) * 1000) / 1000);
     const isClosed = measuredQty >= (expectedQty - 0.001);
 
-    return [{
-      id: `${item.articleCode}_main`,
+    result.push({
+      id: varBoqId,
       articleCode: item.articleCode,
-      index: 1,
-      description: item.description || 'Misura integrale di computo',
+      index: `VAR.${v.number || (vIdx + 1)}`,
+      description: `${varLabel} (${v.type === 'increase' ? 'In Aumento' : 'In Diminuzione'})`,
       expectedQuantity: expectedQty,
       measuredQuantity: measuredQty,
       missingToClose,
-      isClosed
-    }];
-  }
+      isClosed,
+      isVariant: true,
+      variantNumber: v.number
+    });
+  });
+
+  return result;
 };
 
 const TaskModal: React.FC<TaskModalProps> = ({ 
   isOpen, onClose, group, allWorkGroups, allDocuments, dependencies, 
-  setWorkGroups, onDependenciesChange, isViewOnly, isLocked, teams, workers, initialTab = 'measurements' 
+  setWorkGroups, onDependenciesChange, isViewOnly, isLocked, teams, workers, initialTab = 'measurements',
+  priceDepreciations = []
 }) => {
   const [activeTab, setActiveTab] = useState<'measurements' | 'planning' | 'dependencies'>('measurements');
   const [activeGroup, setActiveGroup] = useState<ExtendedWorkGroup | null>(null);
+
+  const getDepreciationRemainingQty = useCallback((deprId: string, articleCode: string) => {
+    const depr = (priceDepreciations || []).find(d => d.id === deprId);
+    if (!depr) return 0;
+    let used = 0;
+    
+    // Altri gruppi negli altri documenti
+    allDocuments.forEach(doc => {
+      doc.workGroups.forEach(wg => {
+        if (activeGroup && wg.id === activeGroup.id) return;
+        wg.items.forEach(it => {
+          if (it.articleCode === articleCode) {
+            (it.measurements || []).forEach(m => {
+              if (m.depreciationId === deprId) {
+                used += m.quantity;
+              }
+            });
+          }
+        });
+      });
+    });
+
+    // Gruppo attivo correntemente in modifica
+    if (activeGroup) {
+      activeGroup.items.forEach(it => {
+        if (it.articleCode === articleCode) {
+          (it.measurements || []).forEach(m => {
+            if (m.depreciationId === deprId) {
+              used += m.quantity;
+            }
+          });
+        }
+      });
+    }
+    
+    return Math.max(0, Math.round((depr.maxDepreciatedQuantity - used) * 1000) / 1000);
+  }, [priceDepreciations, activeGroup, allDocuments]);
   
   const [newMeasurements, setNewMeasurements] = useState<Record<string, MeasurementInputState>>({});
   const [deductionModes, setDeductionModes] = useState<Record<string, boolean>>({}); 
@@ -189,47 +281,6 @@ const TaskModal: React.FC<TaskModalProps> = ({
       }
       return currentDate;
   };
-
-  // Lista delle voci di computo del progetto non ancora in questo gruppo
-  const availableComputoItems = useMemo(() => {
-    const map = new Map<string, {
-      articleCode: string;
-      description: string;
-      unit: string;
-      unitPrice: number;
-      quantity: number;
-      total: number;
-      originalIndex?: number;
-      originalMeasurements?: any[];
-      groupName: string;
-      docName: string;
-    }>();
-
-    allDocuments.forEach(doc => {
-      doc.workGroups.forEach(wg => {
-        wg.items.forEach(item => {
-          if (!activeGroup?.items.some(i => i.articleCode === item.articleCode)) {
-            if (!map.has(item.articleCode)) {
-              map.set(item.articleCode, {
-                articleCode: item.articleCode,
-                description: item.description,
-                unit: item.unit,
-                unitPrice: item.unitPrice,
-                quantity: item.quantity,
-                total: item.total,
-                originalIndex: item.originalIndex,
-                originalMeasurements: item.originalMeasurements,
-                groupName: wg.name,
-                docName: doc.fileName
-              });
-            }
-          }
-        });
-      });
-    });
-
-    return Array.from(map.values()).sort((a, b) => (a.originalIndex || 9999) - (b.originalIndex || 9999));
-  }, [allDocuments, activeGroup]);
 
   useEffect(() => {
     if (isOpen && group) {
@@ -468,53 +519,6 @@ const TaskModal: React.FC<TaskModalProps> = ({
     setIsDirty(true);
   };
 
-  // Aggiungi una voce dal Computo a questo gruppo
-  const handleAddVoiceFromComputo = (computoItem: typeof availableComputoItems[0]) => {
-    if (isViewOnly || isLocked || !activeGroup) return;
-
-    const todayStr = format(new Date(), 'yyyy-MM-dd');
-    const defaultDate = goldenMinDate <= todayStr ? goldenMinDate : todayStr;
-
-    const newItem: ExtendedWorkItem = {
-      articleCode: computoItem.articleCode,
-      description: computoItem.description,
-      quantity: computoItem.quantity,
-      unit: computoItem.unit,
-      unitPrice: computoItem.unitPrice,
-      total: computoItem.quantity * computoItem.unitPrice,
-      originalIndex: computoItem.originalIndex,
-      originalMeasurements: computoItem.originalMeasurements || [],
-      measurements: [],
-      variations: [],
-      annotations: []
-    };
-
-    const updatedItems = [...activeGroup.items, newItem];
-    const newGroupTotal = updatedItems.reduce((acc, i) => acc + (i.quantity * i.unitPrice), 0);
-
-    setActiveGroup({
-      ...activeGroup,
-      value: newGroupTotal,
-      items: updatedItems
-    });
-
-    setNewMeasurements(prev => ({
-      ...prev,
-      [computoItem.articleCode]: {
-        date: defaultDate,
-        quantity: '',
-        note: '',
-        factor: '',
-        length: '',
-        width: '',
-        height: '',
-        sourceBoqId: undefined
-      }
-    }));
-
-    setIsDirty(true);
-  };
-
   const handleAddVariation = (articleCode: string) => {
       if (!newVariation.number || !newVariation.quantity) return;
       const qty = parseFloat(newVariation.quantity.replace(',', '.'));
@@ -612,11 +616,30 @@ const TaskModal: React.FC<TaskModalProps> = ({
       return;
     }
 
+    const selectedDeprId = measurementInput?.selectedDepreciationId;
+    const selectedDepr = selectedDeprId ? (priceDepreciations || []).find(d => d.id === selectedDeprId) : null;
+
+    if (selectedDepr) {
+      const remainingDeprQty = getDepreciationRemainingQty(selectedDepr.id, itemArticleCode);
+      if (quantity > (remainingDeprQty + 0.0001)) {
+        setValidationNotice(`⛔ LIMITE DEPREZZAMENTO RUP: La quantità immessa (${numberFormatter.format(quantity)} ${item.unit}) supera la quantità massima residua autorizzata dalla Determina del RUP (${numberFormatter.format(remainingDeprQty)} ${item.unit}).`);
+        return;
+      }
+    }
+
+    let measureNote = measurementInput?.note || linkedBoq?.description || 'Misura';
+    if (selectedDepr) {
+      const deprPrefix = `[DEPREZZAMENTO Det. RUP ${selectedDepr.determinaNumber} del ${format(parseISO(selectedDepr.determinaDate), 'dd/MM/yyyy')} - Prezzo € ${numberFormatter.format(selectedDepr.depreciatedUnitPrice)} anziché € ${numberFormatter.format(item.unitPrice)}]`;
+      if (!measureNote.includes(selectedDepr.determinaNumber)) {
+        measureNote = `${deprPrefix} ${measureNote}`.trim();
+      }
+    }
+
     const newMeasurement: ExtendedMeasurement = { 
         id: crypto.randomUUID(), 
         date: measureDate, 
         quantity: quantity, 
-        note: measurementInput?.note || linkedBoq?.description || 'Misura', 
+        note: measureNote, 
         teamId: undefined, 
         workerIds: undefined, 
         _isCommitted: false, 
@@ -625,7 +648,10 @@ const TaskModal: React.FC<TaskModalProps> = ({
         width: measurementInput?.width ? parseFloat(measurementInput.width.replace(',', '.')) : undefined, 
         height: measurementInput?.height ? parseFloat(measurementInput.height.replace(',', '.')) : undefined,
         sourceBoqId: linkedBoq?.id,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        depreciationId: selectedDepr ? selectedDepr.id : undefined,
+        appliedUnitPrice: selectedDepr ? selectedDepr.depreciatedUnitPrice : undefined,
+        isDepreciated: Boolean(selectedDepr)
     };
 
     setActiveGroup(prev => { 
@@ -646,7 +672,8 @@ const TaskModal: React.FC<TaskModalProps> = ({
             length: '',
             width: '',
             height: '',
-            sourceBoqId: undefined
+            sourceBoqId: undefined,
+            selectedDepreciationId: undefined
           };
         } else if (!next[code]?.date || next[code].date! < measureDate) {
           next[code] = {
@@ -691,7 +718,10 @@ const TaskModal: React.FC<TaskModalProps> = ({
       sourceBoqId: m.sourceBoqId,
       reversesMeasurementId: m.id,
       _isCommitted: false,
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      appliedUnitPrice: m.appliedUnitPrice,
+      depreciationId: m.depreciationId,
+      isDepreciated: m.isDepreciated
     };
 
     // Calcola la nuova ultima data attiva escludendo la misura appena stornata
@@ -1091,9 +1121,34 @@ const TaskModal: React.FC<TaskModalProps> = ({
             <div className="flex flex-col border-b border-gray-200 dark:border-gray-700 p-4">
                 <div className="flex items-start justify-between gap-4">
                     <div className="flex-1 min-w-0">
-                         <div className="flex items-center gap-2">
+                         <div className="flex items-center gap-2 flex-wrap">
                            <h3 className="text-xl font-black text-gray-900 dark:text-white truncate">{activeGroup.name}</h3>
                            <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">WBS Gruppo</span>
+                           {allWorkGroups && allWorkGroups.length > 1 && (
+                             <div className="flex items-center gap-1.5 ml-2">
+                               <span className="text-[11px] text-gray-400 font-semibold">Cambia Gruppo:</span>
+                               <select
+                                 value={activeGroup.id}
+                                 onChange={(e) => {
+                                   const target = allWorkGroups.find(g => g.id === e.target.value);
+                                   if (target) {
+                                     if (isDirty && !window.confirm("Attenzione: ci sono modifiche non salvate per questo gruppo. Vuoi cambiare gruppo comunque?")) {
+                                       return;
+                                     }
+                                     setIsDirty(false);
+                                     setActiveGroup({ ...target });
+                                   }
+                                 }}
+                                 className="px-2.5 py-1 text-xs font-bold rounded-lg bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer max-w-xs truncate"
+                               >
+                                 {allWorkGroups.map(g => (
+                                   <option key={g.id} value={g.id}>
+                                     {g.name} ({g.items?.length || 0} voci)
+                                   </option>
+                                 ))}
+                               </select>
+                             </div>
+                           )}
                          </div>
                     </div>
 
@@ -1198,9 +1253,16 @@ const TaskModal: React.FC<TaskModalProps> = ({
                           previewQty = parseFloat(inputVal.replace(',', '.')) || 0;
                       }
 
+                      const itemDeprs = (priceDepreciations || []).filter(d => d.articleCode === item.articleCode);
+                      const selectedDeprId = measurementInput?.selectedDepreciationId;
+                      const selectedDepr = selectedDeprId ? itemDeprs.find(d => d.id === selectedDeprId) : null;
+                      const deprRemainingQty = selectedDepr ? getDepreciationRemainingQty(selectedDepr.id, item.articleCode) : null;
+                      const effectiveMaxAllowed = deprRemainingQty !== null ? Math.min(maxAllowed, deprRemainingQty) : maxAllowed;
+
                       // Verifica se supera il residuo (solo se inserito > 0)
-                      const isExceeded = previewQty > (maxAllowed + 0.001);
-                      const previewVal = (previewQty > 0 ? previewQty : 0) * item.unitPrice;
+                      const isExceeded = previewQty > (effectiveMaxAllowed + 0.001);
+                      const effectiveUnitPrice = selectedDepr ? selectedDepr.depreciatedUnitPrice : item.unitPrice;
+                      const previewVal = (previewQty > 0 ? previewQty : 0) * effectiveUnitPrice;
 
                       // REGOLA D'ORO DATE PER OGNI VOCE (SIA A CORPO CHE A MISURA):
                       // La misura successiva non può essere inferiore all'ultima data immessa a libretto (al massimo uguale),
@@ -1231,6 +1293,19 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                   <span className="text-xs text-gray-500 font-bold">
                                     Tariffa: <strong className="text-indigo-600 dark:text-indigo-400">{currencyFormatter.format(item.unitPrice)}</strong> / {item.unit}
                                   </span>
+                                  {itemDeprs.map(d => {
+                                    const rem = getDepreciationRemainingQty(d.id, item.articleCode);
+                                    return (
+                                      <span key={d.id} className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-200 border border-amber-300 dark:border-amber-700 shadow-xs" title={`Det. ${d.determinaNumber} del ${format(parseISO(d.determinaDate), 'dd/MM/yyyy')} - ${d.reason}`}>
+                                        ⚖️ Det. RUP {d.determinaNumber}: € {numberFormatter.format(d.depreciatedUnitPrice)} [Disp: {numberFormatter.format(rem)} {item.unit}]
+                                      </span>
+                                    );
+                                  })}
+                                  {(item.variations || []).map(v => (
+                                    <span key={v.id} className="inline-flex items-center gap-1 text-[10px] font-black px-2.5 py-0.5 rounded-full bg-orange-100 dark:bg-orange-950/80 text-orange-800 dark:text-orange-200 border border-orange-300 dark:border-orange-700 shadow-xs" title={`Variante approvata con quota caricata: ${numberFormatter.format(v.quantity)} ${item.unit}`}>
+                                      ⚡ {formatVariationLabel(v.number)}: <strong className="text-orange-950 dark:text-orange-100">{v.type === 'increase' ? '+' : '-'}{numberFormatter.format(v.quantity)} {item.unit}</strong>
+                                    </span>
+                                  ))}
                                 </div>
                                 <p className="text-xs text-gray-700 dark:text-gray-300 mt-1 leading-snug line-clamp-2">
                                   {item.description}
@@ -1301,13 +1376,17 @@ const TaskModal: React.FC<TaskModalProps> = ({
                           {/* Avviso in caso di eccedenza residuo */}
                           {isExceeded && (
                             <div className="p-2 bg-red-100 dark:bg-red-950/70 border border-red-400 text-red-800 dark:text-red-200 text-xs font-bold rounded-lg flex items-center justify-between animate-fade-in">
-                              <span>⛔ Quantità superiore al residuo massimo consentito ({numberFormatter.format(maxAllowed)} {item.unit})!</span>
+                              <span>
+                                {selectedDepr 
+                                  ? `⛔ Quantità superiore al residuo autorizzato dalla Determina RUP (${numberFormatter.format(effectiveMaxAllowed)} ${item.unit})!` 
+                                  : `⛔ Quantità superiore al residuo massimo consentito (${numberFormatter.format(effectiveMaxAllowed)} ${item.unit})!`}
+                              </span>
                               <button
                                 type="button"
-                                onClick={() => handleCloseWithResidual(item.articleCode, maxAllowed)}
+                                onClick={() => handleCloseWithResidual(item.articleCode, effectiveMaxAllowed)}
                                 className="px-2.5 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-[10px] font-black uppercase tracking-wider"
                               >
-                                Chiudi con Residuo ({numberFormatter.format(maxAllowed)})
+                                Chiudi con Residuo ({numberFormatter.format(effectiveMaxAllowed)})
                               </button>
                             </div>
                           )}
@@ -1462,6 +1541,11 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                                   #{matchedBoq.index}
                                                 </span>
                                               )}
+                                              {m.isDepreciated && (
+                                                <span className="mr-1.5 px-1.5 py-0.5 bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 rounded font-bold text-[9px] not-italic border border-amber-300 dark:border-amber-700" title={`Prezzo Deprezzato applicato: ${currencyFormatter.format(m.appliedUnitPrice || 0)}`}>
+                                                  ⚖️ Deprezzato ({currencyFormatter.format(m.appliedUnitPrice || 0)})
+                                                </span>
+                                              )}
                                               {!isCom && !isStornoRow && (
                                                 <span className="mr-1.5 px-1 py-0.2 bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 rounded font-bold text-[9px] not-italic">
                                                   Da salvare
@@ -1478,7 +1562,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                               {numberFormatter.format(m.quantity)}
                                             </td>
                                             <td className="px-2 py-1.5 text-right font-semibold text-indigo-600 dark:text-indigo-400">
-                                              {currencyFormatter.format(m.quantity * item.unitPrice)}
+                                              {currencyFormatter.format(m.quantity * (m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice))}
                                             </td>
                                             <td className="px-1 py-1.5 text-center">
                                               {!(isViewOnly || isLocked) && (
@@ -1592,31 +1676,73 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                               handleSelectComputoMeasure(item.articleCode, val);
                                             }}
                                             className="w-full p-1 text-xs font-semibold bg-white dark:bg-gray-700 border border-indigo-300 dark:border-indigo-600 rounded text-gray-800 dark:text-gray-100 cursor-pointer truncate shadow-sm focus:ring-1 focus:ring-indigo-500"
-                                            title="Seleziona la misura dal computo metrico"
+                                            title="Seleziona la misura dal computo metrico o perizia di variante"
                                           >
-                                            <option value="">-- Scegli misura da computo ({openBoqMeasures.length} aperte) --</option>
+                                            <option value="">-- Scegli voce di computo o variante ({openBoqMeasures.length} disponibili) --</option>
                                             {openBoqMeasures.map((bm) => (
-                                              <option key={bm.id} value={bm.id}>
-                                                #{bm.index}. {bm.description} [Residuo: {numberFormatter.format(bm.missingToClose)} {item.unit}]
+                                              <option key={bm.id} value={bm.id} className={bm.isVariant ? "font-bold text-orange-600 bg-orange-50/50" : ""}>
+                                                {bm.isVariant ? '⚡ ' : '#'}{bm.index}. {bm.description} [Q.tà Caricata: {numberFormatter.format(bm.expectedQuantity)} {item.unit} | Residuo: {numberFormatter.format(bm.missingToClose)} {item.unit}]
                                               </option>
                                             ))}
                                           </select>
 
-                                          {/* Se è selezionata una misura dal computo, permette di precisare eventuali dettagli */}
-                                          {(newMeasurements[item.articleCode] as any)?.sourceBoqId && (
-                                            <input 
-                                              type="text" 
-                                              value={(newMeasurements[item.articleCode] || { note: '' }).note} 
-                                              placeholder="Dettaglio o nota opzionale..." 
-                                              onChange={e => handleMeasurementChange(item.articleCode, 'note', e.target.value)} 
-                                              className="w-full p-1 text-[11px] border border-gray-200 dark:border-gray-600 rounded bg-indigo-50/40 dark:bg-indigo-950/30 text-gray-800 dark:text-gray-200 font-medium" 
-                                              title="Dettaglio opzionale legato alla misura di computo"
-                                            />
+                                          {/* Selettore tariffa contrattuale vs prezzo deprezzato ex Determina RUP */}
+                                          {itemDeprs.length > 0 && (
+                                            <div className="pt-1.5 mt-1 border-t border-amber-200 dark:border-amber-900/60 bg-amber-50/60 dark:bg-amber-950/30 p-1.5 rounded-lg">
+                                              <div className="flex items-center justify-between text-[9px] font-bold text-amber-800 dark:text-amber-300 mb-0.5">
+                                                <span>⚖️ Tariffa applicata:</span>
+                                              </div>
+                                              <select
+                                                value={(newMeasurements[item.articleCode] as any)?.selectedDepreciationId || ''}
+                                                onChange={(e) => {
+                                                  handleMeasurementChange(item.articleCode, 'selectedDepreciationId', e.target.value);
+                                                }}
+                                                className={`w-full p-1 text-[11px] font-bold rounded border truncate transition-all shadow-xs focus:ring-1 focus:ring-amber-500 ${
+                                                  (newMeasurements[item.articleCode] as any)?.selectedDepreciationId
+                                                    ? 'bg-amber-100 dark:bg-amber-900/80 border-amber-500 text-amber-900 dark:text-amber-100 ring-1 ring-amber-400'
+                                                    : 'bg-white dark:bg-gray-700 border-gray-300 dark:border-gray-600 text-gray-800 dark:text-gray-100'
+                                                }`}
+                                                title="Scegli se contabilizzare a prezzo contrattuale o a prezzo deprezzato autorizzato con Determina RUP"
+                                              >
+                                                <option value="">Tariffa Contrattuale: {currencyFormatter.format(item.unitPrice)}/{item.unit}</option>
+                                                {itemDeprs.map(depr => {
+                                                  const rem = getDepreciationRemainingQty(depr.id, item.articleCode);
+                                                  return (
+                                                    <option key={depr.id} value={depr.id} disabled={rem <= 0}>
+                                                      {rem > 0 ? '✓' : '✗'} Prezzo Deprezzato: {currencyFormatter.format(depr.depreciatedUnitPrice)}/{item.unit} [Det. {depr.determinaNumber} - Disp: {numberFormatter.format(rem)} {item.unit}]
+                                                    </option>
+                                                  );
+                                                })}
+                                              </select>
+                                            </div>
                                           )}
                                         </div>
                                       ) : (
-                                        <div className="p-1.5 text-center text-xs font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 rounded border border-emerald-200 dark:border-emerald-800">
-                                          ✅ Tutte le misure di computo sono chiuse (100%)
+                                        <div className="space-y-1">
+                                          <div className="p-1.5 text-center text-xs font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 rounded border border-emerald-200 dark:border-emerald-800">
+                                            ✅ Tutte le misure di computo sono chiuse (100%)
+                                          </div>
+                                          {itemDeprs.length > 0 && (
+                                            <div className="p-1 rounded bg-amber-50/60 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/60">
+                                              <select
+                                                value={(newMeasurements[item.articleCode] as any)?.selectedDepreciationId || ''}
+                                                onChange={(e) => {
+                                                  handleMeasurementChange(item.articleCode, 'selectedDepreciationId', e.target.value);
+                                                }}
+                                                className="w-full p-1 text-[11px] font-bold rounded border truncate bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100"
+                                              >
+                                                <option value="">Tariffa Contrattuale: {currencyFormatter.format(item.unitPrice)}/{item.unit}</option>
+                                                {itemDeprs.map(depr => {
+                                                  const rem = getDepreciationRemainingQty(depr.id, item.articleCode);
+                                                  return (
+                                                    <option key={depr.id} value={depr.id} disabled={rem <= 0}>
+                                                      Prezzo Deprezzato: {currencyFormatter.format(depr.depreciatedUnitPrice)}/{item.unit} [Det. {depr.determinaNumber}]
+                                                    </option>
+                                                  );
+                                                })}
+                                              </select>
+                                            </div>
+                                          )}
                                         </div>
                                       )}
                                     </td>
@@ -1699,8 +1825,8 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                                   ? 'text-red-600 bg-red-50' 
                                                   : 'text-gray-900 bg-white dark:bg-gray-700 dark:text-white border-gray-300 dark:border-gray-600'
                                           }`} 
-                                          placeholder={numberFormatter.format(maxAllowed)} 
-                                          title={`Massimo residuo suggerito: ${numberFormatter.format(maxAllowed)} ${item.unit}`}
+                                          placeholder={numberFormatter.format(effectiveMaxAllowed)} 
+                                          title={selectedDepr ? `Massimo deprezzato autorizzato dalla Determina RUP: ${numberFormatter.format(effectiveMaxAllowed)} ${item.unit}` : `Massimo residuo suggerito: ${numberFormatter.format(effectiveMaxAllowed)} ${item.unit}`}
                                         />
                                       </div>
                                     </td>
@@ -1734,30 +1860,6 @@ const TaskModal: React.FC<TaskModalProps> = ({
                         </div>
                       );
                     })
-                  )}
-
-                  {/* Semplice selettore in calce per aggiungere una nuova voce dal computo se necessario */}
-                  {!isViewOnly && !isLocked && availableComputoItems.length > 0 && (
-                    <div className="p-3 bg-white dark:bg-gray-800 rounded-xl border border-dashed border-gray-300 dark:border-gray-700 flex items-center justify-between gap-3">
-                      <span className="text-xs font-bold text-gray-500">
-                        ➕ Aggiungi un'altra voce dal Computo a questa lavorazione:
-                      </span>
-                      <select 
-                        value="" 
-                        onChange={(e) => {
-                          const selected = availableComputoItems.find(i => i.articleCode === e.target.value);
-                          if (selected) handleAddVoiceFromComputo(selected);
-                        }}
-                        className="p-1.5 text-xs font-medium border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-700 text-gray-700 dark:text-gray-200"
-                      >
-                        <option value="">-- Seleziona voce da aggiungere ({availableComputoItems.length} disponibili) --</option>
-                        {availableComputoItems.map(cItem => (
-                          <option key={cItem.articleCode} value={cItem.articleCode}>
-                            {cItem.articleCode} - {cItem.description.slice(0, 50)}... ({cItem.quantity} {cItem.unit})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
                   )}
                 </div>
             </div>

@@ -19,6 +19,7 @@ const ACCOUNTING_SUBITEMS: { id: AccountingTab; label: string }[] = [
   { id: 'summary', label: 'Sommario Registro' },
   { id: 'sal_technical', label: 'Riepilogo SAL' },
   { id: 'payment_cert', label: 'Certificato Pagamento' },
+  { id: 'depreciation', label: 'Deprezzamento di Prezzo' },
   { id: 'settings', label: 'Impostazioni & SAL' },
 ];
 

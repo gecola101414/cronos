@@ -4,6 +4,16 @@ import react from '@vitejs/plugin-react'
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
+  server: {
+    host: '0.0.0.0',
+    port: 3000,
+    allowedHosts: true,
+  },
+  preview: {
+    host: '0.0.0.0',
+    port: 3000,
+    allowedHosts: true,
+  },
   // 3. OPZIONI AVANZATE ESBUILD (Moved to root level)
   esbuild: {
     // Rimuove tutti i console.log e debugger dal codice finale
