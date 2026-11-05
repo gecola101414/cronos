@@ -71,17 +71,20 @@ const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 
 const DAILY_RATE_PER_PERSON = 240;
 const ITALIAN_HOLIDAYS = ['01-01', '06-01', '25-04', '01-05', '02-06', '15-08', '01-11', '08-12', '25-12', '26-12'];
 
-// Helper per ricavare la quantità di una riga di computo
+// Helper per ricavare la quantità di una riga di computo (preserva fedelmente il valore 0)
 const getBoqRowQuantity = (l: any): number => {
-    if (l.quantity !== undefined && l.quantity !== null && l.quantity !== 0) return Number(l.quantity);
-    if (l.quantita !== undefined && l.quantita !== null && l.quantita !== 0) return Number(l.quantita);
-    if (l.total !== undefined && l.total !== null && l.total !== 0) return Number(l.total);
-    if (l.totale !== undefined && l.totale !== null && l.totale !== 0) return Number(l.totale);
-    const f = parseFloat(l.multiplier || l.factor || l.parti || 1) || 1;
-    const len = parseFloat(l.length || l.lunghezza || 1) || 1;
-    const w = parseFloat(l.width || l.larghezza || 1) || 1;
-    const h = parseFloat(l.height || l.altezza || l.profondita || l.peso || 1) || 1;
-    return f * len * w * h;
+    if (l.quantity !== undefined && l.quantity !== null && l.quantity !== '') return Number(l.quantity) || 0;
+    if (l.quantita !== undefined && l.quantita !== null && l.quantita !== '') return Number(l.quantita) || 0;
+    if (l.total !== undefined && l.total !== null && l.total !== '') return Number(l.total) || 0;
+    if (l.totale !== undefined && l.totale !== null && l.totale !== '') return Number(l.totale) || 0;
+    const f = parseFloat(l.multiplier ?? l.factor ?? l.parti);
+    const len = parseFloat(l.length ?? l.lunghezza);
+    const w = parseFloat(l.width ?? l.larghezza);
+    const h = parseFloat(l.height ?? l.altezza ?? l.profondita ?? l.peso);
+    if (!isNaN(f) || !isNaN(len) || !isNaN(w) || !isNaN(h)) {
+        return (isNaN(f) ? 1 : f) * (isNaN(len) ? 1 : len) * (isNaN(w) ? 1 : w) * (isNaN(h) ? 1 : h);
+    }
+    return 0;
 };
 
 // Helper per formattare l'etichetta delle perizie di variante
@@ -1720,7 +1723,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                       ) : (
                                         <div className="space-y-1">
                                           <div className="p-1.5 text-center text-xs font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 rounded border border-emerald-200 dark:border-emerald-800">
-                                            ✅ Tutte le misure di computo sono chiuse (100%)
+                                            {contractQty <= 0 ? "ℹ️ Voce a valore zero (nessuna misura da contabilizzare)" : "✅ Tutte le misure di computo sono chiuse (100%)"}
                                           </div>
                                           {itemDeprs.length > 0 && (
                                             <div className="p-1 rounded bg-amber-50/60 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/60">
