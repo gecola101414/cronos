@@ -1400,7 +1400,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 flex-wrap">
                                   <span className="text-xs font-mono font-black text-gray-900 dark:text-white uppercase bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded">
-                                    {item.articleCode}
+                                    {`N.${item.originalIndex || (index + 1)} - ${item.articleCode}`}
                                   </span>
                                   <span className="text-xs text-gray-500 font-bold">
                                     Tariffa: <strong className="text-indigo-600 dark:text-indigo-400">{currencyFormatter.format(item.unitPrice)}</strong> / {item.unit}

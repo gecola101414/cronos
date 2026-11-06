@@ -58,6 +58,7 @@ function isGecolaData(data: any): boolean {
 }
 
 const sanitizeDocuments = (documents: ProjectDocument[]): ProjectDocument[] => {
+  let progressiveCounter = 1;
   return documents.map((doc, index) => ({
     ...doc,
     isVisible: doc.isVisible ?? true, 
@@ -71,22 +72,26 @@ const sanitizeDocuments = (documents: ProjectDocument[]): ProjectDocument[] => {
       teamSize: wg.teamSize ?? 2,
       isSecurityCost: wg.isSecurityCost ?? false,
       accountingType: wg.accountingType ?? 'measure',
-      items: wg.items.map(item => ({
-        ...item,
-        measurements: item.measurements?.map(m => ({
-            ...m,
-            id: m.id || crypto.randomUUID() 
-        })) ?? [],
-        annotations: item.annotations || [],
-        variations: item.variations || [],
-        laborRate: item.laborRate || 0,
-        laborValue: item.laborValue || 0,
-        originalMeasurements: item.originalMeasurements?.map(om => ({
-            ...om,
-            id: om.id || crypto.randomUUID()
-        })) || [],
-        originalIndex: item.originalIndex
-      }))
+      items: wg.items.map(item => {
+        const assignedIndex = item.originalIndex ?? progressiveCounter;
+        progressiveCounter = Math.max(progressiveCounter + 1, assignedIndex + 1);
+        return {
+          ...item,
+          measurements: item.measurements?.map(m => ({
+              ...m,
+              id: m.id || crypto.randomUUID() 
+          })) ?? [],
+          annotations: item.annotations || [],
+          variations: item.variations || [],
+          laborRate: item.laborRate || 0,
+          laborValue: item.laborValue || 0,
+          originalMeasurements: item.originalMeasurements?.map(om => ({
+              ...om,
+              id: om.id || crypto.randomUUID()
+          })) || [],
+          originalIndex: assignedIndex
+        };
+      })
     }))
   }));
 };

@@ -28,12 +28,13 @@ const createMeasureRows = (group: WorkGroup, startProgressive: number) => {
 
   group.items.forEach(item => {
       if (!item.measurements || item.measurements.length === 0) return;
+      const formattedCode = item.originalIndex ? `N.${item.originalIndex} - ${item.articleCode}` : item.articleCode;
 
       // Header Articolo
       rows.push(
           <tr key={`item-header-${item.articleCode}`} className="bg-gray-50 dark:bg-gray-800/30 border-b dark:border-gray-700 print-row">
               <td colSpan={8} className="p-1 pl-6 font-semibold text-indigo-900 dark:text-indigo-300">
-                  {item.articleCode} - {item.description} <span className="font-normal text-gray-600">({item.unit})</span>
+                  {formattedCode} - {item.description} <span className="font-normal text-gray-600">({item.unit})</span>
               </td>
           </tr>
       );
@@ -61,7 +62,7 @@ const createMeasureRows = (group: WorkGroup, startProgressive: number) => {
       // Totale Articolo
       rows.push(
           <tr key={`item-total-${item.articleCode}`} className="bg-gray-50/80 dark:bg-gray-800/50 border-b border-gray-400 dark:border-gray-500 print-row">
-              <td colSpan={7} className="p-1 text-right pr-2 font-semibold text-gray-600">Totale {item.articleCode}</td>
+              <td colSpan={7} className="p-1 text-right pr-2 font-semibold text-gray-600">Totale {formattedCode}</td>
               <td className="p-1 text-right font-bold pr-2 text-black">{numberFormatter.format(itemTotalQty)}</td>
           </tr>
       );

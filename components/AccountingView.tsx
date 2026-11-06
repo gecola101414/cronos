@@ -33,6 +33,11 @@ const round2 = (num: number): number => {
     return Math.round((num + Number.EPSILON) * 100) / 100;
 };
 
+const formatCodeWithComputoIndex = (articleCode: string, originalIndex?: number, accountingType?: 'measure' | 'body'): string => {
+    if (accountingType === 'body' || !originalIndex || originalIndex <= 0) return articleCode;
+    return `N.${originalIndex} - ${articleCode}`;
+};
+
 interface AccountingEntry {
     id: string; 
     progressiveIndex: number; 
@@ -298,7 +303,8 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       }
       if (deprModalItemSearch.trim()) {
         const q = deprModalItemSearch.toLowerCase();
-        const codeMatch = item.articleCode.toLowerCase().includes(q);
+        const formattedCode = formatCodeWithComputoIndex(item.articleCode, item.originalIndex).toLowerCase();
+        const codeMatch = formattedCode.includes(q) || item.articleCode.toLowerCase().includes(q);
         const descMatch = item.description.toLowerCase().includes(q);
         const groupMatch = (item.groupName || '').toLowerCase().includes(q);
         return codeMatch || descMatch || groupMatch;
@@ -495,7 +501,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           margin: { left: 15, right: 15 },
           head: [['Voce di Computo', 'U.M.', 'Tariffa Contratto', 'Tariffa Deprezzata', 'Ribasso %', 'Q.tà Autorizzata', 'Economia Ente (€)']],
           body: [[
-            `${depr.articleCode}\n${item?.description || ''}`,
+            `${formatCodeWithComputoIndex(depr.articleCode, item?.originalIndex)}\n${item?.description || ''}`,
             item?.unit || 'cad',
             currencyFormatter.format(origPrice),
             currencyFormatter.format(depr.depreciatedUnitPrice),
@@ -1002,7 +1008,8 @@ const AccountingView: React.FC<AccountingViewProps> = ({
   }, [accountingRegistry, salReferenceDate, previousSalDate, boqTotals, sals, activeSalId, summaryScope, documents]);
 
   const applyFilters = (entry: any) => {
-      const codeMatch = entry.articleCode.toLowerCase().includes(filters.code.toLowerCase());
+      const formattedCode = formatCodeWithComputoIndex(entry.articleCode, entry.originalIndex, entry.accountingType);
+      const codeMatch = formattedCode.toLowerCase().includes(filters.code.toLowerCase()) || entry.articleCode.toLowerCase().includes(filters.code.toLowerCase());
       const wbsMatch = (entry.groupName || entry.wbsName).toLowerCase().includes(filters.wbs.toLowerCase());
       const descMatch = (entry.description + (entry.measurementNote || '')).toLowerCase().includes(filters.description.toLowerCase());
       let dateMatch = true;
@@ -1116,7 +1123,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
         rows = filteredLibretto.filter(applyFilters).map(e => ({
           idx: e.progressiveIndex,
           date: format(parseISO(e.date), 'dd/MM/yyyy'),
-          code: e.articleCode,
+          code: formatCodeWithComputoIndex(e.articleCode, e.originalIndex, e.accountingType),
           desc: `${e.description}${e.measurementNote ? '\nNote: ' + e.measurementNote : ''}`,
           um: e.unit,
           qty: e.accountingType === 'body' ? percentFormatter.format(e.quantity) : numberFormatter.format(e.quantity),
@@ -1165,7 +1172,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             regIdx: e.registerOrderIndex,
             date: format(parseISO(e.date), 'dd/MM/yyyy'),
             libIdx: `Lib. #${e.progressiveIndex}`,
-            code: e.articleCode,
+            code: formatCodeWithComputoIndex(e.articleCode, e.originalIndex, e.accountingType),
             desc: `${e.description}${e.measurementNote ? '\nNote: ' + e.measurementNote : ''}${dims}`,
             um: e.unit,
             qty: fmtQty,
@@ -1202,13 +1209,14 @@ const AccountingView: React.FC<AccountingViewProps> = ({
         visibleItems.forEach((item, artIdx) => {
           const fmtQty = (q: number) => item.accountingType === 'body' ? percentFormatter.format(q) : numberFormatter.format(q);
           const allLines = item.allLines || [...item.previousLines, ...item.currentLines];
+          const formattedItemCode = formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType);
 
           if (summaryMode === 'analytical') {
             // Riga Intestazione Articolo
             rows.push({
               idx: `${artIdx + 1}`,
               date: item.wbsName,
-              desc: `${item.articleCode}\n${item.description}`,
+              desc: `${formattedItemCode}\n${item.description}`,
               um: item.unit,
               qty: '',
               price: currencyFormatter.format(item.unitPrice),
@@ -1244,7 +1252,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             rows.push({
               idx: '',
               date: '',
-              desc: `SOMMANO (${item.articleCode})`,
+              desc: `SOMMANO (${formattedItemCode})`,
               um: item.unit,
               qty: fmtQty(item.totalQuantity),
               price: currencyFormatter.format(item.unitPrice),
@@ -1258,7 +1266,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             rows.push({
               idx: `${artIdx + 1}`,
               date: libRefs,
-              desc: `[${item.wbsName}] ${item.articleCode} - ${item.description}`,
+              desc: `[${item.wbsName}] ${formattedItemCode} - ${item.description}`,
               um: item.unit,
               qty: fmtQty(item.totalQuantity),
               price: currencyFormatter.format(item.unitPrice),
@@ -1626,7 +1634,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                         <td className="p-2.5 text-center font-bold text-indigo-700 dark:text-indigo-400 border-r dark:border-gray-600 bg-gray-50/50 dark:bg-gray-800 align-top">{entry.progressiveIndex}</td>
                                         <td className="p-2.5 border-r dark:border-gray-600 align-top">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
                                         <td className="p-2.5 border-r dark:border-gray-600 align-top text-xs uppercase font-semibold">{entry.groupName}</td>
-                                        <td className="p-2.5 border-r dark:border-gray-600 align-top font-mono text-xs">{entry.articleCode}</td>
+                                        <td className="p-2.5 border-r dark:border-gray-600 align-top font-mono text-xs font-bold text-indigo-700 dark:text-indigo-300">
+                                            {formatCodeWithComputoIndex(entry.articleCode, entry.originalIndex, entry.accountingType)}
+                                        </td>
                                         <td className="p-2.5 border-r dark:border-gray-600"><div className="text-xs mb-0.5">{entry.description}</div><div className="italic text-indigo-700 dark:text-indigo-400">{entry.measurementNote || '-'}</div></td>
                                         <td className="p-2.5 text-center border-r dark:border-gray-600">{entry.unit}</td>
                                         <td className="p-2.5 text-right font-bold font-mono bg-indigo-50/30 dark:bg-indigo-900/10">{entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity)}</td>
@@ -1708,7 +1718,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                 </span>
                                             </td>
                                             <td className="px-2.5 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300 border-r border-gray-200 dark:border-gray-700 align-top">
-                                                <div>{entry.articleCode}</div>
+                                                <div>{formatCodeWithComputoIndex(entry.articleCode, entry.originalIndex, entry.accountingType)}</div>
                                                 <div className="text-[10px] font-sans font-normal text-gray-400 uppercase mt-0.5">{entry.groupName}</div>
                                             </td>
                                             <td className="px-3 py-2 text-gray-900 dark:text-gray-100 border-r border-gray-200 dark:border-gray-700 align-top">
@@ -1950,7 +1960,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                                             {idx}
                                                                         </td>
                                                                         <td className="px-2.5 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300 border-r border-gray-200 dark:border-gray-700 align-top">
-                                                                            <div>{item.articleCode}</div>
+                                                                            <div>{formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType)}</div>
                                                                             {item.isSecurityCost && (
                                                                                 <span className="inline-block mt-0.5 px-1 py-0.2 bg-red-100 text-red-800 rounded text-[9px] font-sans font-bold">Oneri Sicurezza</span>
                                                                             )}
@@ -2051,7 +2061,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                                                     SOMMANO {item.unit}
                                                                                 </td>
                                                                                 <td className="px-2.5 py-1 border-r border-gray-200 dark:border-gray-700 text-center font-mono text-[10px] text-gray-400">
-                                                                                    {item.articleCode}
+                                                                                    {formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType)}
                                                                                 </td>
                                                                                 <td className="px-2 py-1 text-center font-mono border-r border-gray-200 dark:border-gray-700">
                                                                                     {item.unit}
@@ -2118,7 +2128,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                         {idx + 1}
                                                     </td>
                                                     <td className="px-3 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300 border-r border-gray-200 dark:border-gray-700 align-top">
-                                                        <div>{item.articleCode}</div>
+                                                        <div>{formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType)}</div>
                                                         <div className="text-[10px] font-sans font-normal text-gray-400 uppercase mt-0.5">{item.wbsName}</div>
                                                     </td>
                                                     <td className="px-3 py-2 text-gray-900 dark:text-gray-100 border-r border-gray-200 dark:border-gray-700 align-top font-semibold">
@@ -2216,7 +2226,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                                 SOMMANO {item.unit}
                                                             </td>
                                                             <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-600 text-center font-mono text-[10px] text-gray-400">
-                                                                {item.articleCode}
+                                                                {formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType)}
                                                             </td>
                                                             <td className="px-2 py-1.5 text-center border-r border-gray-200 dark:border-gray-600 font-mono">
                                                                 {item.unit}
@@ -2443,7 +2453,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                   del {format(parseISO(depr.determinaDate), 'dd/MM/yyyy')}
                                 </span>
                                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
-                                  Art. {depr.articleCode}
+                                  Art. {formatCodeWithComputoIndex(depr.articleCode, item?.originalIndex)}
                                 </span>
                                 {item?.groupName && (
                                   <span className="text-[10px] font-medium text-gray-500 uppercase bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded">
@@ -2683,7 +2693,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                             }`}
                                           >
                                             <td className="px-3 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300 border-r border-gray-200 dark:border-gray-700 align-top">
-                                              {itm.articleCode}
+                                              {formatCodeWithComputoIndex(itm.articleCode, itm.originalIndex)}
                                             </td>
                                             <td className="px-3 py-2 text-[11px] text-gray-500 dark:text-gray-400 border-r border-gray-200 dark:border-gray-700 align-top uppercase truncate max-w-[170px]" title={itm.groupName}>
                                               {itm.groupName}
@@ -2741,7 +2751,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                   <div className="flex flex-wrap items-center justify-between gap-2">
                                     <div className="flex items-center gap-2">
                                       <span className="font-mono font-black text-sm text-indigo-700 dark:text-indigo-300 bg-white dark:bg-gray-800 px-2 py-0.5 rounded border border-indigo-200 dark:border-indigo-700">
-                                        {itm.articleCode}
+                                        {formatCodeWithComputoIndex(itm.articleCode, itm.originalIndex)}
                                       </span>
                                       <span className="text-[11px] font-bold uppercase px-2 py-0.5 rounded bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300">
                                         {itm.groupName}

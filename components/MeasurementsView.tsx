@@ -8,6 +8,17 @@ const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', cu
 const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const decimalFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
 
+const safeFormatDate = (val?: string, pattern: string = 'dd/MM/yyyy', useItLocale: boolean = false): string => {
+  if (!val) return '-';
+  try {
+    const d = parseISO(val);
+    if (!isNaN(d.getTime())) {
+      return useItLocale ? format(d, pattern, { locale: it }) : format(d, pattern);
+    }
+  } catch (e) {}
+  return val;
+};
+
 declare const jspdf: any;
 declare const html2canvas: any;
 
@@ -305,7 +316,7 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                             <div>
                                 <span>{group.name}</span>
                                 <span className="block text-sm font-normal text-gray-500 dark:text-gray-400 mt-1">
-                                    Inizio Attività: {format(parseISO(group.officialStartDate || group.startDate), 'dd MMMM yyyy', { locale: it })}
+                                    Inizio Attività: {safeFormatDate(group.officialStartDate || group.startDate, 'dd MMMM yyyy', true)}
                                 </span>
                             </div>
                             <div className="text-right">
@@ -334,13 +345,15 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                                 <div key={itemIndex} className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden break-inside-avoid">
                                     <table className="w-full text-sm table-fixed">
                                         <colgroup>
-                                            <col className="w-[15%]" />
-                                            <col className="w-[35%]" />
-                                            <col className="w-[50%]" />
+                                            <col className="w-[18%]" />
+                                            <col className="w-[37%]" />
+                                            <col className="w-[45%]" />
                                         </colgroup>
                                         <tbody>
                                             <tr className="bg-gray-100 dark:bg-gray-700/50">
-                                                <td className="p-3 font-semibold text-gray-800 dark:text-gray-200 align-top">{item.articleCode}</td>
+                                                <td className="p-3 font-bold font-mono text-indigo-800 dark:text-indigo-200 align-top">
+                                                    {`N.${item.originalIndex || (itemIndex + 1)} - ${item.articleCode}`}
+                                                </td>
                                                 <td className="p-3 text-gray-600 dark:text-gray-400 text-justify align-top">{item.description}</td>
                                                 <td></td>
                                             </tr>
@@ -365,7 +378,7 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
 
                                             return (
                                             <tr key={mIndex} className="border-b dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-600/30">
-                                            <td className="px-4 py-2 align-top">{format(parseISO(m.date), 'dd/MM/yyyy')}</td>
+                                            <td className="px-4 py-2 align-top">{safeFormatDate(m.date, 'dd/MM/yyyy')}</td>
                                             <td className="px-4 py-2 text-justify break-words align-top text-xs italic">{m.note}</td>
                                             <td className="px-4 py-2 align-top">
                                                 {team ? (
