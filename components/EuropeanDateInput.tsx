@@ -58,14 +58,17 @@ export const EuropeanDateInput: React.FC<{
   placeholder?: string;
 }> = ({ value, onChange, min, max, disabled, className, title, placeholder = "GG/MM/AAAA" }) => {
   const [textVal, setTextVal] = useState(() => toEuropeanString(value));
+  const datePickerRef = React.useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setTextVal(toEuropeanString(value));
   }, [value]);
 
   const isoVal = toIsoString(value);
-  const isoMin = toIsoString(min) || undefined;
-  const isoMax = toIsoString(max) || undefined;
+  const rawIsoMin = toIsoString(min) || undefined;
+  const rawIsoMax = toIsoString(max) || undefined;
+  const isoMin = rawIsoMin && rawIsoMax && rawIsoMin > rawIsoMax ? rawIsoMax : rawIsoMin;
+  const isoMax = rawIsoMax;
 
   return (
     <div className="relative flex items-center w-full" title={title}>
@@ -77,43 +80,69 @@ export const EuropeanDateInput: React.FC<{
         onChange={e => {
           const t = e.target.value;
           setTextVal(t);
-          const parsed = parse(t, 'dd/MM/yyyy', new Date());
-          if (isValid(parsed) && t.trim().length === 10) {
-            const isoStr = format(parsed, 'yyyy-MM-dd');
-            if ((!isoMin || isoStr >= isoMin) && (!isoMax || isoStr <= isoMax)) {
+          const trimmed = t.trim();
+          if (trimmed.length === 10) {
+            const parsed = parse(trimmed, 'dd/MM/yyyy', new Date());
+            if (isValid(parsed)) {
+              const isoStr = format(parsed, 'yyyy-MM-dd');
               onChange(isoStr);
             }
-          } else if (t === '') {
-            onChange('');
+          }
+        }}
+        onBlur={() => {
+          const trimmed = textVal.trim();
+          const parsed = parseSafeDate(trimmed);
+          if (parsed && trimmed.length >= 8) {
+            const isoStr = format(parsed, 'yyyy-MM-dd');
+            onChange(isoStr);
+            setTextVal(format(parsed, 'dd/MM/yyyy'));
+          } else {
+            // Ripristina l'ultimo valore valido se il campo viene lasciato vuoto o incompleto
+            setTextVal(toEuropeanString(value));
           }
         }}
         className={className}
       />
-      <div className="absolute right-2 pointer-events-none text-xs text-gray-400 select-none">
+      <button
+        type="button"
+        tabIndex={-1}
+        disabled={disabled}
+        onClick={e => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!disabled && datePickerRef.current) {
+            if (typeof (datePickerRef.current as any).showPicker === 'function') {
+              try {
+                (datePickerRef.current as any).showPicker();
+                return;
+              } catch (err) {}
+            }
+            datePickerRef.current.focus();
+            datePickerRef.current.click();
+          }
+        }}
+        className="absolute right-1.5 p-0.5 text-xs text-gray-400 hover:text-indigo-600 select-none cursor-pointer disabled:cursor-not-allowed"
+        title={title || "Apri calendario"}
+      >
         📅
-      </div>
+      </button>
       <input
+        ref={datePickerRef}
         type="date"
         data-eu-picker="true"
         value={isoVal}
         min={isoMin}
         max={isoMax}
         disabled={disabled}
-        onClick={e => {
-          if (!disabled && typeof (e.currentTarget as any).showPicker === 'function') {
-            try {
-              (e.currentTarget as any).showPicker();
-            } catch (err) {}
-          }
-        }}
         onChange={e => {
           if (e.target.value) {
             onChange(e.target.value);
             setTextVal(toEuropeanString(e.target.value));
           }
         }}
-        className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-        title={title || "Seleziona data"}
+        className="sr-only pointer-events-none"
+        tabIndex={-1}
+        aria-hidden="true"
       />
     </div>
   );

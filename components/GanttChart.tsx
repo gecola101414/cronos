@@ -133,14 +133,16 @@ const GanttChart: React.FC<GanttChartProps> = ({
           const remainingWorkingDays = Math.ceil(residualValue / (DAILY_RATE_PER_PERSON * teamSize));
           
           let baselineStr = g.startDate;
-          const allMeasures = g.items.flatMap(i => i.measurements || []);
+          const allMeasures = g.items.flatMap(i => i.measurements || []).filter(m => m && m.date);
           if (allMeasures.length > 0) {
-              baselineStr = allMeasures.reduce((max, m) => m.date > max ? m.date : max, allMeasures[0].date);
+              baselineStr = allMeasures.reduce((max, m) => (m.date && m.date > max ? m.date : max), allMeasures[0].date || g.startDate);
           }
           
-          const baselineDate = parseISO(baselineStr);
+          const rawBaseline = parseISO(baselineStr);
+          const baselineDate = !isNaN(rawBaseline.getTime()) ? rawBaseline : new Date();
           const projectedEnd = calculateEndDateWithHolidays(baselineDate, remainingWorkingDays);
-          const start = parse(g.startDate, 'yyyy-MM-dd', new Date());
+          const rawStart = parse(g.startDate, 'yyyy-MM-dd', new Date());
+          const start = !isNaN(rawStart.getTime()) ? rawStart : new Date();
 
           let totalWorkingDays = 0;
           let temp = new Date(start);
@@ -152,7 +154,7 @@ const GanttChart: React.FC<GanttChartProps> = ({
           return { 
             ...g, 
             duration: totalWorkingDays || 1, 
-            endDate: format(projectedEnd, 'yyyy-MM-dd') 
+            endDate: !isNaN(projectedEnd.getTime()) ? format(projectedEnd, 'yyyy-MM-dd') : g.startDate 
           };
       });
   }, [workGroups]);

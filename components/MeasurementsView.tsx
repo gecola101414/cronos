@@ -26,13 +26,13 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
   const [signatureDate, setSignatureDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [companyName, setCompanyName] = useState("Nome Impresa S.r.l.");
   const [directorName, setDirectorName] = useState("Arch. Mario Rossi");
-  const [displayScope, setDisplayScope] = useState<'all_items' | 'only_measured'>('all_items');
 
   const allDates = documents
     .flatMap(doc => doc.workGroups)
     .flatMap(group => group.items)
     .flatMap(item => item.measurements || [])
-    .map(m => parseISO(m.date));
+    .map(m => parseISO(m.date))
+    .filter(d => !isNaN(d.getTime()));
   
   const latestDate = allDates.length > 0
     ? new Date(Math.max(...allDates.map(d => d.getTime())))
@@ -223,23 +223,6 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                 </div>
 
                 <div className="flex items-center gap-2 flex-wrap">
-                    <div className="inline-flex rounded-md bg-white dark:bg-gray-800 p-0.5 border border-gray-200 dark:border-gray-700">
-                        <button
-                            onClick={() => setDisplayScope('all_items')}
-                            className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${displayScope === 'all_items' ? 'bg-indigo-600 text-white shadow-xs' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
-                            title="Visualizza tutte le categorie e voci del computo metrico"
-                        >
-                            📋 Tutte le Voci di Computo per Gruppi
-                        </button>
-                        <button
-                            onClick={() => setDisplayScope('only_measured')}
-                            className={`px-3 py-1 text-xs font-bold rounded-md transition-colors ${displayScope === 'only_measured' ? 'bg-indigo-600 text-white shadow-xs' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
-                            title="Visualizza solo le voci con misure registrate a libretto"
-                        >
-                            🔍 Solo Voci Misurate a SAL
-                        </button>
-                    </div>
-
                     {latestDate && (
                         <button
                             onClick={handleSavePdf}
@@ -270,9 +253,25 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
        
        {/* Scrollable Content */}
        <div className="flex-grow overflow-y-auto p-3 md:p-4 space-y-6 min-h-0">
+         {allGroupsWithContext.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-64 text-center bg-gray-50 dark:bg-gray-800/40 rounded-xl border-2 border-dashed border-gray-200 dark:border-gray-700 p-8">
+                <p className="text-base font-bold text-gray-700 dark:text-gray-200">Nessuna misurazione ancora registrata a Libretto</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 max-w-md">
+                    Il Brogliaccio mostra progressivamente solo le lavorazioni e le voci effettivamente misurate man mano che i lavori avanzano.
+                </p>
+            </div>
+         ) : (
          <div ref={detailsRef}>
             {documents.map((doc, docIndex) => {
-                const docTotalMeasured = doc.workGroups.reduce((groupAcc, group) => {
+                const measuredGroups = doc.workGroups.filter(group =>
+                    group.items.some(item => item.measurements && item.measurements.length > 0)
+                );
+
+                if (measuredGroups.length === 0) {
+                    return null;
+                }
+
+                const docTotalMeasured = measuredGroups.reduce((groupAcc, group) => {
                     return groupAcc + group.items.reduce((itemAcc, item) => {
                         const itemMeasuredValue = (item.measurements || []).reduce((mAcc, m) => {
                             const price = m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice;
@@ -282,10 +281,6 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                     }, 0);
                 }, 0);
 
-                if (displayScope === 'only_measured' && docTotalMeasured === 0) {
-                    return null;
-                }
-
                 return (
                 <div key={docIndex} className="bg-gray-50 dark:bg-gray-800/50 p-6 rounded-xl shadow-md mb-8 break-inside-avoid">
                     <h2 className="text-xl font-bold text-gray-800 dark:text-gray-100 mb-4 border-b pb-2 border-gray-300 dark:border-gray-600">
@@ -293,7 +288,7 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                     </h2>
                     
                     <div className="space-y-6">
-                    {doc.workGroups.map((group, groupIndex) => {
+                    {measuredGroups.map((group, groupIndex) => {
                         const groupTotalMeasured = group.items.reduce((itemAcc, item) => {
                             const itemMeasuredValue = (item.measurements || []).reduce((mAcc, m) => {
                                 const price = m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice;
@@ -303,10 +298,6 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                         }, 0);
 
                         const groupTotalComputo = group.items.reduce((acc, it) => acc + (it.quantity * it.unitPrice), 0);
-
-                        if (displayScope === 'only_measured' && groupTotalMeasured === 0) {
-                            return null;
-                        }
 
                         return (
                         <div key={groupIndex} className="break-inside-avoid">
@@ -329,7 +320,7 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                             <div className="space-y-4">
                             {group.items.map((item, itemIndex) => {
                                 const hasMeasurements = item.measurements && item.measurements.length > 0;
-                                if (displayScope === 'only_measured' && !hasMeasurements) {
+                                if (!hasMeasurements) {
                                     return null;
                                 }
                                 
@@ -338,27 +329,6 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                                     const price = m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice;
                                     return acc + (m.quantity * price);
                                 }, 0);
-
-                                if (!hasMeasurements) {
-                                    return (
-                                        <div key={itemIndex} className="border border-gray-200 dark:border-gray-700 rounded-lg p-3 bg-white dark:bg-gray-800 shadow-2xs">
-                                            <div className="flex flex-wrap items-start justify-between gap-2">
-                                                <div>
-                                                    <span className="font-mono font-bold text-indigo-700 dark:text-indigo-300 mr-2">{item.articleCode}</span>
-                                                    <span className="text-xs text-gray-700 dark:text-gray-300 font-medium">{item.description}</span>
-                                                </div>
-                                                <div className="flex items-center gap-3 text-xs font-mono flex-wrap">
-                                                    <span className="text-gray-500">Q.tà Computo: <strong className="text-gray-800 dark:text-gray-200">{numberFormatter.format(item.quantity)} {item.unit}</strong></span>
-                                                    <span className="text-gray-500">Prezzo: <strong className="text-gray-800 dark:text-gray-200">{currencyFormatter.format(item.unitPrice)}</strong></span>
-                                                    <span className="text-gray-500">Importo Computo: <strong className="text-gray-800 dark:text-gray-200">{currencyFormatter.format(item.quantity * item.unitPrice)}</strong></span>
-                                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-700">
-                                                        In attesa di misura a Libretto
-                                                    </span>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    );
-                                }
 
                                 return (
                                 <div key={itemIndex} className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden break-inside-avoid">
@@ -466,6 +436,7 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                 );
             })}
          </div>
+         )}
         
         {allGroupsWithContext.length > 0 && (
             <div ref={summaryRef} className="mt-8 bg-white dark:bg-gray-800 p-8 rounded-xl shadow-xl break-before-page">
@@ -497,11 +468,14 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                         {documents.map((doc) => {
                             const docMeasuredValue = doc.workGroups.reduce((acc, group) => {
                                 return acc + group.items.reduce((iAcc, item) => {
-                                    return iAcc + (item.measurements || []).reduce((mAcc, m) => mAcc + (m.quantity * item.unitPrice), 0);
+                                    return iAcc + (item.measurements || []).reduce((mAcc, m) => {
+                                        const price = m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice;
+                                        return mAcc + (m.quantity * price);
+                                    }, 0);
                                 }, 0);
                             }, 0);
                             
-                            if (docMeasuredValue === 0 && doc.totalValue === 0) return null;
+                            if (docMeasuredValue === 0) return null;
 
                             const docProgress = doc.totalValue > 0 ? (docMeasuredValue / doc.totalValue) * 100 : 0;
                             const docInternalIncidence = doc.totalValue > 0 ? docMeasuredValue / doc.totalValue : 0;

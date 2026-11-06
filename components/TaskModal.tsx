@@ -71,6 +71,66 @@ const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 
 const DAILY_RATE_PER_PERSON = 240;
 const ITALIAN_HOLIDAYS = ['01-01', '06-01', '25-04', '01-05', '02-06', '15-08', '01-11', '08-12', '25-12', '26-12'];
 
+const generateSafeId = (): string => {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+  } catch (e) {}
+  return 'id_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 10);
+};
+
+const parseItalianFloat = (val?: string | number | null): number => {
+  if (val === undefined || val === null || val === '') return NaN;
+  if (typeof val === 'number') return val;
+  const s = String(val).trim();
+  if (!s || s === '-') return NaN;
+  const normalized = s.includes(',') ? s.replace(/\./g, '').replace(',', '.') : s;
+  return parseFloat(normalized);
+};
+
+const safeParseDate = (val?: string | null): Date | null => {
+  if (!val || typeof val !== 'string') return null;
+  const trimmed = val.trim();
+  if (!trimmed) return null;
+  try {
+    const iso = parseISO(trimmed);
+    if (isValid(iso)) return iso;
+  } catch (e) {}
+  const formats = ['dd/MM/yyyy', 'dd-MM-yyyy', 'yyyy-MM-dd', 'dd/MM/yy', 'd/M/yyyy'];
+  for (const fmt of formats) {
+    try {
+      const parsed = parse(trimmed, fmt, new Date());
+      if (isValid(parsed)) return parsed;
+    } catch (e) {}
+  }
+  try {
+    const native = new Date(trimmed);
+    if (isValid(native)) return native;
+  } catch (e) {}
+  return null;
+};
+
+const safeFormatDate = (val?: string | null, pattern: string = 'dd/MM/yyyy', fallback: string = '-'): string => {
+  const parsed = safeParseDate(val);
+  if (!parsed) return fallback;
+  try {
+    return format(parsed, pattern);
+  } catch (e) {
+    return fallback;
+  }
+};
+
+const normalizeToIsoDate = (val?: string | null, fallbackIso?: string): string => {
+  const parsed = safeParseDate(val);
+  if (parsed) {
+    try {
+      return format(parsed, 'yyyy-MM-dd');
+    } catch (e) {}
+  }
+  return fallbackIso || format(new Date(), 'yyyy-MM-dd');
+};
+
 // Helper per ricavare la quantità di una riga di computo (preserva fedelmente il valore 0)
 const getBoqRowQuantity = (l: any): number => {
     if (l.quantity !== undefined && l.quantity !== null && l.quantity !== '') return Number(l.quantity) || 0;
@@ -270,14 +330,16 @@ const TaskModal: React.FC<TaskModalProps> = ({
   });
 
   const isHolidayLocal = (date: Date): boolean => {
+      if (!isValid(date)) return false;
       const dayMonth = format(date, 'dd-MM');
       return ITALIAN_HOLIDAYS.includes(dayMonth) || [0, 6].includes(date.getDay());
   };
 
   const calculateEndDateLocal = (startDate: Date, workingDays: number): Date => {
-      let currentDate = new Date(startDate);
+      const safeStart = isValid(startDate) ? startDate : new Date();
+      let currentDate = new Date(safeStart);
       let daysCounted = 0;
-      if (workingDays <= 0) return startDate;
+      if (workingDays <= 0) return safeStart;
       while (daysCounted < workingDays) {
         if (!isHolidayLocal(currentDate)) daysCounted++;
         if (daysCounted < workingDays) currentDate = addDays(currentDate, 1);
@@ -303,7 +365,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
             const rawMeasurements = (item.measurements || []).map(m => ({
               ...m,
               _isCommitted: true,
-              id: m.id || crypto.randomUUID()
+              id: m.id || generateSafeId()
             }));
             // Assicura la coerenza del flag isReversed se esiste già una riga di storno collegata
             const syncedMeasurements = rawMeasurements.map(m => {
@@ -405,12 +467,16 @@ const TaskModal: React.FC<TaskModalProps> = ({
 
   const calculateAnalyticQuantity = (input: { factor?: string; length?: string; width?: string; height?: string } | undefined): number | null => {
       if (!input) return null;
-      const f = parseFloat(input.factor?.replace(',', '.') || '') || null;
-      const l = parseFloat(input.length?.replace(',', '.') || '') || null;
-      const w = parseFloat(input.width?.replace(',', '.') || '') || null;
-      const h = parseFloat(input.height?.replace(',', '.') || '') || null;
+      const fVal = parseItalianFloat(input.factor);
+      const lVal = parseItalianFloat(input.length);
+      const wVal = parseItalianFloat(input.width);
+      const hVal = parseItalianFloat(input.height);
+      const f = !isNaN(fVal) && fVal !== 0 ? fVal : null;
+      const l = !isNaN(lVal) && lVal !== 0 ? lVal : null;
+      const w = !isNaN(wVal) && wVal !== 0 ? wVal : null;
+      const h = !isNaN(hVal) && hVal !== 0 ? hVal : null;
       if (f !== null || l !== null || w !== null || h !== null) {
-          return Math.round(((f || 1) * (l || 1) * (w || 1) * (h || 1)) * 1000) / 1000;
+          return Math.round(((f ?? 1) * (l ?? 1) * (w ?? 1) * (h ?? 1)) * 1000) / 1000;
       }
       return null;
   };
@@ -570,8 +636,8 @@ const TaskModal: React.FC<TaskModalProps> = ({
     if (analyticQty !== null) {
         quantity = analyticQty;
     } else {
-        let quantityStr = (measurementInput?.quantity || '').replace(',', '.');
-        quantity = quantityStr.trim() === '' ? maxAllowed : (parseFloat(quantityStr) || 0);
+        const parsedInputQty = parseItalianFloat(measurementInput?.quantity);
+        quantity = !measurementInput?.quantity || measurementInput.quantity.trim() === '' ? maxAllowed : (isNaN(parsedInputQty) ? 0 : parsedInputQty);
     }
     
     // PATTO DI FERRO: "se la supero mi blocca e la chiude con il residuo"
@@ -588,10 +654,10 @@ const TaskModal: React.FC<TaskModalProps> = ({
     // 2) Non inferiore alla data di inizio di questa attività
     // 3) Non superiore alla data odierna
     const todayStr = format(new Date(), 'yyyy-MM-dd');
-    const actStart = activeGroup.officialStartDate || activeGroup.startDate || todayStr;
+    const actStart = normalizeToIsoDate(activeGroup.officialStartDate || activeGroup.startDate, todayStr);
 
     if (actStart > todayStr) {
-      setValidationNotice(`⛔ DATA INIZIO ATTIVITÀ FUTURA: La data di inizio di questa attività (${format(parseISO(actStart), 'dd/MM/yyyy')}) è successiva alla data odierna (${format(parseISO(todayStr), 'dd/MM/yyyy')}). Aggiorna prima la data di inizio nelle Impostazioni Gruppo.`);
+      setValidationNotice(`⛔ DATA INIZIO ATTIVITÀ FUTURA: La data di inizio di questa attività (${safeFormatDate(actStart)}) è successiva alla data odierna (${safeFormatDate(todayStr)}). Aggiorna prima la data di inizio nelle Impostazioni Gruppo.`);
       return;
     }
 
@@ -600,22 +666,22 @@ const TaskModal: React.FC<TaskModalProps> = ({
       : actStart;
 
     if (minAllowedDate > todayStr) {
-      setValidationNotice(`⛔ DATA NON CONGRUENTE: La data minima consentita (${format(parseISO(minAllowedDate), 'dd/MM/yyyy')}) supera la data odierna (${format(parseISO(todayStr), 'dd/MM/yyyy')}).`);
+      setValidationNotice(`⛔ DATA NON CONGRUENTE: La data minima consentita (${safeFormatDate(minAllowedDate)}) supera la data odierna (${safeFormatDate(todayStr)}).`);
       return;
     }
 
-    const measureDate = measurementInput?.date || minAllowedDate;
+    const measureDate = normalizeToIsoDate(measurementInput?.date, minAllowedDate);
     
     if (measureDate < actStart) {
-      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data della misura (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere inferiore alla data di inizio di questa attività (${format(parseISO(actStart), 'dd/MM/yyyy')}).`);
+      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data della misura (${safeFormatDate(measureDate)}) non può essere inferiore alla data di inizio di questa attività (${safeFormatDate(actStart)}).`);
       return;
     }
     if (latestGlobalMeasureDate && measureDate < latestGlobalMeasureDate) {
-      setValidationNotice(`⛔ REGOLA D'ORO DATE: La misura successiva (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere inferiore all'ultima data immessa a libretto (${format(parseISO(latestGlobalMeasureDate), 'dd/MM/yyyy')}), al massimo uguale.`);
+      setValidationNotice(`⛔ REGOLA D'ORO DATE: La misura successiva (${safeFormatDate(measureDate)}) non può essere inferiore all'ultima data immessa a libretto (${safeFormatDate(latestGlobalMeasureDate)}), al massimo uguale.`);
       return;
     }
     if (measureDate > todayStr) {
-      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data della misura (${format(parseISO(measureDate), 'dd/MM/yyyy')}) non può essere superiore alla data odierna (${format(parseISO(todayStr), 'dd/MM/yyyy')}).`);
+      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data della misura (${safeFormatDate(measureDate)}) non può essere superiore alla data odierna (${safeFormatDate(todayStr)}).`);
       return;
     }
 
@@ -632,24 +698,29 @@ const TaskModal: React.FC<TaskModalProps> = ({
 
     let measureNote = measurementInput?.note || linkedBoq?.description || 'Misura';
     if (selectedDepr) {
-      const deprPrefix = `[DEPREZZAMENTO Det. RUP ${selectedDepr.determinaNumber} del ${format(parseISO(selectedDepr.determinaDate), 'dd/MM/yyyy')} - Prezzo € ${numberFormatter.format(selectedDepr.depreciatedUnitPrice)} anziché € ${numberFormatter.format(item.unitPrice)}]`;
+      const deprPrefix = `[DEPREZZAMENTO Det. RUP ${selectedDepr.determinaNumber} del ${safeFormatDate(selectedDepr.determinaDate)} - Prezzo € ${numberFormatter.format(selectedDepr.depreciatedUnitPrice)} anziché € ${numberFormatter.format(item.unitPrice)}]`;
       if (!measureNote.includes(selectedDepr.determinaNumber)) {
         measureNote = `${deprPrefix} ${measureNote}`.trim();
       }
     }
 
+    const parsedF = parseItalianFloat(measurementInput?.factor);
+    const parsedL = parseItalianFloat(measurementInput?.length);
+    const parsedW = parseItalianFloat(measurementInput?.width);
+    const parsedH = parseItalianFloat(measurementInput?.height);
+
     const newMeasurement: ExtendedMeasurement = { 
-        id: crypto.randomUUID(), 
+        id: generateSafeId(), 
         date: measureDate, 
         quantity: quantity, 
         note: measureNote, 
         teamId: undefined, 
         workerIds: undefined, 
         _isCommitted: false, 
-        factor: measurementInput?.factor ? parseFloat(measurementInput.factor.replace(',', '.')) : undefined, 
-        length: measurementInput?.length ? parseFloat(measurementInput.length.replace(',', '.')) : undefined, 
-        width: measurementInput?.width ? parseFloat(measurementInput.width.replace(',', '.')) : undefined, 
-        height: measurementInput?.height ? parseFloat(measurementInput.height.replace(',', '.')) : undefined,
+        factor: !isNaN(parsedF) ? parsedF : undefined, 
+        length: !isNaN(parsedL) ? parsedL : undefined, 
+        width: !isNaN(parsedW) ? parsedW : undefined, 
+        height: !isNaN(parsedH) ? parsedH : undefined,
         sourceBoqId: linkedBoq?.id,
         createdAt: Date.now(),
         depreciationId: selectedDepr ? selectedDepr.id : undefined,
@@ -836,32 +907,59 @@ const TaskModal: React.FC<TaskModalProps> = ({
   };
 
   // AVVIA MODIFICA INLINE DI UNA MISURAZIONE PRIMA DEL SALVATAGGIO
-  const handleStartEditMeasurement = (articleCode: string, m: ExtendedMeasurement) => {
+  const handleStartEditMeasurement = (articleCode: string, m: ExtendedMeasurement, mIdx?: number) => {
     if (isViewOnly || isLocked) return;
-    setEditingMeasurementId(m.id);
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const targetId = m.id || `m_${articleCode}_${mIdx ?? 0}`;
+
+    if (!m.id && mIdx !== undefined) {
+      setActiveGroup(prev => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          items: prev.items.map(i =>
+            i.articleCode === articleCode
+              ? {
+                  ...i,
+                  measurements: (i.measurements || []).map((row, idx) =>
+                    idx === mIdx ? { ...row, id: targetId } : row
+                  )
+                }
+              : i
+          )
+        };
+      });
+    }
+
+    const safeNumStr = (v: any): string =>
+      v !== undefined && v !== null && v !== '' && !Number.isNaN(Number(v)) ? String(v) : '';
+
+    setValidationNotice(null);
+    setEditingMeasurementId(targetId);
     setEditMeasureDraft({
       articleCode,
-      date: m.date,
-      note: m.note || '',
-      factor: m.factor !== undefined ? String(m.factor) : '',
-      length: m.length !== undefined ? String(m.length) : '',
-      width: m.width !== undefined ? String(m.width) : '',
-      height: m.height !== undefined ? String(m.height) : '',
-      quantity: String(Math.abs(m.quantity)),
+      date: normalizeToIsoDate(m.date, todayStr),
+      note: String(m.note || ''),
+      factor: safeNumStr(m.factor),
+      length: safeNumStr(m.length),
+      width: safeNumStr(m.width),
+      height: safeNumStr(m.height),
+      quantity: String(Math.abs(Number(m.quantity) || 0)),
       sourceBoqId: m.sourceBoqId
     });
   };
 
   // SALVA MODIFICA INLINE DELLA RIGA DI MISURAZIONE
-  const handleCommitEditMeasurement = (item: ExtendedWorkItem, m: ExtendedMeasurement) => {
+  const handleCommitEditMeasurement = (item: ExtendedWorkItem, m: ExtendedMeasurement, fallbackRowId?: string) => {
     if (!editMeasureDraft || !activeGroup) return;
 
+    const targetRowId = m.id || fallbackRowId || editingMeasurementId;
     const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const draftDateIso = normalizeToIsoDate(editMeasureDraft.date, normalizeToIsoDate(m.date, todayStr));
     const isStornoRow = Boolean(m.reversesMeasurementId || (m.quantity < 0 && m.note?.toUpperCase().startsWith('STORNO')));
 
     if (isStornoRow) {
-      // Per una riga di storno consente di aggiornare data e nota prima del salvataggio
-      const validDate = editMeasureDraft.date <= todayStr ? editMeasureDraft.date : todayStr;
+      const validDate = draftDateIso <= todayStr ? draftDateIso : todayStr;
       setActiveGroup(prev => {
         if (!prev) return null;
         return {
@@ -871,8 +969,8 @@ const TaskModal: React.FC<TaskModalProps> = ({
               ? {
                   ...i,
                   measurements: (i.measurements || []).map(row =>
-                    row.id === m.id
-                      ? { ...row, date: validDate, note: editMeasureDraft.note.startsWith('STORNO') ? editMeasureDraft.note : `STORNO: ${editMeasureDraft.note}` }
+                    (row.id || fallbackRowId) === targetRowId
+                      ? { ...row, id: targetRowId || row.id, date: validDate, note: editMeasureDraft.note.startsWith('STORNO') ? editMeasureDraft.note : `STORNO: ${editMeasureDraft.note}` }
                       : row
                   )
                 }
@@ -889,13 +987,13 @@ const TaskModal: React.FC<TaskModalProps> = ({
     // Calcolo residuo escludendo la quantità corrente della riga in modifica
     const varTotal = (item.variations || []).reduce((acc, v) => v.type === 'increase' ? acc + v.quantity : acc - v.quantity, 0);
     const otherMeasuredTotal = (item.measurements || [])
-      .filter(row => row.id !== m.id)
+      .filter(row => row.id !== targetRowId && row !== m)
       .reduce((acc, row) => acc + row.quantity, 0);
     const itemResidualForEdit = Math.max(0, Math.round(((item.quantity + varTotal) - otherMeasuredTotal) * 1000) / 1000);
 
     const singleMeasures = getSingleBoqMeasuresForItem({
       ...item,
-      measurements: (item.measurements || []).filter(row => row.id !== m.id)
+      measurements: (item.measurements || []).filter(row => row.id !== targetRowId && row !== m)
     });
     const linkedBoq = editMeasureDraft.sourceBoqId
       ? singleMeasures.find(sm => sm.id === editMeasureDraft.sourceBoqId)
@@ -903,9 +1001,10 @@ const TaskModal: React.FC<TaskModalProps> = ({
     const maxAllowed = linkedBoq ? Math.min(linkedBoq.missingToClose, itemResidualForEdit) : itemResidualForEdit;
 
     const analyticQty = calculateAnalyticQuantity(editMeasureDraft);
+    const parsedDraftQty = parseItalianFloat(editMeasureDraft.quantity);
     let newQty = analyticQty !== null
       ? analyticQty
-      : (parseFloat(editMeasureDraft.quantity.replace(',', '.')) || 0);
+      : (!isNaN(parsedDraftQty) ? parsedDraftQty : 0);
 
     if (newQty > (maxAllowed + 0.001) && newQty > 0) {
       setValidationNotice(`⚠️ Quantità modificata (${numberFormatter.format(newQty)} ${item.unit}) superiore al residuo massimo disponibile (${numberFormatter.format(maxAllowed)} ${item.unit}): impostata al residuo.`);
@@ -917,13 +1016,13 @@ const TaskModal: React.FC<TaskModalProps> = ({
       return;
     }
 
-    const actStart = activeGroup.officialStartDate || activeGroup.startDate || todayStr;
-    if (editMeasureDraft.date < actStart) {
-      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data modificata (${format(parseISO(editMeasureDraft.date), 'dd/MM/yyyy')}) non può essere inferiore alla data di inizio di questa attività (${format(parseISO(actStart), 'dd/MM/yyyy')}).`);
+    const actStart = normalizeToIsoDate(activeGroup.officialStartDate || activeGroup.startDate, todayStr);
+    if (draftDateIso < actStart) {
+      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data modificata (${safeFormatDate(draftDateIso)}) non può essere inferiore alla data di inizio di questa attività (${safeFormatDate(actStart)}).`);
       return;
     }
-    if (editMeasureDraft.date > todayStr) {
-      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data modificata (${format(parseISO(editMeasureDraft.date), 'dd/MM/yyyy')}) non può essere superiore alla data odierna (${format(parseISO(todayStr), 'dd/MM/yyyy')}).`);
+    if (draftDateIso > todayStr) {
+      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data modificata (${safeFormatDate(draftDateIso)}) non può essere superiore alla data odierna (${safeFormatDate(todayStr)}).`);
       return;
     }
 
@@ -938,7 +1037,8 @@ const TaskModal: React.FC<TaskModalProps> = ({
             const isSt = Boolean(other.reversesMeasurementId || (other.quantity < 0 && other.note?.toUpperCase().startsWith('STORNO')));
             if (!other.isReversed && !isSt && other.date) {
               if (!m.createdAt || !other.createdAt || other.createdAt < m.createdAt) {
-                if (!maxPriorDate || other.date > maxPriorDate) maxPriorDate = other.date;
+                const otherIso = normalizeToIsoDate(other.date, '');
+                if (otherIso && (!maxPriorDate || otherIso > maxPriorDate)) maxPriorDate = otherIso;
               }
             }
           });
@@ -947,22 +1047,26 @@ const TaskModal: React.FC<TaskModalProps> = ({
     });
     activeGroup.items.forEach(it => {
       (it.measurements || []).forEach(other => {
-        if (other.id === m.id) return;
+        if (other.id === targetRowId || other === m) return;
         const isSt = Boolean(other.reversesMeasurementId || (other.quantity < 0 && other.note?.toUpperCase().startsWith('STORNO')));
         if (!other.isReversed && !isSt && other.date) {
           if (m.createdAt && other.createdAt && other.createdAt < m.createdAt) {
-            if (!maxPriorDate || other.date > maxPriorDate) maxPriorDate = other.date;
+            const otherIso = normalizeToIsoDate(other.date, '');
+            if (otherIso && (!maxPriorDate || otherIso > maxPriorDate)) maxPriorDate = otherIso;
           }
         }
       });
     });
 
-    if (maxPriorDate && editMeasureDraft.date < maxPriorDate) {
-      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data (${format(parseISO(editMeasureDraft.date), 'dd/MM/yyyy')}) non può essere inferiore alla precedente data immessa a libretto (${format(parseISO(maxPriorDate), 'dd/MM/yyyy')}).`);
+    if (maxPriorDate && draftDateIso < maxPriorDate) {
+      setValidationNotice(`⛔ REGOLA D'ORO DATE: La data (${safeFormatDate(draftDateIso)}) non può essere inferiore alla precedente data immessa a libretto (${safeFormatDate(maxPriorDate)}).`);
       return;
     }
 
-    const validDate = editMeasureDraft.date;
+    const parsedF = parseItalianFloat(editMeasureDraft.factor);
+    const parsedL = parseItalianFloat(editMeasureDraft.length);
+    const parsedW = parseItalianFloat(editMeasureDraft.width);
+    const parsedH = parseItalianFloat(editMeasureDraft.height);
 
     setActiveGroup(prev => {
       if (!prev) return null;
@@ -973,15 +1077,16 @@ const TaskModal: React.FC<TaskModalProps> = ({
             ? {
                 ...i,
                 measurements: (i.measurements || []).map(row =>
-                  row.id === m.id
+                  (row.id === targetRowId || row === m)
                     ? {
                         ...row,
-                        date: validDate,
+                        id: targetRowId || row.id || generateSafeId(),
+                        date: draftDateIso,
                         note: editMeasureDraft.note || linkedBoq?.description || row.note,
-                        factor: editMeasureDraft.factor ? parseFloat(editMeasureDraft.factor.replace(',', '.')) : undefined,
-                        length: editMeasureDraft.length ? parseFloat(editMeasureDraft.length.replace(',', '.')) : undefined,
-                        width: editMeasureDraft.width ? parseFloat(editMeasureDraft.width.replace(',', '.')) : undefined,
-                        height: editMeasureDraft.height ? parseFloat(editMeasureDraft.height.replace(',', '.')) : undefined,
+                        factor: !isNaN(parsedF) ? parsedF : undefined,
+                        length: !isNaN(parsedL) ? parsedL : undefined,
+                        width: !isNaN(parsedW) ? parsedW : undefined,
+                        height: !isNaN(parsedH) ? parsedH : undefined,
                         quantity: m.quantity < 0 ? -Math.abs(newQty) : newQty,
                         sourceBoqId: editMeasureDraft.sourceBoqId || row.sourceBoqId
                       }
@@ -1004,9 +1109,9 @@ const TaskModal: React.FC<TaskModalProps> = ({
     // Se c'è una modifica inline aperta, la chiude/applica prima di mostrare la conferma
     if (editingMeasurementId && editMeasureDraft) {
       const targetItem = activeGroup.items.find(i => i.articleCode === editMeasureDraft.articleCode);
-      const targetMeasure = targetItem?.measurements?.find(m => m.id === editingMeasurementId);
+      const targetMeasure = targetItem?.measurements?.find((m, idx) => (m.id || `m_${targetItem.articleCode}_${idx}`) === editingMeasurementId);
       if (targetItem && targetMeasure) {
-        handleCommitEditMeasurement(targetItem, targetMeasure);
+        handleCommitEditMeasurement(targetItem, targetMeasure, editingMeasurementId);
       }
     }
     setShowSaveConfirmModal(true);
@@ -1016,7 +1121,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
       if (!activeGroup || isViewOnly || isLocked) return; 
       
       const totalMeasuredVal = activeGroup.items.reduce((total, i) => 
-          total + ((i.measurements || []).reduce((acc, m) => acc + m.quantity, 0) * i.unitPrice), 0);
+          total + ((i.measurements || []).reduce((acc, m) => acc + (m.quantity * (m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : i.unitPrice)), 0)), 0);
       
       const groupTotalVal = activeGroup.items.reduce((acc, i) => {
           const varTotal = (i.variations || []).reduce((vAcc, v) => v.type === 'increase' ? vAcc + v.quantity : vAcc - v.quantity, 0);
@@ -1027,13 +1132,17 @@ const TaskModal: React.FC<TaskModalProps> = ({
       const residualValue = Math.max(0, groupTotalVal - totalMeasuredVal);
       const remainingWorkingDays = Math.ceil(residualValue / (DAILY_RATE_PER_PERSON * teamSize));
       
-      let baselineStr = activeGroup.startDate;
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+      let baselineStr = normalizeToIsoDate(activeGroup.startDate, todayStr);
       const allMeasures = activeGroup.items.flatMap(i => i.measurements || []);
       if (allMeasures.length > 0) {
-          baselineStr = allMeasures.reduce((max, m) => m.date > max ? m.date : max, allMeasures[0].date);
+          baselineStr = allMeasures.reduce((max, m) => {
+            const mIso = normalizeToIsoDate(m.date, '');
+            return mIso && mIso > max ? mIso : max;
+          }, normalizeToIsoDate(allMeasures[0].date, baselineStr));
       }
       
-      const baselineDate = parseISO(baselineStr);
+      const baselineDate = safeParseDate(baselineStr) || new Date();
       const calculatedEndDate = calculateEndDateLocal(baselineDate, remainingWorkingDays);
       const calculatedProgress = groupTotalVal > 0 ? Math.min(100, (totalMeasuredVal / groupTotalVal) * 100) : 0;
 
@@ -1041,7 +1150,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
           ...activeGroup, 
           value: groupTotalVal,
           progress: calculatedProgress, 
-          endDate: format(calculatedEndDate, 'yyyy-MM-dd'),
+          endDate: isValid(calculatedEndDate) ? format(calculatedEndDate, 'yyyy-MM-dd') : todayStr,
           items: activeGroup.items.map(item => ({ 
               ...item, 
               measurements: item.measurements?.map(m => { const { _isCommitted, ...rest } = m; return rest; }) 
@@ -1107,14 +1216,14 @@ const TaskModal: React.FC<TaskModalProps> = ({
                     <div className="flex items-center gap-1.5">
                       <span className="text-gray-500">Inizio Attività:</span>
                       <span className="bg-white/80 dark:bg-gray-800/80 px-2 py-0.5 rounded border flex items-center gap-1">
-                        📅 {format(parseISO(activityStartDate), 'dd/MM/yyyy')}
+                        📅 {safeFormatDate(activityStartDate)}
                       </span>
                     </div>
                     {latestGlobalMeasureDate && (
                       <div className="flex items-center gap-1.5">
                         <span className="text-gray-500">Ultima Data Libretto:</span>
                         <span className="bg-indigo-100 dark:bg-indigo-900/80 text-indigo-800 dark:text-indigo-200 px-2 py-0.5 rounded border border-indigo-300 dark:border-indigo-700 flex items-center gap-1">
-                          ⏱️ {format(parseISO(latestGlobalMeasureDate), 'dd/MM/yyyy')}
+                          ⏱️ {safeFormatDate(latestGlobalMeasureDate)}
                         </span>
                       </div>
                     )}
@@ -1299,7 +1408,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                   {itemDeprs.map(d => {
                                     const rem = getDepreciationRemainingQty(d.id, item.articleCode);
                                     return (
-                                      <span key={d.id} className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-200 border border-amber-300 dark:border-amber-700 shadow-xs" title={`Det. ${d.determinaNumber} del ${format(parseISO(d.determinaDate), 'dd/MM/yyyy')} - ${d.reason}`}>
+                                      <span key={d.id} className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-200 border border-amber-300 dark:border-amber-700 shadow-xs" title={`Det. ${d.determinaNumber} del ${safeFormatDate(d.determinaDate)} - ${d.reason}`}>
                                         ⚖️ Det. RUP {d.determinaNumber}: € {numberFormatter.format(d.depreciatedUnitPrice)} [Disp: {numberFormatter.format(rem)} {item.unit}]
                                       </span>
                                     );
@@ -1358,7 +1467,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                   <div className="space-y-1">
                                       {item.variations?.map(v => (
                                           <div key={v.id} className="flex justify-between items-center text-xs bg-white dark:bg-gray-800 p-2 rounded-lg shadow-sm border border-orange-100 dark:border-orange-900">
-                                              <span><strong>{v.number}</strong> in data {format(parseISO(v.date), 'dd/MM/yyyy')}</span>
+                                              <span><strong>{v.number}</strong> in data {safeFormatDate(v.date)}</span>
                                               <span className={v.type === 'increase' ? 'text-green-600 font-bold' : 'text-red-600 font-bold'}>
                                                 {v.type === 'increase' ? '+' : '-'}{numberFormatter.format(v.quantity)} {item.unit}
                                               </span>
@@ -1420,26 +1529,29 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                     </tr>
                                   ) : (
                                     item.measurements.map((m, mIdx) => {
+                                      const rowId = m.id || `m_${item.articleCode}_${mIdx}`;
                                       const isNeg = m.quantity < 0; 
                                       const isCom = m._isCommitted ?? false;
                                       const isStornoRow = Boolean(m.reversesMeasurementId || (isNeg && m.note?.toUpperCase().startsWith('STORNO')));
                                       const isAlreadyReversed = Boolean(
                                         m.isReversed ||
                                         m.reversedById ||
-                                        (item.measurements || []).some(other => other.reversesMeasurementId === m.id)
+                                        (item.measurements || []).some(other => other.reversesMeasurementId === rowId)
                                       );
-                                      const isEditingThisRow = editingMeasurementId === m.id && editMeasureDraft !== null;
+                                      const isEditingThisRow = editingMeasurementId === rowId && editMeasureDraft !== null;
                                       const matchedBoq = boqMeasures.find(sm => sm.id === m.sourceBoqId);
 
                                       if (isEditingThisRow && editMeasureDraft) {
                                         const draftAnalyticQty = calculateAnalyticQuantity(editMeasureDraft);
+                                        const parsedDraftQty = parseItalianFloat(editMeasureDraft.quantity);
                                         const draftQtyNum = draftAnalyticQty !== null
                                           ? draftAnalyticQty
-                                          : (parseFloat(editMeasureDraft.quantity.replace(',', '.')) || 0);
+                                          : (!isNaN(parsedDraftQty) ? parsedDraftQty : 0);
                                         const signedDraftQty = isNeg ? -Math.abs(draftQtyNum) : draftQtyNum;
+                                        const rowUnitPrice = m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice;
 
                                         return (
-                                          <tr key={m.id || mIdx} className="bg-amber-50/70 dark:bg-amber-950/30 border-l-4 border-amber-500">
+                                          <tr key={`edit_${rowId}`} className="bg-amber-50/70 dark:bg-amber-950/30 border-l-4 border-amber-500">
                                             <td className="p-1 align-middle">
                                               <EuropeanDateInput
                                                 value={editMeasureDraft.date}
@@ -1454,17 +1566,25 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                                 type="text"
                                                 value={editMeasureDraft.note}
                                                 onChange={e => setEditMeasureDraft(prev => prev ? { ...prev, note: e.target.value } : null)}
+                                                onKeyDown={e => {
+                                                  if (e.key === 'Enter') handleCommitEditMeasurement(item, m, rowId);
+                                                  if (e.key === 'Escape') { setEditingMeasurementId(null); setEditMeasureDraft(null); }
+                                                }}
                                                 className="w-full p-1 text-xs bg-white dark:bg-gray-700 border border-amber-400 rounded text-gray-900 dark:text-white"
                                                 placeholder="Descrizione / nota..."
                                               />
                                             </td>
-                                            <td className="p-1 text-center text-gray-400">{item.unit}</td>
+                                            <td className="p-1 text-center text-gray-400"><span>{item.unit}</span></td>
                                             <td className="p-1 align-middle">
                                               <input
                                                 type="text"
                                                 disabled={isStornoRow}
                                                 value={editMeasureDraft.factor}
                                                 onChange={e => setEditMeasureDraft(prev => prev ? { ...prev, factor: e.target.value } : null)}
+                                                onKeyDown={e => {
+                                                  if (e.key === 'Enter') handleCommitEditMeasurement(item, m, rowId);
+                                                  if (e.key === 'Escape') { setEditingMeasurementId(null); setEditMeasureDraft(null); }
+                                                }}
                                                 className="w-full p-1 text-center text-xs bg-white dark:bg-gray-700 border border-amber-400 rounded disabled:opacity-50"
                                                 placeholder="-"
                                               />
@@ -1475,6 +1595,10 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                                 disabled={isStornoRow}
                                                 value={editMeasureDraft.length}
                                                 onChange={e => setEditMeasureDraft(prev => prev ? { ...prev, length: e.target.value } : null)}
+                                                onKeyDown={e => {
+                                                  if (e.key === 'Enter') handleCommitEditMeasurement(item, m, rowId);
+                                                  if (e.key === 'Escape') { setEditingMeasurementId(null); setEditMeasureDraft(null); }
+                                                }}
                                                 className="w-full p-1 text-center text-xs bg-white dark:bg-gray-700 border border-amber-400 rounded disabled:opacity-50"
                                                 placeholder="-"
                                               />
@@ -1485,6 +1609,10 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                                 disabled={isStornoRow}
                                                 value={editMeasureDraft.width}
                                                 onChange={e => setEditMeasureDraft(prev => prev ? { ...prev, width: e.target.value } : null)}
+                                                onKeyDown={e => {
+                                                  if (e.key === 'Enter') handleCommitEditMeasurement(item, m, rowId);
+                                                  if (e.key === 'Escape') { setEditingMeasurementId(null); setEditMeasureDraft(null); }
+                                                }}
                                                 className="w-full p-1 text-center text-xs bg-white dark:bg-gray-700 border border-amber-400 rounded disabled:opacity-50"
                                                 placeholder="-"
                                               />
@@ -1495,6 +1623,10 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                                 disabled={isStornoRow}
                                                 value={editMeasureDraft.height}
                                                 onChange={e => setEditMeasureDraft(prev => prev ? { ...prev, height: e.target.value } : null)}
+                                                onKeyDown={e => {
+                                                  if (e.key === 'Enter') handleCommitEditMeasurement(item, m, rowId);
+                                                  if (e.key === 'Escape') { setEditingMeasurementId(null); setEditMeasureDraft(null); }
+                                                }}
                                                 className="w-full p-1 text-center text-xs bg-white dark:bg-gray-700 border border-amber-400 rounded disabled:opacity-50"
                                                 placeholder="-"
                                               />
@@ -1502,24 +1634,38 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                             <td className="p-1 align-middle">
                                               <input
                                                 type="text"
-                                                disabled={isStornoRow || draftAnalyticQty !== null}
-                                                value={draftAnalyticQty !== null ? numberFormatter.format(draftAnalyticQty) : editMeasureDraft.quantity}
-                                                onChange={e => setEditMeasureDraft(prev => prev ? { ...prev, quantity: e.target.value } : null)}
+                                                disabled={isStornoRow}
+                                                value={draftAnalyticQty !== null ? String(draftAnalyticQty).replace('.', ',') : editMeasureDraft.quantity}
+                                                onChange={e => {
+                                                  const nextVal = e.target.value;
+                                                  setEditMeasureDraft(prev => prev ? {
+                                                    ...prev,
+                                                    factor: '',
+                                                    length: '',
+                                                    width: '',
+                                                    height: '',
+                                                    quantity: nextVal
+                                                  } : null);
+                                                }}
+                                                onKeyDown={e => {
+                                                  if (e.key === 'Enter') handleCommitEditMeasurement(item, m, rowId);
+                                                  if (e.key === 'Escape') { setEditingMeasurementId(null); setEditMeasureDraft(null); }
+                                                }}
                                                 className="w-full p-1 text-right font-bold text-xs bg-white dark:bg-gray-700 border border-amber-400 rounded disabled:opacity-60"
                                               />
                                             </td>
                                             <td className="px-2 py-1.5 text-right font-semibold text-indigo-600 dark:text-indigo-400">
-                                              {currencyFormatter.format(signedDraftQty * item.unitPrice)}
+                                              <span>{currencyFormatter.format(signedDraftQty * rowUnitPrice)}</span>
                                             </td>
                                             <td className="p-1 text-center align-middle">
                                               <div className="flex items-center justify-center gap-1">
                                                 <button
                                                   type="button"
-                                                  onClick={() => handleCommitEditMeasurement(item, m)}
+                                                  onClick={() => handleCommitEditMeasurement(item, m, rowId)}
                                                   className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-black"
                                                   title="Conferma modifica riga"
                                                 >
-                                                  ✓ Ok
+                                                  <span>✓ Ok</span>
                                                 </button>
                                                 <button
                                                   type="button"
@@ -1527,7 +1673,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                                   className="px-1.5 py-1 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 text-gray-700 dark:text-gray-200 rounded text-[10px] font-bold"
                                                   title="Annulla modifica"
                                                 >
-                                                  ✕
+                                                  <span>✕</span>
                                                 </button>
                                               </div>
                                             </td>
@@ -1536,8 +1682,8 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                       }
 
                                       return (
-                                          <tr key={m.id || mIdx} className={`bg-white dark:bg-gray-800 ${isNeg ? 'text-red-600 dark:text-red-400 bg-red-50/20 dark:bg-red-950/10' : isAlreadyReversed ? 'text-gray-400 dark:text-gray-500 line-through decoration-gray-300' : 'text-gray-800 dark:text-gray-200'}`}>
-                                            <td className="px-2 py-1.5 font-mono">{format(parseISO(m.date), 'dd/MM/yyyy')}</td>
+                                          <tr key={`view_${rowId}`} className={`bg-white dark:bg-gray-800 ${isNeg ? 'text-red-600 dark:text-red-400 bg-red-50/20 dark:bg-red-950/10' : isAlreadyReversed ? 'text-gray-400 dark:text-gray-500 line-through decoration-gray-300' : 'text-gray-800 dark:text-gray-200'}`}>
+                                            <td className="px-2 py-1.5 font-mono"><span>{safeFormatDate(m.date)}</span></td>
                                             <td className="px-2 py-1.5 truncate italic" title={m.note}>
                                               {matchedBoq && (
                                                 <span className="mr-1.5 px-1 py-0.2 bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-300 rounded font-mono font-bold text-[9px] not-italic">
@@ -1554,18 +1700,18 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                                   Da salvare
                                                 </span>
                                               )}
-                                              {m.note}
+                                              <span>{m.note}</span>
                                             </td>
-                                            <td className="px-1 py-1.5 text-center text-gray-400">{item.unit}</td>
-                                            <td className="px-1 py-1.5 text-center text-gray-400">{m.factor || '-'}</td>
-                                            <td className="px-1 py-1.5 text-center text-gray-400">{m.length || '-'}</td>
-                                            <td className="px-1 py-1.5 text-center text-gray-400">{m.width || '-'}</td>
-                                            <td className="px-1 py-1.5 text-center text-gray-400">{m.height || '-'}</td>
+                                            <td className="px-1 py-1.5 text-center text-gray-400"><span>{item.unit}</span></td>
+                                            <td className="px-1 py-1.5 text-center text-gray-400"><span>{m.factor || '-'}</span></td>
+                                            <td className="px-1 py-1.5 text-center text-gray-400"><span>{m.length || '-'}</span></td>
+                                            <td className="px-1 py-1.5 text-center text-gray-400"><span>{m.width || '-'}</span></td>
+                                            <td className="px-1 py-1.5 text-center text-gray-400"><span>{m.height || '-'}</span></td>
                                             <td className={`px-2 py-1.5 text-right font-bold ${isNeg ? 'text-red-600' : 'text-gray-900 dark:text-white'}`}>
-                                              {numberFormatter.format(m.quantity)}
+                                              <span>{numberFormatter.format(m.quantity)}</span>
                                             </td>
                                             <td className="px-2 py-1.5 text-right font-semibold text-indigo-600 dark:text-indigo-400">
-                                              {currencyFormatter.format(m.quantity * (m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice))}
+                                              <span>{currencyFormatter.format(m.quantity * (m.appliedUnitPrice !== undefined ? m.appliedUnitPrice : item.unitPrice))}</span>
                                             </td>
                                             <td className="px-1 py-1.5 text-center">
                                               {!(isViewOnly || isLocked) && (
@@ -1574,11 +1720,11 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                                     {!isCom && (
                                                       <button
                                                         type="button"
-                                                        onClick={() => handleStartEditMeasurement(item.articleCode, m)}
+                                                        onClick={() => handleStartEditMeasurement(item.articleCode, m, mIdx)}
                                                         className="text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 p-1 text-[10px] font-bold"
                                                         title="Modifica data o nota dello storno prima di salvare"
                                                       >
-                                                        ✏️
+                                                        <span>✏️</span>
                                                       </button>
                                                     )}
                                                     <button
@@ -1587,7 +1733,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                                       className="px-1.5 py-0.5 bg-red-100 hover:bg-red-200 dark:bg-red-900/50 dark:hover:bg-red-800 text-red-700 dark:text-red-200 rounded font-bold text-[10px] transition-colors whitespace-nowrap"
                                                       title="Annulla questo storno e ripristina l'icona Storno sulla voce originale"
                                                     >
-                                                      ↶ Annulla Storno
+                                                      <span>↶ Annulla Storno</span>
                                                     </button>
                                                   </div>
                                                 ) : !isNeg ? (
@@ -1603,22 +1749,26 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                                         className="text-orange-500 hover:text-orange-700 hover:bg-orange-50 dark:hover:bg-orange-950/40 px-1.5 py-0.5 rounded font-bold text-[10px] transition-colors"
                                                         title="Storna questa misurazione per azzerarla e ricaricarla corretta"
                                                       >
-                                                        ↩ Storno
+                                                        <span>↩ Storno</span>
                                                       </button>
                                                     )
                                                   ) : (
                                                     <div className="flex items-center justify-center gap-1">
                                                       <button
                                                         type="button"
-                                                        onClick={() => handleStartEditMeasurement(item.articleCode, m)}
+                                                        onClick={() => handleStartEditMeasurement(item.articleCode, m, mIdx)}
                                                         className="px-1.5 py-0.5 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900 text-indigo-600 dark:text-indigo-300 rounded font-bold text-[10px] transition-colors"
                                                         title="Modifica questa misurazione prima di salvare"
                                                       >
-                                                        ✏️ Modifica
+                                                        <span>✏️ Modifica</span>
                                                       </button>
                                                       <button
                                                         type="button"
                                                         onClick={() => {
+                                                          if (editingMeasurementId === rowId) {
+                                                            setEditingMeasurementId(null);
+                                                            setEditMeasureDraft(null);
+                                                          }
                                                           setActiveGroup(p => p ? ({
                                                             ...p,
                                                             items: p.items.map(i => i.articleCode === item.articleCode ? ({
@@ -1631,7 +1781,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                                         className="text-gray-400 hover:text-red-500 p-1"
                                                         title="Elimina riga non ancora salvata"
                                                       >
-                                                        🗑️
+                                                        <span>🗑️</span>
                                                       </button>
                                                     </div>
                                                   )
@@ -1656,10 +1806,10 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                         max={itemMaxDate}
                                         onChange={val => handleItemDateChange(item.articleCode, val)}
                                         className="w-full p-1 text-[11px] font-mono font-bold bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded text-indigo-700 dark:text-indigo-300 shadow-sm"
-                                        title={`Data consentita tra ${format(parseISO(itemMinDate), 'dd/MM/yyyy')} (inizio lavori/precedente misura) e oggi ${format(parseISO(itemMaxDate), 'dd/MM/yyyy')}`}
+                                        title={`Data consentita tra ${safeFormatDate(itemMinDate)} (inizio lavori/precedente misura) e oggi ${safeFormatDate(itemMaxDate)}`}
                                       />
-                                      <div className="text-[9px] text-gray-500 dark:text-gray-400 font-mono text-center truncate mt-0.5" title={`Valida da ${format(parseISO(itemMinDate), 'dd/MM/yyyy')} a ${format(parseISO(itemMaxDate), 'dd/MM/yyyy')}`}>
-                                        {format(parseISO(itemMinDate), 'dd/MM')} ➜ {format(parseISO(itemMaxDate), 'dd/MM')}
+                                      <div className="text-[9px] text-gray-500 dark:text-gray-400 font-mono text-center truncate mt-0.5" title={`Valida da ${safeFormatDate(itemMinDate)} a ${safeFormatDate(itemMaxDate)}`}>
+                                        {safeFormatDate(itemMinDate, 'dd/MM')} ➜ {safeFormatDate(itemMaxDate, 'dd/MM')}
                                       </div>
                                     </td>
 
