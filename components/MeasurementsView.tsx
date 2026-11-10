@@ -351,7 +351,7 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                                         <tbody>
                                             <tr className="bg-gray-100 dark:bg-gray-700/50">
                                                 <td className="p-3 font-bold font-mono text-indigo-800 dark:text-indigo-200 align-top">
-                                                    {`N.${item.originalIndex || (itemIndex + 1)} - ${item.articleCode}`}
+                                                    {`N. CM. ${item.originalIndex || (itemIndex + 1)} - ${item.articleCode}`}
                                                 </td>
                                                 <td className="p-3 text-gray-700 dark:text-gray-300 text-justify leading-relaxed align-top">{item.description}</td>
                                             </tr>

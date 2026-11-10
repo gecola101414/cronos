@@ -283,7 +283,7 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents }) => {
                     const filteredItems = group.items.filter(item => {
                       if (!searchTerm.trim()) return true;
                       const q = searchTerm.toLowerCase();
-                      const fullCode = `${item.originalIndex ? `n.${item.originalIndex} - ` : ''}${item.articleCode}`.toLowerCase();
+                      const fullCode = `${item.originalIndex ? `n. cm. ${item.originalIndex} - n.${item.originalIndex} - ` : ''}${item.articleCode}`.toLowerCase();
                       return fullCode.includes(q) || item.articleCode.toLowerCase().includes(q) || item.description.toLowerCase().includes(q);
                     });
 
@@ -336,8 +336,8 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents }) => {
                           <table className="w-full text-xs text-left text-gray-500 dark:text-gray-400 border-collapse">
                             <thead className="text-[11px] text-gray-700 dark:text-gray-300 uppercase bg-gray-50 dark:bg-gray-700/50 sticky top-0 z-10 border-b border-gray-200 dark:border-gray-600">
                               <tr>
-                                <th scope="col" className="px-3 py-2.5 w-10 text-center font-bold">N.</th>
-                                <th scope="col" className="px-3 py-2.5 w-32 font-bold">Codice Art.</th>
+                                <th scope="col" className="px-3 py-2.5 w-20 text-center font-bold">N. CM.</th>
+                                <th scope="col" className="px-3 py-2.5 w-36 font-bold">Codice Art.</th>
                                 <th scope="col" className="px-3 py-2.5 min-w-[220px] font-bold">Descrizione della Lavorazione / Fornitura</th>
                                 <th scope="col" className="px-2 py-2.5 w-14 text-center font-bold">U.M.</th>
                                 <th scope="col" className="px-3 py-2.5 w-24 text-right font-bold">P. Unitario</th>
@@ -363,11 +363,11 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents }) => {
 
                                   return (
                                     <tr key={item.articleCode || itemIndex} className="bg-white dark:bg-gray-800 hover:bg-indigo-50/30 dark:hover:bg-gray-700/60 transition-colors">
-                                      <td className="px-3 py-2.5 text-center text-xs text-gray-400 align-top font-bold">
-                                        {ordIdx}
+                                      <td className="px-3 py-2.5 text-center text-xs font-mono text-gray-500 dark:text-gray-300 align-top font-bold whitespace-nowrap">
+                                        {`N. CM. ${ordIdx}`}
                                       </td>
                                       <td className="px-3 py-2.5 font-mono font-bold text-indigo-700 dark:text-indigo-300 align-top text-xs whitespace-nowrap">
-                                        {`N.${ordIdx} - ${item.articleCode}`}
+                                        {`N. CM. ${ordIdx} - ${item.articleCode}`}
                                       </td>
                                       <td className="px-3 py-2.5 align-top text-justify text-gray-800 dark:text-gray-200 leading-relaxed">
                                         {item.description}

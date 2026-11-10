@@ -35,13 +35,13 @@ const round2 = (num: number): number => {
 
 const formatCodeWithComputoIndex = (articleCode: string, originalIndex?: number, accountingType?: 'measure' | 'body'): string => {
     if (accountingType === 'body' || !originalIndex || originalIndex <= 0) return articleCode;
-    return `N.${originalIndex} - ${articleCode}`;
+    return `N. CM. ${originalIndex} - ${articleCode}`;
 };
 
 const formatLibrettoRef = (progressiveIndex: number, librettoPage: number = 1, multiline: boolean = false): string => {
     return multiline
-        ? `N.Ord. ${progressiveIndex}\nPag. ${librettoPage}`
-        : `N.Ord. ${progressiveIndex} - Pag. ${librettoPage}`;
+        ? `N. LB. ${progressiveIndex}\nPag. ${librettoPage}`
+        : `N. LB. ${progressiveIndex} - Pag. ${librettoPage}`;
 };
 
 interface AccountingEntry {
@@ -718,7 +718,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
               const tempDoc = new jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
               if ((tempDoc as any).autoTable) {
                   const tempColumns = [
-                      { header: 'N. Ord.', dataKey: 'idx' },
+                      { header: 'N. LB.', dataKey: 'idx' },
                       { header: 'Data', dataKey: 'date' },
                       { header: 'Codice', dataKey: 'code' },
                       { header: 'Descrizione e Note', dataKey: 'desc' },
@@ -734,7 +734,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                       qty: { halign: 'right', cellWidth: 24 }
                   };
                   const tempRows = entries.map((e, i) => ({
-                      idx: i + 1,
+                      idx: `N. LB. ${i + 1}`,
                       date: format(parseISO(e.date), 'dd/MM/yyyy'),
                       code: formatCodeWithComputoIndex(e.articleCode, e.originalIndex, e.accountingType),
                       desc: `${e.description}${e.measurementNote ? '\nNote: ' + e.measurementNote : ''}`,
@@ -1116,7 +1116,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
 
       if (type === 'libretto') {
         columns = [
-          { header: 'N. Ord.', dataKey: 'idx' },
+          { header: 'N. LB.', dataKey: 'idx' },
           { header: 'Data', dataKey: 'date' },
           { header: 'Codice', dataKey: 'code' },
           { header: 'Descrizione e Note', dataKey: 'desc' },
@@ -1132,7 +1132,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           qty: { halign: 'right', cellWidth: 24 }
         };
         rows = filteredLibretto.filter(applyFilters).map(e => ({
-          idx: e.progressiveIndex,
+          idx: `N. LB. ${e.progressiveIndex}`,
           date: format(parseISO(e.date), 'dd/MM/yyyy'),
           code: formatCodeWithComputoIndex(e.articleCode, e.originalIndex, e.accountingType),
           desc: `${e.description}${e.measurementNote ? '\nNote: ' + e.measurementNote : ''}`,
@@ -1142,9 +1142,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
         }));
       } else if (type === 'register') {
         columns = [
-          { header: 'N. Reg.', dataKey: 'regIdx' },
+          { header: 'N. RG.', dataKey: 'regIdx' },
           { header: 'Data', dataKey: 'date' },
-          { header: 'Rif. (N.Ord. / Pag.)', dataKey: 'libIdx' },
+          { header: 'Rif. (N. LB. / Pag.)', dataKey: 'libIdx' },
           { header: 'Codice Articolo', dataKey: 'code' },
           { header: 'Designazione dei Lavori e delle Provviste', dataKey: 'desc' },
           { header: 'U.M.', dataKey: 'um' },
@@ -1154,11 +1154,11 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           { header: 'Totale Prog.', dataKey: 'prog' }
         ];
         columnStyles = {
-          regIdx: { halign: 'center', cellWidth: 14 },
+          regIdx: { halign: 'center', cellWidth: 16, fontStyle: 'bold' },
           date: { halign: 'center', cellWidth: 20 },
           libIdx: { halign: 'center', cellWidth: 24, fontStyle: 'bold' },
           code: { fontStyle: 'bold', cellWidth: 28 },
-          desc: { cellWidth: 83, halign: 'justify' },
+          desc: { cellWidth: 81, halign: 'justify' },
           um: { halign: 'center', cellWidth: 12 },
           qty: { halign: 'right', cellWidth: 20 },
           price: { halign: 'right', cellWidth: 24 },
@@ -1180,7 +1180,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             : '';
 
           return {
-            regIdx: e.registerOrderIndex,
+            regIdx: `N. RG. ${e.registerOrderIndex}`,
             date: format(parseISO(e.date), 'dd/MM/yyyy'),
             libIdx: formatLibrettoRef(e.progressiveIndex, e.librettoPage, true),
             code: formatCodeWithComputoIndex(e.articleCode, e.originalIndex, e.accountingType),
@@ -1195,7 +1195,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
         });
       } else if (type === 'summary') {
         columns = [
-          { header: 'N. / Rif. (N.Ord.-Pag.)', dataKey: 'idx' },
+          { header: 'N. SM. / Rif. (N. LB.-Pag.)', dataKey: 'idx' },
           { header: 'Data / WBS', dataKey: 'date' },
           { header: 'Codice Articolo / Designazione Lavori', dataKey: 'desc' },
           { header: 'U.M.', dataKey: 'um' },
@@ -1204,9 +1204,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           { header: 'Importo Tot.', dataKey: 'amount' }
         ];
         columnStyles = {
-          idx: { halign: 'center', cellWidth: 22 },
+          idx: { halign: 'center', cellWidth: 24, fontStyle: 'bold' },
           date: { halign: 'center', cellWidth: 22 },
-          desc: { cellWidth: 68, halign: 'justify' },
+          desc: { cellWidth: 66, halign: 'justify' },
           um: { halign: 'center', cellWidth: 12 },
           qty: { halign: 'right', cellWidth: 18 },
           price: { halign: 'right', cellWidth: 20 },
@@ -1225,7 +1225,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           if (summaryMode === 'analytical') {
             // Riga Intestazione Articolo (senza dati ridondanti a destra, riportati nelle righe sottostanti e nel SOMMANO)
             rows.push({
-              idx: `${artIdx + 1}`,
+              idx: `N. SM. ${artIdx + 1}`,
               date: item.wbsName,
               desc: `${formattedItemCode}\n${item.description}`,
               um: '',
@@ -1275,7 +1275,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             runningSum = round2(runningSum + item.totalAmount);
             const libRefs = allLines.map(l => formatLibrettoRef(l.progressiveIndex, l.librettoPage, false)).join(', ');
             rows.push({
-              idx: `${artIdx + 1}`,
+              idx: `N. SM. ${artIdx + 1}`,
               date: libRefs,
               desc: `[${item.wbsName}] ${formattedItemCode} - ${item.description}`,
               um: item.unit,
@@ -1637,12 +1637,12 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                     <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-xs border border-gray-200 dark:border-gray-700 flex-grow overflow-auto min-h-0">
                           <table className="w-full text-xs text-left border-collapse">
                             <thead className="bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 font-bold border-b dark:border-gray-600 sticky top-0 z-10 shadow-xs">
-                                <tr><th className="p-2.5 w-20 text-center border-r dark:border-gray-600 align-top text-indigo-600 dark:text-indigo-400">N. Ord.</th><th className="p-2.5 w-24 border-r dark:border-gray-600 align-top">Data</th><th className="p-2.5 w-32 border-r dark:border-gray-600 align-top">WBS</th><th className="p-2.5 w-32 border-r dark:border-gray-600 align-top">Codice</th><th className="p-2.5 border-r dark:border-gray-600 align-top">Descrizione & Note</th><th className="p-2.5 w-12 text-center border-r dark:border-gray-600 bg-gray-50 dark:bg-gray-700 align-top">U.M.</th><th className="p-2.5 w-24 text-right bg-indigo-50 dark:bg-indigo-900/30 align-top">Quantità</th></tr>
+                                <tr><th className="p-2.5 w-24 text-center border-r dark:border-gray-600 align-top text-indigo-600 dark:text-indigo-400">N. LB.</th><th className="p-2.5 w-24 border-r dark:border-gray-600 align-top">Data</th><th className="p-2.5 w-32 border-r dark:border-gray-600 align-top">WBS</th><th className="p-2.5 w-36 border-r dark:border-gray-600 align-top">Codice</th><th className="p-2.5 border-r dark:border-gray-600 align-top">Descrizione & Note</th><th className="p-2.5 w-12 text-center border-r dark:border-gray-600 bg-gray-50 dark:bg-gray-700 align-top">U.M.</th><th className="p-2.5 w-24 text-right bg-indigo-50 dark:bg-indigo-900/30 align-top">Quantità</th></tr>
                             </thead>
                             <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
                                 {filteredLibretto.filter(applyFilters).map((entry) => (
                                     <tr key={entry.id} className={`hover:bg-gray-50 dark:hover:bg-gray-700/50 ${entry.accountingType === 'body' ? 'bg-purple-50/50' : ''}`}>
-                                        <td className="p-2.5 text-center font-bold text-indigo-700 dark:text-indigo-400 border-r dark:border-gray-600 bg-gray-50/50 dark:bg-gray-800 align-top">{entry.progressiveIndex}</td>
+                                        <td className="p-2.5 text-center font-mono font-bold text-indigo-700 dark:text-indigo-400 border-r dark:border-gray-600 bg-gray-50/50 dark:bg-gray-800 align-top whitespace-nowrap">N. LB. {entry.progressiveIndex}</td>
                                         <td className="p-2.5 border-r dark:border-gray-600 align-top">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
                                         <td className="p-2.5 border-r dark:border-gray-600 align-top text-xs uppercase font-semibold">{entry.groupName}</td>
                                         <td className="p-2.5 border-r dark:border-gray-600 align-top font-mono text-xs font-bold text-indigo-700 dark:text-indigo-300">
@@ -1698,10 +1698,10 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                         <table className="w-full text-xs text-left text-gray-700 dark:text-gray-200 border-collapse">
                             <thead className="text-[11px] text-gray-600 dark:text-gray-300 uppercase bg-gray-100 dark:bg-gray-700 sticky top-0 z-10 border-b border-gray-300 dark:border-gray-600">
                                 <tr>
-                                    <th className="px-2 py-2 w-16 text-center border-r border-gray-200 dark:border-gray-600">N. Ord.</th>
+                                    <th className="px-2 py-2 w-24 text-center border-r border-gray-200 dark:border-gray-600">N. RG.</th>
                                     <th className="px-2 py-2 w-24 text-center border-r border-gray-200 dark:border-gray-600">Data</th>
-                                    <th className="px-2.5 py-2 w-32 text-center border-r border-gray-200 dark:border-gray-600">Rif. (N.Ord. / Pag.)</th>
-                                    <th className="px-2.5 py-2 w-32 border-r border-gray-200 dark:border-gray-600">Codice Art.</th>
+                                    <th className="px-2.5 py-2 w-36 text-center border-r border-gray-200 dark:border-gray-600">Rif. (N. LB. / Pag.)</th>
+                                    <th className="px-2.5 py-2 w-36 border-r border-gray-200 dark:border-gray-600">Codice Art.</th>
                                     <th className="px-3 py-2 border-r border-gray-200 dark:border-gray-600">Designazione dei Lavori e delle Provviste</th>
                                     <th className="px-2 py-2 w-12 text-center border-r border-gray-200 dark:border-gray-600">U.M.</th>
                                     <th className="px-2.5 py-2 text-right w-24 border-r border-gray-200 dark:border-gray-600 font-bold">Quantità</th>
@@ -1720,8 +1720,8 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                             key={entry.id} 
                                             className="bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700/40 text-gray-700 dark:text-gray-300 transition-colors"
                                         >
-                                            <td className="px-2 py-2 text-center font-bold text-gray-700 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
-                                                {entry.registerOrderIndex}
+                                            <td className="px-2 py-2 text-center font-mono font-bold text-gray-700 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top whitespace-nowrap">
+                                                N. RG. {entry.registerOrderIndex}
                                             </td>
                                             <td className="px-2 py-2 text-center font-mono text-[11px] text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
                                                 {format(parseISO(entry.date), 'dd/MM/yyyy')}
@@ -1924,10 +1924,10 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                 <table className="w-full text-xs text-left text-gray-700 dark:text-gray-200 border-collapse">
                                                     <thead className="text-[10px] text-gray-600 dark:text-gray-300 uppercase bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
                                                         <tr>
-                                                            <th className="px-2 py-1.5 w-12 text-center border-r border-gray-200 dark:border-gray-700">N.</th>
-                                                            <th className="px-2.5 py-1.5 w-32 border-r border-gray-200 dark:border-gray-700">Articolo Elenco</th>
+                                                            <th className="px-2 py-1.5 w-20 text-center border-r border-gray-200 dark:border-gray-700">N. SM.</th>
+                                                            <th className="px-2.5 py-1.5 w-36 border-r border-gray-200 dark:border-gray-700">Articolo Elenco</th>
                                                             <th className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-700">Designazione dei Lavori</th>
-                                                            <th className="px-2.5 py-1.5 w-48 border-r border-gray-200 dark:border-gray-700">Rif. Misure (N.Ord. / Pag.)</th>
+                                                            <th className="px-2.5 py-1.5 w-48 border-r border-gray-200 dark:border-gray-700">Rif. Misure (N. LB. / Pag.)</th>
                                                             <th className="px-2 py-1.5 w-12 text-center border-r border-gray-200 dark:border-gray-700">U.M.</th>
                                                             <th className="px-2.5 py-1.5 text-right w-24 border-r border-gray-200 dark:border-gray-700">Q.tà Contab.</th>
                                                             <th className="px-2.5 py-1.5 text-right w-24 border-r border-gray-200 dark:border-gray-700">Prezzo Unit.</th>
@@ -1945,8 +1945,8 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                             return (
                                                                 <React.Fragment key={item.articleCode}>
                                                                     <tr className="bg-white dark:bg-gray-800 hover:bg-gray-50/80 dark:hover:bg-gray-700/30 transition-colors">
-                                                                        <td className="px-2 py-2 text-center font-bold text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
-                                                                            {idx}
+                                                                        <td className="px-2 py-2 text-center font-mono font-bold text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top whitespace-nowrap">
+                                                                            N. SM. {idx}
                                                                         </td>
                                                                         <td className="px-2.5 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300 border-r border-gray-200 dark:border-gray-700 align-top">
                                                                             <div>{formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType)}</div>
@@ -2077,10 +2077,10 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                             <table className="w-full text-xs text-left text-gray-700 dark:text-gray-200 border-collapse">
                                 <thead className="text-[11px] text-gray-600 dark:text-gray-300 uppercase bg-gray-100 dark:bg-gray-700 sticky top-0 z-10 border-b border-gray-300 dark:border-gray-600">
                                     <tr>
-                                        <th className="px-2.5 py-2.5 w-14 text-center border-r border-gray-200 dark:border-gray-600">N.</th>
-                                        <th className="px-3 py-2.5 w-36 border-r border-gray-200 dark:border-gray-600">Articolo di Elenco</th>
+                                        <th className="px-2.5 py-2.5 w-20 text-center border-r border-gray-200 dark:border-gray-600">N. SM.</th>
+                                        <th className="px-3 py-2.5 w-40 border-r border-gray-200 dark:border-gray-600">Articolo di Elenco</th>
                                         <th className="px-3 py-2.5 border-r border-gray-200 dark:border-gray-600">Designazione dei Lavori</th>
-                                        <th className="px-3 py-2.5 w-56 border-r border-gray-200 dark:border-gray-600">Rif. Misure (N.Ord. / Pag.)</th>
+                                        <th className="px-3 py-2.5 w-56 border-r border-gray-200 dark:border-gray-600">Rif. Misure (N. LB. / Pag.)</th>
                                         <th className="px-2 py-2.5 w-14 text-center border-r border-gray-200 dark:border-gray-600">U.M.</th>
                                         <th className="px-3 py-2.5 text-right w-28 border-r border-gray-200 dark:border-gray-600 font-bold">Quantità Tot.</th>
                                         <th className="px-3 py-2.5 text-right w-28 border-r border-gray-200 dark:border-gray-600">Prezzo Unit.</th>
@@ -2095,8 +2095,8 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                         return (
                                             <React.Fragment key={item.articleCode}>
                                                 <tr className="bg-gray-50/90 dark:bg-gray-700/40 border-t-2 border-gray-300 dark:border-gray-600">
-                                                    <td className="px-2.5 py-2 text-center font-bold text-gray-700 dark:text-gray-200 border-r border-gray-200 dark:border-gray-700 align-top">
-                                                        {idx + 1}
+                                                    <td className="px-2.5 py-2 text-center font-mono font-bold text-gray-700 dark:text-gray-200 border-r border-gray-200 dark:border-gray-700 align-top whitespace-nowrap">
+                                                        N. SM. {idx + 1}
                                                     </td>
                                                     <td className="px-3 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300 border-r border-gray-200 dark:border-gray-700 align-top">
                                                         <div>{formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType)}</div>

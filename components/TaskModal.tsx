@@ -1394,13 +1394,13 @@ const TaskModal: React.FC<TaskModalProps> = ({
                           {/* Intestazione voce singola */}
                           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-gray-100 dark:border-gray-700">
                             <div className="flex items-start gap-3 flex-1 min-w-0">
-                              <span className="text-base font-black px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 rounded-lg border border-indigo-200 dark:border-indigo-800">
-                                #{item.originalIndex || (index + 1)}
+                              <span className="text-xs font-black px-2.5 py-1 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 rounded-lg border border-indigo-200 dark:border-indigo-800 whitespace-nowrap">
+                                N. CM. {item.originalIndex || (index + 1)}
                               </span>
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 flex-wrap">
                                   <span className="text-xs font-mono font-black text-gray-900 dark:text-white uppercase bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded">
-                                    {`N.${item.originalIndex || (index + 1)} - ${item.articleCode}`}
+                                    {`N. CM. ${item.originalIndex || (index + 1)} - ${item.articleCode}`}
                                   </span>
                                   <span className="text-xs text-gray-500 font-bold">
                                     Tariffa: <strong className="text-indigo-600 dark:text-indigo-400">{currencyFormatter.format(item.unitPrice)}</strong> / {item.unit}

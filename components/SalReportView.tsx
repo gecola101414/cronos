@@ -28,7 +28,7 @@ const createMeasureRows = (group: WorkGroup, startProgressive: number) => {
 
   group.items.forEach(item => {
       if (!item.measurements || item.measurements.length === 0) return;
-      const formattedCode = item.originalIndex ? `N.${item.originalIndex} - ${item.articleCode}` : item.articleCode;
+      const formattedCode = item.originalIndex ? `N. CM. ${item.originalIndex} - ${item.articleCode}` : item.articleCode;
 
       // Header Articolo
       rows.push(
@@ -46,7 +46,7 @@ const createMeasureRows = (group: WorkGroup, startProgressive: number) => {
           itemTotalQty += m.quantity;
           rows.push(
               <tr key={`${item.articleCode}-${idx}`} className="border-b border-gray-200 dark:border-gray-600 print-row hover:bg-gray-50">
-                  <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center font-bold text-indigo-700">{currentProgressive}</td>
+                  <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center font-bold text-indigo-700">N. LB. {currentProgressive}</td>
                   <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center">{format(parseISO(m.date), 'dd/MM/yy')}</td>
                   <td className="p-1 border-r border-gray-300 dark:border-gray-600 px-3 italic text-gray-800 dark:text-gray-300 text-justify break-words">{m.note || '-'}</td>
                   <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center">{m.factor || ''}</td>
@@ -110,7 +110,7 @@ const createBodyGroupRows = (group: WorkGroup, startProgressive: number) => {
 
         rows.push(
             <tr key={`body-row-${group.id}-${date}`} className="border-b border-gray-200 dark:border-gray-600 print-row hover:bg-purple-50 dark:hover:bg-purple-900/20">
-                <td className="p-2 border-r border-gray-300 dark:border-gray-600 text-center font-bold text-purple-900 dark:text-purple-400">{currentProgressive}</td>
+                <td className="p-2 border-r border-gray-300 dark:border-gray-600 text-center font-bold text-purple-900 dark:text-purple-400">N. LB. {currentProgressive}</td>
                 <td className="p-2 border-r border-gray-300 dark:border-gray-600 text-center font-medium">{format(parseISO(date), 'dd/MM/yy')}</td>
                 
                 <td className="p-2 border-r border-gray-300 dark:border-gray-600 font-bold text-gray-900 dark:text-gray-200">
@@ -179,7 +179,7 @@ const SalReportView: React.FC<{ documents: ProjectDocument[] }> = ({ documents }
       <table className="w-full text-[12px] border-collapse border border-black dark:border-gray-600 print-table table-fixed shadow-sm">
         <thead>
           <tr className="bg-gray-200 text-black dark:bg-gray-950 dark:text-white">
-            <th className="border-r border-black p-2 w-[7%] text-center font-bold">Num. ord.</th>
+            <th className="border-r border-black p-2 w-[9%] text-center font-bold">N. LB.</th>
             <th className="border-r border-black p-2 w-[9%] text-center font-bold">Data</th>
             <th className="border-r border-black p-2 w-[40%] text-left pl-4 font-bold">Descrizione Lavori</th>
             <th className="border-r border-black p-2 w-[6%] text-center font-bold">Fatt.</th>
