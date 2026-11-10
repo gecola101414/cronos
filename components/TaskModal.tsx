@@ -1419,7 +1419,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                     </span>
                                   ))}
                                 </div>
-                                <p className="text-xs text-gray-700 dark:text-gray-300 mt-1 leading-snug line-clamp-2">
+                                <p className="text-xs text-gray-700 dark:text-gray-300 mt-1 leading-relaxed text-justify">
                                   {item.description}
                                 </p>
                               </div>
@@ -1684,7 +1684,7 @@ const TaskModal: React.FC<TaskModalProps> = ({
                                       return (
                                           <tr key={`view_${rowId}`} className={`bg-white dark:bg-gray-800 ${isNeg ? 'text-red-600 dark:text-red-400 bg-red-50/20 dark:bg-red-950/10' : isAlreadyReversed ? 'text-gray-400 dark:text-gray-500 line-through decoration-gray-300' : 'text-gray-800 dark:text-gray-200'}`}>
                                             <td className="px-2 py-1.5 font-mono"><span>{safeFormatDate(m.date)}</span></td>
-                                            <td className="px-2 py-1.5 truncate italic" title={m.note}>
+                                            <td className="px-2 py-1.5 text-justify break-words italic" title={m.note}>
                                               {matchedBoq && (
                                                 <span className="mr-1.5 px-1 py-0.2 bg-indigo-100 dark:bg-indigo-900 text-indigo-700 dark:text-indigo-300 rounded font-mono font-bold text-[9px] not-italic">
                                                   #{matchedBoq.index}

@@ -345,17 +345,15 @@ const MeasurementsView: React.FC<MeasurementsViewProps> = ({ documents, projectN
                                 <div key={itemIndex} className="border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden break-inside-avoid">
                                     <table className="w-full text-sm table-fixed">
                                         <colgroup>
-                                            <col className="w-[18%]" />
-                                            <col className="w-[37%]" />
-                                            <col className="w-[45%]" />
+                                            <col className="w-[20%]" />
+                                            <col className="w-[80%]" />
                                         </colgroup>
                                         <tbody>
                                             <tr className="bg-gray-100 dark:bg-gray-700/50">
                                                 <td className="p-3 font-bold font-mono text-indigo-800 dark:text-indigo-200 align-top">
                                                     {`N.${item.originalIndex || (itemIndex + 1)} - ${item.articleCode}`}
                                                 </td>
-                                                <td className="p-3 text-gray-600 dark:text-gray-400 text-justify align-top">{item.description}</td>
-                                                <td></td>
+                                                <td className="p-3 text-gray-700 dark:text-gray-300 text-justify leading-relaxed align-top">{item.description}</td>
                                             </tr>
                                         </tbody>
                                     </table>

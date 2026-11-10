@@ -33,7 +33,7 @@ const createMeasureRows = (group: WorkGroup, startProgressive: number) => {
       // Header Articolo
       rows.push(
           <tr key={`item-header-${item.articleCode}`} className="bg-gray-50 dark:bg-gray-800/30 border-b dark:border-gray-700 print-row">
-              <td colSpan={8} className="p-1 pl-6 font-semibold text-indigo-900 dark:text-indigo-300">
+              <td colSpan={8} className="p-1 pl-6 pr-3 font-semibold text-indigo-900 dark:text-indigo-300 text-justify leading-relaxed">
                   {formattedCode} - {item.description} <span className="font-normal text-gray-600">({item.unit})</span>
               </td>
           </tr>
@@ -48,7 +48,7 @@ const createMeasureRows = (group: WorkGroup, startProgressive: number) => {
               <tr key={`${item.articleCode}-${idx}`} className="border-b border-gray-200 dark:border-gray-600 print-row hover:bg-gray-50">
                   <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center font-bold text-indigo-700">{currentProgressive}</td>
                   <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center">{format(parseISO(m.date), 'dd/MM/yy')}</td>
-                  <td className="p-1 border-r border-gray-300 dark:border-gray-600 pl-4 italic text-gray-800 dark:text-gray-300 truncate max-w-[250px]">{m.note || '-'}</td>
+                  <td className="p-1 border-r border-gray-300 dark:border-gray-600 px-3 italic text-gray-800 dark:text-gray-300 text-justify break-words">{m.note || '-'}</td>
                   <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center">{m.factor || ''}</td>
                   <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center">{m.length || ''}</td>
                   <td className="p-1 border-r border-gray-300 dark:border-gray-600 text-center">{m.width || ''}</td>
