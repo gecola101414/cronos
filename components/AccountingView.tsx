@@ -90,6 +90,16 @@ interface SummaryMeasurementLine {
     amount: number;
 }
 
+interface SummarySalBreakdown {
+    salNumber: number;
+    salLabel: string;
+    salDate?: string;
+    prevSalDate?: string;
+    quantity: number;
+    amount: number;
+    count: number;
+}
+
 interface SummaryEntry {
     articleCode: string;
     originalIndex?: number;
@@ -111,6 +121,7 @@ interface SummaryEntry {
     previousLines: SummaryMeasurementLine[];
     currentLines: SummaryMeasurementLine[];
     allLines: SummaryMeasurementLine[];
+    salBreakdown: SummarySalBreakdown[];
     residualQuantity?: number;
     residualAmount?: number;
 }
@@ -227,8 +238,15 @@ const AccountingView: React.FC<AccountingViewProps> = ({
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
   const [summaryMode, setSummaryMode] = useState<'analytical' | 'synthetic'>('analytical');
   const [summaryGrouping, setSummaryGrouping] = useState<'grouped_by_wbs' | 'flat'>('grouped_by_wbs');
+  const [summarySalScope, setSummarySalScope] = useState<'cumulative' | 'current_sal'>('cumulative');
   const [deprModalItemSearch, setDeprModalItemSearch] = useState('');
   const [deprModalCategoryFilter, setDeprModalCategoryFilter] = useState('all');
+
+  // Stato per il Modale di Emissione / Modifica Data SAL con Calendario di Supporto
+  const [isSalModalOpen, setIsSalModalOpen] = useState(false);
+  const [editingSalModalId, setEditingSalModalId] = useState<string | null>(null);
+  const [salModalDate, setSalModalDate] = useState<string>(format(new Date(), 'yyyy-MM-dd'));
+  const [salModalError, setSalModalError] = useState<string | null>(null);
 
   // Stato per la gestione dei Deprezzamenti Prezzo (Determina del RUP)
   const [isDeprModalOpen, setIsDeprModalOpen] = useState(false);
@@ -718,9 +736,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
               const tempDoc = new jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
               if ((tempDoc as any).autoTable) {
                   const tempColumns = [
-                      { header: 'N. LB.', dataKey: 'idx' },
+                      { header: 'N. ord. (LB)', dataKey: 'idx' },
                       { header: 'Data', dataKey: 'date' },
-                      { header: 'Codice', dataKey: 'code' },
+                      { header: 'WBS\nN. ord. (CM) - Codice', dataKey: 'code' },
                       { header: 'Descrizione e Note', dataKey: 'desc' },
                       { header: 'U.M.', dataKey: 'um' },
                       { header: 'Quantità', dataKey: 'qty' }
@@ -728,19 +746,24 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                   const tempColumnStyles = {
                       idx: { halign: 'center', cellWidth: 18, fontStyle: 'bold' },
                       date: { halign: 'center', cellWidth: 22 },
-                      code: { fontStyle: 'bold', cellWidth: 28 },
-                      desc: { cellWidth: 80, halign: 'justify' },
+                      code: { fontStyle: 'bold', cellWidth: 36 },
+                      desc: { cellWidth: 72, halign: 'justify' },
                       um: { halign: 'center', cellWidth: 14 },
                       qty: { halign: 'right', cellWidth: 24 }
                   };
-                  const tempRows = entries.map((e, i) => ({
-                      idx: `N. LB. ${i + 1}`,
-                      date: format(parseISO(e.date), 'dd/MM/yyyy'),
-                      code: formatCodeWithComputoIndex(e.articleCode, e.originalIndex, e.accountingType),
-                      desc: `${e.description}${e.measurementNote ? '\nNote: ' + e.measurementNote : ''}`,
-                      um: e.unit,
-                      qty: e.accountingType === 'body' ? percentFormatter.format(e.quantity) : numberFormatter.format(e.quantity)
-                  }));
+                  const tempRows = entries.map((e, i) => {
+                      const cleanCode = (e.accountingType !== 'body' && e.originalIndex && e.originalIndex > 0)
+                          ? `${e.originalIndex} - ${e.articleCode}`
+                          : e.articleCode;
+                      return {
+                          idx: `${i + 1}`,
+                          date: format(parseISO(e.date), 'dd/MM/yyyy'),
+                          code: `${e.groupName}\n${cleanCode}`,
+                          desc: `${e.description}${e.measurementNote ? '\nNote: ' + e.measurementNote : ''}`,
+                          um: e.unit,
+                          qty: e.accountingType === 'body' ? percentFormatter.format(e.quantity) : numberFormatter.format(e.quantity)
+                      };
+                  });
                   (tempDoc as any).autoTable({
                       columns: tempColumns,
                       body: tempRows,
@@ -907,6 +930,70 @@ const AccountingView: React.FC<AccountingViewProps> = ({
         });
   }, [accountingRegistry, salReferenceDate, boqTotals]);
 
+  // Informazioni cronologiche sulle misure registrate a Libretto (Prima misura, Ultima misura, Date distinte)
+  const measurementDatesMeta = useMemo(() => {
+      if (accountingRegistry.length === 0) {
+          return {
+              earliestDate: null as string | null,
+              latestDate: null as string | null,
+              totalMeasurements: 0,
+              byDate: [] as { date: string; count: number; totalDebit: number }[]
+          };
+      }
+      const dateMap = new Map<string, { count: number; totalDebit: number }>();
+      let minD = accountingRegistry[0].date;
+      let maxD = accountingRegistry[0].date;
+      accountingRegistry.forEach(e => {
+          if (e.date.localeCompare(minD) < 0) minD = e.date;
+          if (e.date.localeCompare(maxD) > 0) maxD = e.date;
+          const cur = dateMap.get(e.date) || { count: 0, totalDebit: 0 };
+          cur.count += 1;
+          cur.totalDebit = round2(cur.totalDebit + e.debit);
+          dateMap.set(e.date, cur);
+      });
+      const byDate = Array.from(dateMap.entries())
+          .map(([date, info]) => ({ date, count: info.count, totalDebit: info.totalDebit }))
+          .sort((a, b) => a.date.localeCompare(b.date));
+      return {
+          earliestDate: minD,
+          latestDate: maxD,
+          totalMeasurements: accountingRegistry.length,
+          byDate
+      };
+  }, [accountingRegistry]);
+
+  // Funzione che determina in quale SAL ricade una determinata data di misura:
+  // - SAL N. 1: tutte le misure con data <= Data SAL 1
+  // - SAL N. k (k > 1): tutte le misure con data > Data SAL (k-1) e <= Data SAL k
+  const getSalAssignmentForDate = useMemo(() => {
+      const sortedAsc = [...sals].sort((a, b) => a.number - b.number);
+      return (dateStr: string): { salNumber: number; salLabel: string; salDate?: string; prevSalDate?: string; isOutOfBounds: boolean } => {
+          if (sortedAsc.length === 0) {
+              return { salNumber: 1, salLabel: 'SAL N. 1', isOutOfBounds: false };
+          }
+          for (let i = 0; i < sortedAsc.length; i++) {
+              const s = sortedAsc[i];
+              const prevS = i > 0 ? sortedAsc[i - 1] : undefined;
+              if (dateStr.localeCompare(s.date) <= 0) {
+                  return {
+                      salNumber: s.number,
+                      salLabel: `SAL N. ${s.number}`,
+                      salDate: s.date,
+                      prevSalDate: prevS?.date,
+                      isOutOfBounds: false
+                  };
+              }
+          }
+          const lastSal = sortedAsc[sortedAsc.length - 1];
+          return {
+              salNumber: lastSal.number + 1,
+              salLabel: `Oltre SAL N. ${lastSal.number}`,
+              prevSalDate: lastSal.date,
+              isOutOfBounds: true
+          };
+      };
+  }, [sals]);
+
   const accountingSummary = useMemo(() => {
       const summaryMap = new Map<string, SummaryEntry>();
       const sortedSalsAsc = [...sals].sort((a, b) => a.number - b.number);
@@ -915,7 +1002,13 @@ const AccountingView: React.FC<AccountingViewProps> = ({
 
       // Popoliamo esclusivamente le voci effettivamente misurate e contabilizzate a libretto fino a salReferenceDate
       accountingRegistry
-        .filter(e => e.date.localeCompare(salReferenceDate) <= 0)
+        .filter(e => {
+            if (e.date.localeCompare(salReferenceDate) > 0) return false;
+            if (summarySalScope === 'current_sal' && activeSalId && previousSalObject) {
+                return e.date.localeCompare(previousSalDate) > 0;
+            }
+            return true;
+        })
         .forEach(entry => {
           if (!summaryMap.has(entry.articleCode)) {
               summaryMap.set(entry.articleCode, { 
@@ -939,30 +1032,15 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                   previousLines: [],
                   currentLines: [],
                   allLines: [],
+                  salBreakdown: [],
                   residualQuantity: 0,
                   residualAmount: 0
               });
           }
           const current = summaryMap.get(entry.articleCode)!;
           const isCurrentPeriod = entry.date.localeCompare(previousSalDate) > 0;
-          
-          let salLabel: string | undefined = undefined;
-          let isPreviousSal = false;
-
-          if (currentSalNumber === 1) {
-              salLabel = undefined;
-              isPreviousSal = false;
-          } else {
-              if (!isCurrentPeriod) {
-                  const matchingSal = sortedSalsAsc.find(s => entry.date.localeCompare(s.date) <= 0);
-                  const salNum = matchingSal?.number || 1;
-                  salLabel = `SAL ${salNum}`;
-                  isPreviousSal = true;
-              } else {
-                  salLabel = undefined;
-                  isPreviousSal = false;
-              }
-          }
+          const salAssign = getSalAssignmentForDate(entry.date);
+          const isPreviousSal = !isCurrentPeriod && currentSalNumber > 1;
 
           const lineAmount = round2(entry.quantity * entry.unitPrice);
           const lineItem: SummaryMeasurementLine = {
@@ -970,8 +1048,8 @@ const AccountingView: React.FC<AccountingViewProps> = ({
               progressiveIndex: entry.progressiveIndex,
               librettoPage: entry.librettoPage,
               date: entry.date,
-              salNumber: isPreviousSal ? sortedSalsAsc.find(s => entry.date.localeCompare(s.date) <= 0)?.number : undefined,
-              salLabel,
+              salNumber: salAssign.salNumber,
+              salLabel: salAssign.salLabel,
               isPreviousSal,
               measurementNote: entry.measurementNote || entry.description,
               factor: entry.factor,
@@ -1003,10 +1081,35 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           const progressPercent = estimated > 0 ? (item.totalQuantity / estimated) * 100 : 0;
           const residualQuantity = Math.max(0, Math.round((estimated - item.totalQuantity) * 1000) / 1000);
           const residualAmount = Math.max(0, Math.round((estimated * item.unitPrice - item.totalAmount) * 100) / 100);
+
+          // Calcolo ripartizione della voce sui singoli SAL
+          const breakdownMap = new Map<number, SummarySalBreakdown>();
+          item.allLines.forEach(l => {
+              const sNum = l.salNumber || 1;
+              const sObj = sortedSalsAsc.find(s => s.number === sNum);
+              const sIdx = sortedSalsAsc.findIndex(s => s.number === sNum);
+              const prevSObj = sIdx > 0 ? sortedSalsAsc[sIdx - 1] : undefined;
+              const existing = breakdownMap.get(sNum) || {
+                  salNumber: sNum,
+                  salLabel: l.salLabel || `SAL N. ${sNum}`,
+                  salDate: sObj?.date,
+                  prevSalDate: prevSObj?.date,
+                  quantity: 0,
+                  amount: 0,
+                  count: 0
+              };
+              existing.quantity = Math.round((existing.quantity + l.quantity) * 1000) / 1000;
+              existing.amount = round2(existing.amount + l.amount);
+              existing.count += 1;
+              breakdownMap.set(sNum, existing);
+          });
+          const salBreakdown = Array.from(breakdownMap.values()).sort((a, b) => a.salNumber - b.salNumber);
+
           return {
               ...item,
               estimatedQuantity: estimated,
               progressPercent,
+              salBreakdown,
               residualQuantity,
               residualAmount
           };
@@ -1016,7 +1119,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           }
           return a.articleCode.localeCompare(b.articleCode);
       });
-  }, [accountingRegistry, salReferenceDate, previousSalDate, boqTotals, sals, activeSalId]);
+  }, [accountingRegistry, salReferenceDate, previousSalDate, previousSalObject, summarySalScope, boqTotals, sals, activeSalId, getSalAssignmentForDate]);
 
   const applyFilters = (entry: any) => {
       const formattedCode = formatCodeWithComputoIndex(entry.articleCode, entry.originalIndex, entry.accountingType);
@@ -1032,18 +1135,94 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       return codeMatch && wbsMatch && descMatch && dateMatch;
   };
 
+  // Apertura modale creazione Nuovo SAL con proposta intelligente ma data 100% manuale
   const handleAddNewSal = () => {
-      const nextNumber = sals.length > 0 ? Math.max(...sals.map(s => s.number)) + 1 : 1;
-      const newSal: SalEntry = {
-          id: crypto.randomUUID(),
-          number: nextNumber,
-          date: format(new Date(), 'yyyy-MM-dd'),
-          description: `SAL N. ${nextNumber} a tutto il ${format(new Date(), 'dd/MM/yyyy')}`,
-          totalAmount: 0, 
-          isLocked: false
-      };
-      onUpdateSals([...sals, newSal]);
-      setActiveSalId(newSal.id);
+      const sortedAsc = [...sals].sort((a, b) => a.number - b.number);
+      const prevSal = sortedAsc.length > 0 ? sortedAsc[sortedAsc.length - 1] : null;
+      const latestMeas = measurementDatesMeta.latestDate;
+      const todayStr = format(new Date(), 'yyyy-MM-dd');
+
+      let suggestedDate = latestMeas || todayStr;
+      if (prevSal && suggestedDate.localeCompare(prevSal.date) <= 0) {
+          // Se l'ultima misura o oggi è <= alla data dell'ultimo SAL, proponiamo il giorno successivo all'ultimo SAL (o oggi se > prevSal.date)
+          if (todayStr.localeCompare(prevSal.date) > 0) {
+              suggestedDate = todayStr;
+          } else {
+              const nextDay = new Date(parseISO(prevSal.date).getTime() + 86400000);
+              suggestedDate = format(nextDay, 'yyyy-MM-dd');
+          }
+      }
+
+      setEditingSalModalId(null);
+      setSalModalDate(suggestedDate);
+      setSalModalError(null);
+      setIsSalModalOpen(true);
+  };
+
+  // Apertura modale modifica data di un SAL esistente
+  const handleOpenEditSalDateModal = (sal: SalEntry) => {
+      if (sal.isLocked) {
+          alert("Questo SAL è bloccato (🔒). Sbloccalo prima di modificarne la data.");
+          return;
+      }
+      setEditingSalModalId(sal.id);
+      setSalModalDate(sal.date);
+      setSalModalError(null);
+      setIsSalModalOpen(true);
+  };
+
+  // Conferma creazione o aggiornamento data SAL dal modale con calendario
+  const handleConfirmSalModal = (e: React.FormEvent) => {
+      e.preventDefault();
+      setSalModalError(null);
+
+      if (!salModalDate) {
+          setSalModalError("Seleziona una data valida per il SAL.");
+          return;
+      }
+
+      const sortedAsc = [...sals].sort((a, b) => a.number - b.number);
+
+      if (editingSalModalId) {
+          const targetIdx = sortedAsc.findIndex(s => s.id === editingSalModalId);
+          if (targetIdx === -1) return;
+          const prevSal = targetIdx > 0 ? sortedAsc[targetIdx - 1] : null;
+          const nextSal = targetIdx < sortedAsc.length - 1 ? sortedAsc[targetIdx + 1] : null;
+
+          if (prevSal && salModalDate.localeCompare(prevSal.date) <= 0) {
+              setSalModalError(`La data del SAL N. ${sortedAsc[targetIdx].number} deve essere successiva alla data del SAL N. ${prevSal.number} (${format(parseISO(prevSal.date), 'dd/MM/yyyy')}).`);
+              return;
+          }
+          if (nextSal && salModalDate.localeCompare(nextSal.date) >= 0) {
+              setSalModalError(`La data del SAL N. ${sortedAsc[targetIdx].number} deve essere antecedente alla data del SAL N. ${nextSal.number} (${format(parseISO(nextSal.date), 'dd/MM/yyyy')}).`);
+              return;
+          }
+
+          handleUpdateSalDate(editingSalModalId, salModalDate);
+          setIsSalModalOpen(false);
+          setEditingSalModalId(null);
+      } else {
+          const nextNumber = sortedAsc.length > 0 ? sortedAsc[sortedAsc.length - 1].number + 1 : 1;
+          const prevSal = sortedAsc.length > 0 ? sortedAsc[sortedAsc.length - 1] : null;
+
+          if (prevSal && salModalDate.localeCompare(prevSal.date) <= 0) {
+              setSalModalError(`La data del nuovo SAL N. ${nextNumber} deve essere strettamente successiva alla data del SAL N. ${prevSal.number} (${format(parseISO(prevSal.date), 'dd/MM/yyyy')}).`);
+              return;
+          }
+
+          const totalsAtDate = calculateTotalsAtDate(salModalDate);
+          const newSal: SalEntry = {
+              id: crypto.randomUUID(),
+              number: nextNumber,
+              date: salModalDate,
+              description: `SAL N. ${nextNumber} a tutto il ${format(parseISO(salModalDate), 'dd/MM/yyyy')}`,
+              totalAmount: totalsAtDate.totalNet,
+              isLocked: false
+          };
+          onUpdateSals([...sals, newSal]);
+          setActiveSalId(newSal.id);
+          setIsSalModalOpen(false);
+      }
   };
 
   const handleDeleteSal = (id: string) => {
@@ -1058,7 +1237,28 @@ const AccountingView: React.FC<AccountingViewProps> = ({
   };
 
   const handleUpdateSalDate = (id: string, newDate: string) => {
-      onUpdateSals(sals.map(s => s.id === id ? { ...s, date: newDate, description: `SAL N. ${s.number} a tutto il ${format(parseISO(newDate), 'dd/MM/yyyy')}` } : s));
+      if (!newDate) return;
+      const sortedAsc = [...sals].sort((a, b) => a.number - b.number);
+      const targetIdx = sortedAsc.findIndex(s => s.id === id);
+      if (targetIdx !== -1) {
+          const prevSal = targetIdx > 0 ? sortedAsc[targetIdx - 1] : null;
+          const nextSal = targetIdx < sortedAsc.length - 1 ? sortedAsc[targetIdx + 1] : null;
+          if (prevSal && newDate.localeCompare(prevSal.date) <= 0) {
+              alert(`La data del SAL N. ${sortedAsc[targetIdx].number} deve essere successiva a quella del SAL N. ${prevSal.number} (${format(parseISO(prevSal.date), 'dd/MM/yyyy')}).`);
+              return;
+          }
+          if (nextSal && newDate.localeCompare(nextSal.date) >= 0) {
+              alert(`La data del SAL N. ${sortedAsc[targetIdx].number} deve essere antecedente a quella del SAL N. ${nextSal.number} (${format(parseISO(nextSal.date), 'dd/MM/yyyy')}).`);
+              return;
+          }
+      }
+      const totalsAtDate = calculateTotalsAtDate(newDate);
+      onUpdateSals(sals.map(s => s.id === id ? {
+          ...s,
+          date: newDate,
+          totalAmount: totalsAtDate.totalNet,
+          description: `SAL N. ${s.number} a tutto il ${format(parseISO(newDate), 'dd/MM/yyyy')}`
+      } : s));
   };
 
   const handleToggleSalLock = (id: string) => {
@@ -1116,9 +1316,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
 
       if (type === 'libretto') {
         columns = [
-          { header: 'N. LB.', dataKey: 'idx' },
+          { header: 'N. ord. (LB)', dataKey: 'idx' },
           { header: 'Data', dataKey: 'date' },
-          { header: 'Codice', dataKey: 'code' },
+          { header: 'WBS\nN. ord. (CM) - Codice', dataKey: 'code' },
           { header: 'Descrizione e Note', dataKey: 'desc' },
           { header: 'U.M.', dataKey: 'um' },
           { header: 'Quantità', dataKey: 'qty' }
@@ -1126,20 +1326,25 @@ const AccountingView: React.FC<AccountingViewProps> = ({
         columnStyles = {
           idx: { halign: 'center', cellWidth: 18, fontStyle: 'bold' },
           date: { halign: 'center', cellWidth: 22 },
-          code: { fontStyle: 'bold', cellWidth: 28 },
-          desc: { cellWidth: 80, halign: 'justify' },
+          code: { fontStyle: 'bold', cellWidth: 36 },
+          desc: { cellWidth: 72, halign: 'justify' },
           um: { halign: 'center', cellWidth: 14 },
           qty: { halign: 'right', cellWidth: 24 }
         };
-        rows = filteredLibretto.filter(applyFilters).map(e => ({
-          idx: `N. LB. ${e.progressiveIndex}`,
-          date: format(parseISO(e.date), 'dd/MM/yyyy'),
-          code: formatCodeWithComputoIndex(e.articleCode, e.originalIndex, e.accountingType),
-          desc: `${e.description}${e.measurementNote ? '\nNote: ' + e.measurementNote : ''}`,
-          um: e.unit,
-          qty: e.accountingType === 'body' ? percentFormatter.format(e.quantity) : numberFormatter.format(e.quantity),
-          rawCumulativeAmount: 0
-        }));
+        rows = filteredLibretto.filter(applyFilters).map(e => {
+          const cleanCode = (e.accountingType !== 'body' && e.originalIndex && e.originalIndex > 0)
+            ? `${e.originalIndex} - ${e.articleCode}`
+            : e.articleCode;
+          return {
+            idx: `${e.progressiveIndex}`,
+            date: format(parseISO(e.date), 'dd/MM/yyyy'),
+            code: `${e.groupName}\n${cleanCode}`,
+            desc: `${e.description}${e.measurementNote ? '\nNote: ' + e.measurementNote : ''}`,
+            um: e.unit,
+            qty: e.accountingType === 'body' ? percentFormatter.format(e.quantity) : numberFormatter.format(e.quantity),
+            rawCumulativeAmount: 0
+          };
+        });
       } else if (type === 'register') {
         columns = [
           { header: 'N. RG.', dataKey: 'regIdx' },
@@ -1221,6 +1426,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           const fmtQty = (q: number) => item.accountingType === 'body' ? percentFormatter.format(q) : numberFormatter.format(q);
           const allLines = item.allLines || [...item.previousLines, ...item.currentLines];
           const formattedItemCode = formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType);
+          const salBreakdownText = (item.salBreakdown && item.salBreakdown.length > 0)
+            ? `Rif. SAL: ${item.salBreakdown.map(sb => `${sb.salLabel} [Q.tà: ${fmtQty(sb.quantity)} | ${currencyFormatter.format(sb.amount)}]`).join('  •  ')}`
+            : '';
 
           if (summaryMode === 'analytical') {
             // Riga Intestazione Articolo (senza dati ridondanti a destra, riportati nelle righe sottostanti e nel SOMMANO)
@@ -1235,7 +1443,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
               rawCumulativeAmount: runningSum
             });
 
-            // Righe Misure associate
+            // Righe Misure associate con riferimento SAL
             allLines.forEach(line => {
               const dims = (item.accountingType !== 'body' && (line.factor !== undefined || line.length !== undefined || line.width !== undefined || line.height !== undefined))
                 ? ` ([${[
@@ -1248,7 +1456,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
 
               rows.push({
                 idx: formatLibrettoRef(line.progressiveIndex, line.librettoPage, true),
-                date: format(parseISO(line.date), 'dd/MM/yyyy'),
+                date: `${format(parseISO(line.date), 'dd/MM/yyyy')}\n[${line.salLabel || 'SAL N. 1'}]`,
                 desc: `   ${line.measurementNote}${dims}`,
                 um: item.unit,
                 qty: fmtQty(line.quantity),
@@ -1258,12 +1466,12 @@ const AccountingView: React.FC<AccountingViewProps> = ({
               });
             });
 
-            // Riga SOMMANO
+            // Riga SOMMANO con riepilogo quote per SAL
             runningSum = round2(runningSum + item.totalAmount);
             rows.push({
               idx: '',
-              date: '',
-              desc: `SOMMANO (${formattedItemCode})`,
+              date: item.salBreakdown?.map(sb => sb.salLabel).join(', ') || '',
+              desc: `SOMMANO (${formattedItemCode})${salBreakdownText ? `\n${salBreakdownText}` : ''}`,
               um: item.unit,
               qty: fmtQty(item.totalQuantity),
               price: currencyFormatter.format(item.unitPrice),
@@ -1271,13 +1479,13 @@ const AccountingView: React.FC<AccountingViewProps> = ({
               rawCumulativeAmount: runningSum
             });
           } else {
-            // Sintetico
+            // Sintetico con riferimento SAL
             runningSum = round2(runningSum + item.totalAmount);
-            const libRefs = allLines.map(l => formatLibrettoRef(l.progressiveIndex, l.librettoPage, false)).join(', ');
+            const libRefs = allLines.map(l => `${formatLibrettoRef(l.progressiveIndex, l.librettoPage, false)} (${l.salLabel || 'SAL N. 1'})`).join(', ');
             rows.push({
               idx: `N. SM. ${artIdx + 1}`,
               date: libRefs,
-              desc: `[${item.wbsName}] ${formattedItemCode} - ${item.description}`,
+              desc: `[${item.wbsName}] ${formattedItemCode} - ${item.description}${salBreakdownText ? `\n${salBreakdownText}` : ''}`,
               um: item.unit,
               qty: fmtQty(item.totalQuantity),
               price: currencyFormatter.format(item.unitPrice),
@@ -1506,7 +1714,16 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                 </span>
             </div>
             
-            <div className="flex items-center gap-2 flex-shrink-0">
+            <div className="flex items-center gap-1.5 flex-shrink-0 flex-wrap">
+                {measurementDatesMeta.latestDate && (
+                    <span
+                        className="hidden lg:inline-flex items-center gap-1 px-2 py-1 rounded-md bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-700/60 text-[11px] font-semibold text-amber-800 dark:text-amber-300"
+                        title="Data dell'ultima misura registrata nel Libretto delle Misure"
+                    >
+                        <span>📏 Ultima misura:</span>
+                        <strong className="font-mono">{format(parseISO(measurementDatesMeta.latestDate), 'dd/MM/yyyy')}</strong>
+                    </span>
+                )}
                 <span className="text-xs font-semibold text-gray-600 dark:text-gray-300">SAL:</span>
                 <select 
                     value={activeSalId || ''} 
@@ -1516,17 +1733,32 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                     {sals.length === 0 && <option value="">-- Nessun SAL --</option>}
                     {[...sals].sort((a,b) => b.number - a.number).map(sal => (
                         <option key={sal.id} value={sal.id}>
-                            SAL N. {sal.number} ({format(parseISO(sal.date), 'dd/MM/yy')}) {sal.isLocked ? '🔒' : ''}
+                            SAL N. {sal.number} (fino al {format(parseISO(sal.date), 'dd/MM/yyyy')}) {sal.isLocked ? '🔒' : ''}
                         </option>
                     ))}
                 </select>
+                {activeSalId && (() => {
+                    const activeSalObj = sals.find(s => s.id === activeSalId);
+                    if (!activeSalObj) return null;
+                    return (
+                        <button
+                            onClick={() => handleOpenEditSalDateModal(activeSalObj.id)}
+                            disabled={activeSalObj.isLocked}
+                            className="px-2 py-1 bg-indigo-50 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-700 rounded-md hover:bg-indigo-100 disabled:opacity-40 text-xs font-bold flex items-center gap-1 transition-colors"
+                            title={activeSalObj.isLocked ? "SAL bloccato: sbloccalo in Impostazioni per modificare la data" : "Modifica manualmente la data di chiusura del SAL con calendario"}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                            <span className="hidden xl:inline">Data SAL</span>
+                        </button>
+                    );
+                })()}
                 <button
                     onClick={handleAddNewSal}
-                    className="px-2 py-1 bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 rounded-md hover:bg-emerald-200 text-xs font-bold flex items-center gap-1 transition-colors"
-                    title="Crea Nuovo SAL"
+                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md text-xs font-bold flex items-center gap-1 shadow-xs transition-colors"
+                    title="Crea Nuovo SAL scegliendo manualmente la data di chiusura con calendario"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" /></svg>
-                    <span className="hidden md:inline">Nuovo SAL</span>
+                    <span>Nuovo SAL</span>
                 </button>
                 {['libretto', 'register', 'summary', 'sal_technical', 'payment_cert'].includes(activeTab) && (
                     <button 
@@ -1594,6 +1826,144 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                             </div>
                         </div>
                     </div>
+
+                    {/* SEZIONE GESTIONE STATI AVANZAMENTO LAVORI (SAL) E CALENDARIO COMPETENZE */}
+                    <div className="mt-6 bg-gray-50 dark:bg-gray-700/30 p-5 rounded-xl border border-gray-200 dark:border-gray-600">
+                        <div className="flex flex-wrap items-center justify-between gap-3 mb-4 border-b pb-3 dark:border-gray-600">
+                            <div>
+                                <h3 className="text-base font-bold text-gray-800 dark:text-gray-200 flex items-center gap-2">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                                    Cronologia Stati di Avanzamento Lavori (SAL) e Date di Competenza
+                                </h3>
+                                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                                    Nel <strong>SAL N. 1</strong> confluiscono tutte le misure con data uguale o inferiore alla data del SAL 1. Nei <strong>SAL successivi</strong> confluiscono tutte le misure con data maggiore dell'ultimo SAL precedente fino alla data del SAL scelto.
+                                </p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                {measurementDatesMeta.latestDate && (
+                                    <div className="px-3 py-1.5 rounded-lg bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-700 text-xs">
+                                        <span className="text-amber-700 dark:text-amber-300 font-medium">Data Ultima Misura a Libretto: </span>
+                                        <strong className="font-mono text-amber-900 dark:text-amber-200">{format(parseISO(measurementDatesMeta.latestDate), 'dd/MM/yyyy')}</strong>
+                                    </div>
+                                )}
+                                <button
+                                    onClick={handleAddNewSal}
+                                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clipRule="evenodd" /></svg>
+                                    Nuovo SAL con Calendario
+                                </button>
+                            </div>
+                        </div>
+
+                        {sals.length === 0 ? (
+                            <div className="p-6 text-center bg-white dark:bg-gray-800 rounded-lg border border-dashed border-gray-300 dark:border-gray-600">
+                                <p className="text-sm text-gray-600 dark:text-gray-300 font-semibold">Nessuno Stato di Avanzamento Lavori (SAL) ancora emesso.</p>
+                                <p className="text-xs text-gray-500 mt-1 mb-3">
+                                    Clicca su &ldquo;Nuovo SAL con Calendario&rdquo; per impostare manualmente la data del primo SAL avendo come riferimento la data dell'ultima misura registrata ({measurementDatesMeta.latestDate ? format(parseISO(measurementDatesMeta.latestDate), 'dd/MM/yyyy') : 'nessuna misura'}).
+                                </p>
+                                <button
+                                    onClick={handleAddNewSal}
+                                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold"
+                                >
+                                    Emetti SAL N. 1
+                                </button>
+                            </div>
+                        ) : (
+                            <div className="overflow-x-auto bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+                                <table className="w-full text-xs text-left border-collapse">
+                                    <thead className="bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 uppercase text-[11px] font-bold border-b border-gray-200 dark:border-gray-600">
+                                        <tr>
+                                            <th className="p-2.5 border-r dark:border-gray-600">Stato Avanzamento</th>
+                                            <th className="p-2.5 border-r dark:border-gray-600">Intervallo Date Misure Incluse</th>
+                                            <th className="p-2.5 border-r dark:border-gray-600">Data Chiusura SAL</th>
+                                            <th className="p-2.5 text-center border-r dark:border-gray-600">N. Misure</th>
+                                            <th className="p-2.5 text-right border-r dark:border-gray-600">Importo Competenza SAL</th>
+                                            <th className="p-2.5 text-right border-r dark:border-gray-600">Progressivo Cumulato</th>
+                                            <th className="p-2.5 text-center">Azioni</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                                        {[...sals].sort((a, b) => a.number - b.number).map((s, idx, arr) => {
+                                            const prevSal = idx > 0 ? arr[idx - 1] : null;
+                                            const periodMeasureLines = accountingRegistry.filter(e =>
+                                                prevSal ? (e.date > prevSal.date && e.date <= s.date) : (e.date <= s.date)
+                                            );
+                                            const periodAmount = round2(periodMeasureLines.reduce((acc, e) => acc + e.debit, 0));
+                                            const cumAmount = round2(accountingRegistry.filter(e => e.date <= s.date).reduce((acc, e) => acc + e.debit, 0));
+
+                                            return (
+                                                <tr key={s.id} className={s.id === activeSalId ? 'bg-indigo-50/60 dark:bg-indigo-950/30' : ''}>
+                                                    <td className="p-2.5 font-bold text-indigo-700 dark:text-indigo-300 border-r dark:border-gray-700">
+                                                        <div className="flex items-center gap-1.5">
+                                                            <span>SAL N. {s.number}</span>
+                                                            {s.id === activeSalId && (
+                                                                <span className="px-1.5 py-0.5 text-[9px] bg-indigo-600 text-white rounded uppercase font-black">Attivo</span>
+                                                            )}
+                                                            {s.isLocked && <span title="SAL Bloccato">🔒</span>}
+                                                        </div>
+                                                    </td>
+                                                    <td className="p-2.5 font-mono text-[11px] text-gray-600 dark:text-gray-300 border-r dark:border-gray-700">
+                                                        {prevSal
+                                                            ? ` Misure > ${format(parseISO(prevSal.date), 'dd/MM/yyyy')} e ≤ ${format(parseISO(s.date), 'dd/MM/yyyy')}`
+                                                            : ` Tutte le misure ≤ ${format(parseISO(s.date), 'dd/MM/yyyy')}`}
+                                                    </td>
+                                                    <td className="p-2.5 border-r dark:border-gray-700">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="font-mono font-bold text-gray-900 dark:text-white">{format(parseISO(s.date), 'dd/MM/yyyy')}</span>
+                                                            {!s.isLocked && (
+                                                                <button
+                                                                    onClick={() => handleOpenEditSalDateModal(s.id)}
+                                                                    className="px-2 py-0.5 text-[10px] font-bold bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 rounded hover:bg-indigo-200 transition-colors"
+                                                                >
+                                                                    📅 Cambia data
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                    <td className="p-2.5 text-center font-mono font-bold border-r dark:border-gray-700">
+                                                        {periodMeasureLines.length}
+                                                    </td>
+                                                    <td className="p-2.5 text-right font-mono font-bold text-emerald-700 dark:text-emerald-400 border-r dark:border-gray-700">
+                                                        {currencyFormatter.format(periodAmount)}
+                                                    </td>
+                                                    <td className="p-2.5 text-right font-mono font-black text-indigo-700 dark:text-indigo-300 border-r dark:border-gray-700">
+                                                        {currencyFormatter.format(cumAmount)}
+                                                    </td>
+                                                    <td className="p-2.5 text-center">
+                                                        <div className="inline-flex items-center gap-1.5">
+                                                            <button
+                                                                onClick={() => setActiveSalId(s.id)}
+                                                                className="px-2 py-1 rounded text-[10px] font-bold bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 text-gray-700 dark:text-gray-200"
+                                                            >
+                                                                Seleziona
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleToggleSalLock(s.id)}
+                                                                className={`px-2 py-1 rounded text-[10px] font-bold ${s.isLocked ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-700'}`}
+                                                                title={s.isLocked ? 'Sblocca SAL' : 'Blocca SAL'}
+                                                            >
+                                                                {s.isLocked ? 'Sblocca' : 'Blocca'}
+                                                            </button>
+                                                            {idx === arr.length - 1 && !s.isLocked && (
+                                                                <button
+                                                                    onClick={() => handleDeleteSal(s.id)}
+                                                                    className="px-2 py-1 rounded text-[10px] font-bold bg-red-100 text-red-700 hover:bg-red-200"
+                                                                    title="Elimina ultimo SAL"
+                                                                >
+                                                                    Elimina
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
 
@@ -1637,25 +2007,40 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                     <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-xs border border-gray-200 dark:border-gray-700 flex-grow overflow-auto min-h-0">
                           <table className="w-full text-xs text-left border-collapse">
                             <thead className="bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 font-bold border-b dark:border-gray-600 sticky top-0 z-10 shadow-xs">
-                                <tr><th className="p-2.5 w-24 text-center border-r dark:border-gray-600 align-top text-indigo-600 dark:text-indigo-400">N. LB.</th><th className="p-2.5 w-24 border-r dark:border-gray-600 align-top">Data</th><th className="p-2.5 w-32 border-r dark:border-gray-600 align-top">WBS</th><th className="p-2.5 w-36 border-r dark:border-gray-600 align-top">Codice</th><th className="p-2.5 border-r dark:border-gray-600 align-top">Descrizione & Note</th><th className="p-2.5 w-12 text-center border-r dark:border-gray-600 bg-gray-50 dark:bg-gray-700 align-top">U.M.</th><th className="p-2.5 w-24 text-right bg-indigo-50 dark:bg-indigo-900/30 align-top">Quantità</th></tr>
+                                <tr>
+                                    <th className="p-2.5 w-20 text-center border-r dark:border-gray-600 align-top text-indigo-600 dark:text-indigo-400">N. ord. (LB)</th>
+                                    <th className="p-2.5 w-24 border-r dark:border-gray-600 align-top">Data</th>
+                                    <th className="p-2.5 w-48 border-r dark:border-gray-600 align-top">
+                                        <div className="uppercase text-[11px] text-gray-700 dark:text-gray-200">WBS</div>
+                                        <div className="text-[10px] font-bold text-indigo-600 dark:text-indigo-400 mt-0.5">N. ord. (CM) - Codice</div>
+                                    </th>
+                                    <th className="p-2.5 border-r dark:border-gray-600 align-top">Descrizione & Note</th>
+                                    <th className="p-2.5 w-12 text-center border-r dark:border-gray-600 bg-gray-50 dark:bg-gray-700 align-top">U.M.</th>
+                                    <th className="p-2.5 w-24 text-right bg-indigo-50 dark:bg-indigo-900/30 align-top">Quantità</th>
+                                </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                                {filteredLibretto.filter(applyFilters).map((entry) => (
-                                    <tr key={entry.id} className={`hover:bg-gray-50 dark:hover:bg-gray-700/50 ${entry.accountingType === 'body' ? 'bg-purple-50/50' : ''}`}>
-                                        <td className="p-2.5 text-center font-mono font-bold text-indigo-700 dark:text-indigo-400 border-r dark:border-gray-600 bg-gray-50/50 dark:bg-gray-800 align-top whitespace-nowrap">N. LB. {entry.progressiveIndex}</td>
-                                        <td className="p-2.5 border-r dark:border-gray-600 align-top">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
-                                        <td className="p-2.5 border-r dark:border-gray-600 align-top text-xs uppercase font-semibold">{entry.groupName}</td>
-                                        <td className="p-2.5 border-r dark:border-gray-600 align-top font-mono text-xs font-bold text-indigo-700 dark:text-indigo-300">
-                                            {formatCodeWithComputoIndex(entry.articleCode, entry.originalIndex, entry.accountingType)}
-                                        </td>
-                                        <td className="p-2.5 border-r dark:border-gray-600 text-justify align-top">
-                                            <div className="text-xs mb-0.5 text-justify leading-relaxed">{entry.description}</div>
-                                            <div className="italic text-indigo-700 dark:text-indigo-400 text-justify">{entry.measurementNote || '-'}</div>
-                                        </td>
-                                        <td className="p-2.5 text-center border-r dark:border-gray-600">{entry.unit}</td>
-                                        <td className="p-2.5 text-right font-bold font-mono bg-indigo-50/30 dark:bg-indigo-900/10">{entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity)}</td>
-                                    </tr>
-                                ))}
+                                {filteredLibretto.filter(applyFilters).map((entry) => {
+                                    const cleanCode = (entry.accountingType !== 'body' && entry.originalIndex && entry.originalIndex > 0)
+                                        ? `${entry.originalIndex} - ${entry.articleCode}`
+                                        : entry.articleCode;
+                                    return (
+                                        <tr key={entry.id} className={`hover:bg-gray-50 dark:hover:bg-gray-700/50 ${entry.accountingType === 'body' ? 'bg-purple-50/50' : ''}`}>
+                                            <td className="p-2.5 text-center font-mono font-bold text-indigo-700 dark:text-indigo-400 border-r dark:border-gray-600 bg-gray-50/50 dark:bg-gray-800 align-top whitespace-nowrap">{entry.progressiveIndex}</td>
+                                            <td className="p-2.5 border-r dark:border-gray-600 align-top">{format(parseISO(entry.date), 'dd/MM/yy')}</td>
+                                            <td className="p-2.5 border-r dark:border-gray-600 align-top">
+                                                <div className="text-[11px] uppercase font-bold text-gray-800 dark:text-gray-200 leading-tight">{entry.groupName}</div>
+                                                <div className="font-mono text-xs font-bold text-indigo-700 dark:text-indigo-300 mt-0.5">{cleanCode}</div>
+                                            </td>
+                                            <td className="p-2.5 border-r dark:border-gray-600 text-justify align-top">
+                                                <div className="text-xs mb-0.5 text-justify leading-relaxed">{entry.description}</div>
+                                                <div className="italic text-indigo-700 dark:text-indigo-400 text-justify">{entry.measurementNote || '-'}</div>
+                                            </td>
+                                            <td className="p-2.5 text-center border-r dark:border-gray-600">{entry.unit}</td>
+                                            <td className="p-2.5 text-right font-bold font-mono bg-indigo-50/30 dark:bg-indigo-900/10">{entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity)}</td>
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                          </table>
                     </div>
@@ -1800,6 +2185,71 @@ const AccountingView: React.FC<AccountingViewProps> = ({
 
             {activeTab === 'summary' && (
                 <div className="flex-grow p-2 overflow-hidden flex flex-col min-h-0 gap-2">
+                    {/* Quadro Sintetico Competenze SAL nel Sommario */}
+                    {sals.length > 0 && (
+                        <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-indigo-50/70 dark:bg-indigo-950/30 rounded-lg border border-indigo-200 dark:border-indigo-800/70 flex-shrink-0">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-[11px] font-black uppercase tracking-wider text-indigo-800 dark:text-indigo-300 mr-1">
+                                    Riferimento SAL nel Sommario:
+                                </span>
+                                {[...sals].sort((a, b) => a.number - b.number).map((s, idx, arr) => {
+                                    const prevSal = idx > 0 ? arr[idx - 1] : null;
+                                    const salLines = accountingRegistry.filter(e =>
+                                        prevSal ? (e.date > prevSal.date && e.date <= s.date) : (e.date <= s.date)
+                                    );
+                                    const salAmt = round2(salLines.reduce((acc, e) => acc + e.debit, 0));
+                                    const isActive = s.id === activeSalId;
+                                    const isIncludedInProgressive = activeSalId
+                                        ? s.number <= (sals.find(x => x.id === activeSalId)?.number || 999)
+                                        : true;
+
+                                    return (
+                                        <button
+                                            key={s.id}
+                                            onClick={() => setActiveSalId(s.id)}
+                                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-mono transition-all border ${
+                                                isActive
+                                                    ? 'bg-indigo-600 text-white border-indigo-700 font-bold shadow-xs'
+                                                    : isIncludedInProgressive
+                                                        ? 'bg-white dark:bg-gray-800 text-indigo-700 dark:text-indigo-300 border-indigo-300 dark:border-indigo-700 hover:bg-indigo-100/60'
+                                                        : 'bg-gray-100 dark:bg-gray-800/50 text-gray-400 border-gray-200 dark:border-gray-700 opacity-60'
+                                            }`}
+                                            title={prevSal
+                                                ? `SAL N. ${s.number}: misure dal giorno successivo al ${format(parseISO(prevSal.date), 'dd/MM/yyyy')} fino al ${format(parseISO(s.date), 'dd/MM/yyyy')}`
+                                                : `SAL N. ${s.number}: tutte le misure fino al ${format(parseISO(s.date), 'dd/MM/yyyy')}`}
+                                        >
+                                            <span className="font-bold">SAL N. {s.number}</span>
+                                            <span className="text-[10px] opacity-85">
+                                                ({prevSal ? `>${format(parseISO(prevSal.date), 'dd/MM/yy')} ` : '≤'}{format(parseISO(s.date), 'dd/MM/yy')})
+                                            </span>
+                                            <span className={`px-1 py-0.2 rounded text-[10px] font-bold ${isActive ? 'bg-indigo-800 text-white' : 'bg-indigo-50 dark:bg-indigo-900/50 text-indigo-800 dark:text-indigo-200'}`}>
+                                                {currencyFormatter.format(salAmt)}
+                                            </span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+
+                            {/* Selettore vista Progressiva a tutto il SAL vs Solo Competenza del SAL attivo */}
+                            <div className="inline-flex rounded-md bg-white dark:bg-gray-800 p-0.5 border border-indigo-200 dark:border-indigo-700">
+                                <button
+                                    onClick={() => setSummarySalScope('cumulative')}
+                                    className={`px-2 py-0.5 text-[11px] font-bold rounded transition-colors ${summarySalScope === 'cumulative' ? 'bg-indigo-600 text-white' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+                                    title="Mostra tutte le lavorazioni contabilizzate fino al SAL selezionato con il dettaglio di appartenenza a ciascun SAL"
+                                >
+                                    Progressivo a tutto il SAL N. {sals.find(s => s.id === activeSalId)?.number || 'Corrente'}
+                                </button>
+                                <button
+                                    onClick={() => setSummarySalScope('current_sal')}
+                                    className={`px-2 py-0.5 text-[11px] font-bold rounded transition-colors ${summarySalScope === 'current_sal' ? 'bg-emerald-600 text-white' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'}`}
+                                    title="Mostra esclusivamente le misure ricadenti nella finestra temporale del SAL selezionato"
+                                >
+                                    Solo Competenza SAL N. {sals.find(s => s.id === activeSalId)?.number || 'Corrente'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
                     {/* Barra strumenti pulita Sommario del Registro */}
                     <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-gray-50 dark:bg-gray-800/80 rounded-lg border border-gray-200 dark:border-gray-700 flex-shrink-0">
                         <div className="flex items-center gap-2 flex-wrap">
@@ -1862,7 +2312,11 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                         Voci misurate: <strong className="text-gray-800 dark:text-gray-100 font-bold">{visibleItems.length}</strong>
                                     </span>
                                     <div className="flex items-center gap-1.5 bg-indigo-50 dark:bg-indigo-950/40 px-2 py-1 rounded-md border border-indigo-200 dark:border-indigo-800">
-                                        <span className="font-semibold text-gray-700 dark:text-gray-300">Contabilizzato SAL N. {sals.find(s => s.id === activeSalId)?.number || '1'}:</span>
+                                        <span className="font-semibold text-gray-700 dark:text-gray-300">
+                                            {summarySalScope === 'current_sal'
+                                                ? `Competenza SAL N. ${sals.find(s => s.id === activeSalId)?.number || '1'}:`
+                                                : `Contabilizzato a tutto il SAL N. ${sals.find(s => s.id === activeSalId)?.number || '1'}:`}
+                                        </span>
                                         <span className="font-mono font-black text-indigo-700 dark:text-indigo-300">{currencyFormatter.format(totProg)}</span>
                                     </div>
                                 </div>
@@ -1887,7 +2341,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                     if (grouped.size === 0) {
                                         return (
                                             <div className="p-8 text-center text-gray-500 text-xs">
-                                                Nessuna voce misurata presente con i filtri attivi.
+                                                Nessuna voce misurata presente nel periodo SAL selezionato.
                                             </div>
                                         );
                                     }
@@ -1927,7 +2381,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                             <th className="px-2 py-1.5 w-20 text-center border-r border-gray-200 dark:border-gray-700">N. SM.</th>
                                                             <th className="px-2.5 py-1.5 w-36 border-r border-gray-200 dark:border-gray-700">Articolo Elenco</th>
                                                             <th className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-700">Designazione dei Lavori</th>
-                                                            <th className="px-2.5 py-1.5 w-48 border-r border-gray-200 dark:border-gray-700">Rif. Misure (N. LB. / Pag.)</th>
+                                                            <th className="px-2.5 py-1.5 w-56 border-r border-gray-200 dark:border-gray-700">Rif. Misure (N. LB. / Pag. / SAL)</th>
                                                             <th className="px-2 py-1.5 w-12 text-center border-r border-gray-200 dark:border-gray-700">U.M.</th>
                                                             <th className="px-2.5 py-1.5 text-right w-24 border-r border-gray-200 dark:border-gray-700">Q.tà Contab.</th>
                                                             <th className="px-2.5 py-1.5 text-right w-24 border-r border-gray-200 dark:border-gray-700">Prezzo Unit.</th>
@@ -1956,6 +2410,16 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                                         </td>
                                                                         <td className="px-3 py-2 text-gray-900 dark:text-gray-100 border-r border-gray-200 dark:border-gray-700 align-top font-medium text-justify">
                                                                             <div className="text-justify leading-relaxed">{item.description}</div>
+                                                                            {summaryMode === 'synthetic' && item.salBreakdown && item.salBreakdown.length > 0 && (
+                                                                                <div className="flex flex-wrap items-center gap-1.5 mt-1.5 pt-1 border-t border-dashed border-gray-200 dark:border-gray-700">
+                                                                                    <span className="text-[10px] font-bold uppercase text-gray-400">Riep. SAL:</span>
+                                                                                    {item.salBreakdown.map(sb => (
+                                                                                        <span key={sb.salNumber} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 text-[10px] font-mono text-indigo-700 dark:text-indigo-300">
+                                                                                            <strong>{sb.salLabel}:</strong> {fmtQty(sb.quantity)} {item.unit} ({currencyFormatter.format(sb.amount)})
+                                                                                        </span>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
                                                                         </td>
                                                                         <td className="px-2.5 py-2 border-r border-gray-200 dark:border-gray-700 align-top">
                                                                             {summaryMode === 'synthetic' && hasMeasures && (
@@ -1963,10 +2427,11 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                                                     {allLines.map(line => (
                                                                                         <span
                                                                                             key={line.id}
-                                                                                            title={`Data: ${format(parseISO(line.date), 'dd/MM/yyyy')} - Q.tà: ${fmtQty(line.quantity)} - ${line.measurementNote}`}
+                                                                                            title={`Data: ${format(parseISO(line.date), 'dd/MM/yyyy')} (${line.salLabel || 'SAL N. 1'}) - Q.tà: ${fmtQty(line.quantity)} - ${line.measurementNote}`}
                                                                                             className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono border bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 border-gray-300 dark:border-gray-600 whitespace-nowrap"
                                                                                         >
                                                                                             <strong>{formatLibrettoRef(line.progressiveIndex, line.librettoPage)}</strong>
+                                                                                            <span className="px-1 rounded bg-indigo-600 text-white text-[9px] font-bold">{line.salLabel || 'SAL N. 1'}</span>
                                                                                         </span>
                                                                                     ))}
                                                                                 </div>
@@ -1991,9 +2456,16 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                                         <>
                                                                             {allLines.map(line => {
                                                                                 const hasDims = item.accountingType !== 'body' && (line.factor !== undefined || line.length !== undefined || line.width !== undefined || line.height !== undefined);
+                                                                                const isCurrentSalLine = activeSalId
+                                                                                    ? line.salNumber === (sals.find(s => s.id === activeSalId)?.number || 1)
+                                                                                    : true;
                                                                                 return (
                                                                                     <tr key={`sum-line-${line.id}`} className="bg-gray-50/40 dark:bg-gray-800/40 text-gray-600 dark:text-gray-400 text-[11px]">
-                                                                                        <td className="px-2 py-1 border-r border-gray-200 dark:border-gray-700 text-center"></td>
+                                                                                        <td className="px-2 py-1 border-r border-gray-200 dark:border-gray-700 text-center">
+                                                                                            <span className={`inline-block px-1.5 py-0.2 rounded text-[9px] font-mono font-bold ${isCurrentSalLine ? 'bg-indigo-600 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300'}`}>
+                                                                                                {line.salLabel || 'SAL N. 1'}
+                                                                                            </span>
+                                                                                        </td>
                                                                                         <td className="px-2.5 py-1 border-r border-gray-200 dark:border-gray-700 font-mono">
                                                                                             {format(parseISO(line.date), 'dd/MM/yyyy')}
                                                                                         </td>
@@ -2011,9 +2483,14 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                                                             )}
                                                                                         </td>
                                                                                         <td className="px-2.5 py-1 border-r border-gray-200 dark:border-gray-700 text-center">
-                                                                                            <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 font-mono font-bold text-[10px] whitespace-nowrap">
-                                                                                                {formatLibrettoRef(line.progressiveIndex, line.librettoPage)}
-                                                                                            </span>
+                                                                                            <div className="inline-flex items-center gap-1 justify-center">
+                                                                                                <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 font-mono font-bold text-[10px] whitespace-nowrap">
+                                                                                                    {formatLibrettoRef(line.progressiveIndex, line.librettoPage)}
+                                                                                                </span>
+                                                                                                <span className={`px-1 py-0.2 rounded text-[9px] font-mono font-bold ${isCurrentSalLine ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/60 dark:text-indigo-200' : 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300'}`}>
+                                                                                                    {line.salLabel || 'SAL N. 1'}
+                                                                                                </span>
+                                                                                            </div>
                                                                                         </td>
                                                                                         <td className="px-2 py-1 text-center font-mono border-r border-gray-200 dark:border-gray-700 text-[10px]">
                                                                                             {item.unit}
@@ -2028,8 +2505,18 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                                             })}
                                                                             <tr className="bg-gray-100/60 dark:bg-gray-700/40 text-[11px] font-bold border-t border-b border-gray-200 dark:border-gray-600">
                                                                                 <td colSpan={2} className="px-2 py-1 border-r border-gray-200 dark:border-gray-700"></td>
-                                                                                <td className="px-3 py-1 border-r border-gray-200 dark:border-gray-700 uppercase text-gray-600 dark:text-gray-300">
-                                                                                    SOMMANO {item.unit}
+                                                                                <td className="px-3 py-1 border-r border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300">
+                                                                                    <div className="uppercase">SOMMANO {item.unit}</div>
+                                                                                    {item.salBreakdown && item.salBreakdown.length > 0 && (
+                                                                                        <div className="flex flex-wrap items-center gap-1.5 mt-1 font-normal">
+                                                                                            <span className="text-[9px] font-bold uppercase text-gray-400">Rif. SAL:</span>
+                                                                                            {item.salBreakdown.map(sb => (
+                                                                                                <span key={sb.salNumber} className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded bg-white dark:bg-gray-800 border border-indigo-200 dark:border-indigo-700 text-[10px] font-mono text-indigo-700 dark:text-indigo-300">
+                                                                                                    <strong>{sb.salLabel}:</strong> {fmtQty(sb.quantity)} {item.unit} ({currencyFormatter.format(sb.amount)})
+                                                                                                </span>
+                                                                                            ))}
+                                                                                        </div>
+                                                                                    )}
                                                                                 </td>
                                                                                 <td className="px-2.5 py-1 border-r border-gray-200 dark:border-gray-700 text-center font-mono text-[10px] text-gray-400">
                                                                                     {formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType)}
@@ -2080,7 +2567,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                         <th className="px-2.5 py-2.5 w-20 text-center border-r border-gray-200 dark:border-gray-600">N. SM.</th>
                                         <th className="px-3 py-2.5 w-40 border-r border-gray-200 dark:border-gray-600">Articolo di Elenco</th>
                                         <th className="px-3 py-2.5 border-r border-gray-200 dark:border-gray-600">Designazione dei Lavori</th>
-                                        <th className="px-3 py-2.5 w-56 border-r border-gray-200 dark:border-gray-600">Rif. Misure (N. LB. / Pag.)</th>
+                                        <th className="px-3 py-2.5 w-60 border-r border-gray-200 dark:border-gray-600">Rif. Misure (N. LB. / Pag. / SAL)</th>
                                         <th className="px-2 py-2.5 w-14 text-center border-r border-gray-200 dark:border-gray-600">U.M.</th>
                                         <th className="px-3 py-2.5 text-right w-28 border-r border-gray-200 dark:border-gray-600 font-bold">Quantità Tot.</th>
                                         <th className="px-3 py-2.5 text-right w-28 border-r border-gray-200 dark:border-gray-600">Prezzo Unit.</th>
@@ -2104,6 +2591,16 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                     </td>
                                                     <td className="px-3 py-2 text-gray-900 dark:text-gray-100 border-r border-gray-200 dark:border-gray-700 align-top font-semibold text-justify">
                                                         <div className="text-justify leading-relaxed">{item.description}</div>
+                                                        {summaryMode === 'synthetic' && item.salBreakdown && item.salBreakdown.length > 0 && (
+                                                            <div className="flex flex-wrap items-center gap-1.5 mt-1.5 pt-1 border-t border-dashed border-gray-200 dark:border-gray-700 font-normal">
+                                                                <span className="text-[10px] font-bold uppercase text-gray-400">Riep. SAL:</span>
+                                                                {item.salBreakdown.map(sb => (
+                                                                    <span key={sb.salNumber} className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 text-[10px] font-mono text-indigo-700 dark:text-indigo-300">
+                                                                        <strong>{sb.salLabel}:</strong> {fmtQty(sb.quantity)} {item.unit} ({currencyFormatter.format(sb.amount)})
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                        )}
                                                     </td>
                                                     <td className="px-3 py-2 border-r border-gray-200 dark:border-gray-700 align-top">
                                                         {summaryMode === 'synthetic' && (
@@ -2111,10 +2608,11 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                                 {allLines.map(line => (
                                                                     <span
                                                                         key={line.id}
-                                                                        title={`Data: ${format(parseISO(line.date), 'dd/MM/yyyy')} - Q.tà: ${fmtQty(line.quantity)} - ${line.measurementNote}`}
+                                                                        title={`Data: ${format(parseISO(line.date), 'dd/MM/yyyy')} (${line.salLabel || 'SAL N. 1'}) - Q.tà: ${fmtQty(line.quantity)} - ${line.measurementNote}`}
                                                                         className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono border bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 border-gray-300 dark:border-gray-600 whitespace-nowrap"
                                                                     >
                                                                         <strong>{formatLibrettoRef(line.progressiveIndex, line.librettoPage)}</strong>
+                                                                        <span className="px-1 rounded bg-indigo-600 text-white text-[9px] font-bold">{line.salLabel || 'SAL N. 1'}</span>
                                                                     </span>
                                                                 ))}
                                                             </div>
@@ -2138,13 +2636,20 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                     <>
                                                         {allLines.map(line => {
                                                             const hasDims = item.accountingType !== 'body' && (line.factor !== undefined || line.length !== undefined || line.width !== undefined || line.height !== undefined);
+                                                            const isCurrentSalLine = activeSalId
+                                                                ? line.salNumber === (sals.find(s => s.id === activeSalId)?.number || 1)
+                                                                : true;
 
                                                             return (
                                                                 <tr 
                                                                     key={`sum-line-${line.id}`} 
                                                                     className="bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700/30 text-gray-700 dark:text-gray-300 text-xs"
                                                                 >
-                                                                    <td className="px-2.5 py-1.5 border-r border-gray-200 dark:border-gray-700 text-center text-gray-400"></td>
+                                                                    <td className="px-2.5 py-1.5 border-r border-gray-200 dark:border-gray-700 text-center">
+                                                                        <span className={`inline-block px-1.5 py-0.2 rounded text-[9px] font-mono font-bold ${isCurrentSalLine ? 'bg-indigo-600 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300'}`}>
+                                                                            {line.salLabel || 'SAL N. 1'}
+                                                                        </span>
+                                                                    </td>
                                                                     <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-700 font-mono text-[11px] text-gray-600 dark:text-gray-300">
                                                                         {format(parseISO(line.date), 'dd/MM/yyyy')}
                                                                     </td>
@@ -2166,6 +2671,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                                             <span className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 font-mono font-bold text-[10px] border border-gray-300 dark:border-gray-600 whitespace-nowrap">
                                                                                 {formatLibrettoRef(line.progressiveIndex, line.librettoPage)}
                                                                             </span>
+                                                                            <span className={`px-1 py-0.2 rounded text-[9px] font-mono font-bold ${isCurrentSalLine ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/60 dark:text-indigo-200' : 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300'}`}>
+                                                                                {line.salLabel || 'SAL N. 1'}
+                                                                            </span>
                                                                         </div>
                                                                     </td>
                                                                     <td className="px-2 py-1.5 text-center font-mono text-gray-500 dark:text-gray-400 border-r border-gray-200 dark:border-gray-700 text-[11px]">
@@ -2185,8 +2693,20 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                                             <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-600 font-mono text-center text-[10px] text-gray-500 dark:text-gray-400">
                                                                 {allLines.length} {allLines.length === 1 ? 'misura' : 'misure'}
                                                             </td>
-                                                            <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-600 text-right uppercase tracking-wider text-[11px] text-gray-700 dark:text-gray-200">
-                                                                SOMMANO {item.unit}
+                                                            <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-600 text-[11px] text-gray-700 dark:text-gray-200">
+                                                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                                                    {item.salBreakdown && item.salBreakdown.length > 0 ? (
+                                                                        <div className="flex flex-wrap items-center gap-1.5 font-normal">
+                                                                            <span className="text-[9px] font-bold uppercase text-gray-400">Quote SAL:</span>
+                                                                            {item.salBreakdown.map(sb => (
+                                                                                <span key={sb.salNumber} className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded bg-white dark:bg-gray-800 border border-indigo-200 dark:border-indigo-700 text-[10px] font-mono text-indigo-700 dark:text-indigo-300">
+                                                                                    <strong>{sb.salLabel}:</strong> {fmtQty(sb.quantity)} {item.unit} ({currencyFormatter.format(sb.amount)})
+                                                                                </span>
+                                                                            ))}
+                                                                        </div>
+                                                                    ) : <span />}
+                                                                    <span className="uppercase tracking-wider font-bold">SOMMANO {item.unit}</span>
+                                                                </div>
                                                             </td>
                                                             <td className="px-3 py-1.5 border-r border-gray-200 dark:border-gray-600 text-center font-mono text-[10px] text-gray-400">
                                                                 {formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType)}
@@ -2217,7 +2737,9 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                         return (
                                             <tr className="bg-gray-100 dark:bg-gray-700 font-bold border-t-2 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white">
                                                 <td colSpan={7} className="px-3 py-2.5 text-right uppercase tracking-wider text-xs border-r border-gray-200 dark:border-gray-600">
-                                                    IMPORTO TOTALE PROGRESSIVO A TUTTO IL SAL N. {sals.find(s => s.id === activeSalId)?.number || 'CORRENTE'}
+                                                    {summarySalScope === 'current_sal'
+                                                        ? `IMPORTO COMPETENZA DEL SOLO SAL N. ${sals.find(s => s.id === activeSalId)?.number || 'CORRENTE'}`
+                                                        : `IMPORTO TOTALE PROGRESSIVO A TUTTO IL SAL N. ${sals.find(s => s.id === activeSalId)?.number || 'CORRENTE'}`}
                                                 </td>
                                                 <td className="px-3 py-2.5 text-right font-mono text-sm font-black text-indigo-700 dark:text-indigo-300 bg-indigo-100/50 dark:bg-indigo-900/40">
                                                     {currencyFormatter.format(totProg)}
@@ -2900,6 +3422,239 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                 )}
               </div>
             )}
+
+            {/* MODALE CREAZIONE / MODIFICA DATA SAL MANUALE CON CALENDARIO E RIFERIMENTO ULTIMA MISURA */}
+            {isSalModalOpen && (() => {
+              const sortedSals = [...sals].sort((a, b) => a.number - b.number);
+              const editingSal = editingSalModalId ? sortedSals.find(s => s.id === editingSalModalId) : null;
+              const targetSalNumber = editingSal
+                ? editingSal.number
+                : (sortedSals.length > 0 ? sortedSals[sortedSals.length - 1].number + 1 : 1);
+
+              const prevSal = editingSal
+                ? sortedSals.find(s => s.number === editingSal.number - 1) || null
+                : (sortedSals.length > 0 ? sortedSals[sortedSals.length - 1] : null);
+              const nextSal = editingSal
+                ? sortedSals.find(s => s.number === editingSal.number + 1) || null
+                : null;
+
+              // Misure che rientrano in questo SAL in base alla data selezionata (salModalDate)
+              const includedMeasures = salModalDate
+                ? accountingRegistry.filter(e =>
+                    prevSal ? (e.date > prevSal.date && e.date <= salModalDate) : (e.date <= salModalDate)
+                  )
+                : [];
+              const includedGrossAmount = round2(includedMeasures.reduce((acc, e) => acc + e.debit, 0));
+
+              // Misure successive alla data selezionata (che andranno nei SAL successivi)
+              const futureMeasures = salModalDate
+                ? accountingRegistry.filter(e => e.date > salModalDate)
+                : [];
+
+              return (
+                <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fade-in">
+                  <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 w-full max-w-xl overflow-hidden flex flex-col max-h-[90vh]">
+                    <div className="p-4 bg-gradient-to-r from-indigo-700 to-indigo-900 text-white flex justify-between items-center">
+                      <div>
+                        <span className="text-[10px] font-black uppercase tracking-widest px-2 py-0.5 bg-white/20 rounded">
+                          {editingSal ? `Modifica Data SAL N. ${targetSalNumber}` : `Emissione Nuovo SAL N. ${targetSalNumber}`}
+                        </span>
+                        <h3 className="text-base font-black mt-1">
+                          {editingSal
+                            ? `Imposta Data di Chiusura del SAL N. ${targetSalNumber}`
+                            : `Definisci Data di Chiusura per il SAL N. ${targetSalNumber}`}
+                        </h3>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setIsSalModalOpen(false)}
+                        className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-colors"
+                      >
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                      </button>
+                    </div>
+
+                    <form onSubmit={handleConfirmSalModal} className="p-5 space-y-4 overflow-y-auto">
+                      {/* Box informativo regola di competenza */}
+                      <div className="p-3 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 text-xs text-indigo-900 dark:text-indigo-200 leading-relaxed">
+                        {prevSal ? (
+                          <>
+                            <strong>Regola di competenza SAL N. {targetSalNumber}:</strong> Confluiranno in questo SAL tutte le misure con data <strong>maggiore del {format(parseISO(prevSal.date), 'dd/MM/yyyy')}</strong> (data del SAL N. {prevSal.number}) e <strong>uguale o inferiore</strong> alla data del SAL N. {targetSalNumber} che imposti qui sotto.
+                          </>
+                        ) : (
+                          <>
+                            <strong>Regola di competenza Primo SAL (SAL N. 1):</strong> Confluiranno nel SAL N. 1 tutte le misure con data <strong>uguale o inferiore</strong> alla data del SAL scelta qui sotto. Le misure con data successiva confluiranno automaticamente nei SAL successivi.
+                          </>
+                        )}
+                      </div>
+
+                      {/* Box Data Ultima Misura registrata con pulsante rapido */}
+                      <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700/80 flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <span className="text-[10px] font-black uppercase tracking-wider text-amber-800 dark:text-amber-300 block">
+                            📏 Riferimento Libretto delle Misure
+                          </span>
+                          {measurementDatesMeta.latestDate ? (
+                            <div className="text-xs text-amber-900 dark:text-amber-100 mt-0.5">
+                              Data dell&apos;ultima misura registrata:{' '}
+                              <strong className="font-mono text-sm font-black underline decoration-amber-500">
+                                {format(parseISO(measurementDatesMeta.latestDate), 'dd/MM/yyyy')}
+                              </strong>
+                              {measurementDatesMeta.earliestDate && measurementDatesMeta.earliestDate !== measurementDatesMeta.latestDate && (
+                                <span className="block text-[11px] text-amber-700 dark:text-amber-300">
+                                  (Prima misura: {format(parseISO(measurementDatesMeta.earliestDate), 'dd/MM/yyyy')} • Totale misure: {measurementDatesMeta.totalMeasurements})
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="text-xs text-amber-800 dark:text-amber-300 mt-0.5">
+                              Nessuna misura ancora presente nel Libretto delle Misure. Puoi comunque scegliere liberamente la data del SAL.
+                            </div>
+                          )}
+                        </div>
+                        {measurementDatesMeta.latestDate && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSalModalDate(measurementDatesMeta.latestDate!);
+                              setSalModalError(null);
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow-xs transition-colors flex items-center gap-1.5"
+                          >
+                            <span>Usa data ultima misura ({format(parseISO(measurementDatesMeta.latestDate), 'dd/MM/yyyy')})</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Input Manuale Data + Calendario di supporto */}
+                      <div>
+                        <label className="block text-xs font-black uppercase tracking-wider text-gray-700 dark:text-gray-200 mb-1.5">
+                          Data del SAL N. {targetSalNumber} ( Inserimento manuale GG/MM/AAAA o Calendario 📅 )
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <div className="flex-grow">
+                            <EuropeanDateInput
+                              value={salModalDate}
+                              onChange={(val) => {
+                                setSalModalDate(val);
+                                setSalModalError(null);
+                              }}
+                              min={prevSal ? prevSal.date : undefined}
+                              max={nextSal ? nextSal.date : undefined}
+                              className="w-full p-2.5 border-2 border-indigo-400 dark:border-indigo-500 rounded-xl bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono text-sm font-bold focus:ring-2 focus:ring-indigo-500 outline-none"
+                              required
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSalModalDate(format(new Date(), 'yyyy-MM-dd'));
+                              setSalModalError(null);
+                            }}
+                            className="px-3 py-2.5 rounded-xl border border-gray-300 dark:border-gray-600 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 text-xs font-bold text-gray-700 dark:text-gray-200 whitespace-nowrap"
+                          >
+                            Data Odierna
+                          </button>
+                        </div>
+                        {prevSal && (
+                          <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">
+                            Vincolo cronologico: la data deve essere successiva al SAL N. {prevSal.number} ({format(parseISO(prevSal.date), 'dd/MM/yyyy')}).
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Elenco rapido date delle misure presenti nel libretto (cliccabili) */}
+                      {measurementDatesMeta.byDate.length > 0 && (
+                        <div>
+                          <span className="block text-[10px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400 mb-1.5">
+                            Date delle misure presenti a Libretto (clicca per selezionare come data di taglio SAL):
+                          </span>
+                          <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto p-2 rounded-xl bg-gray-50 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-700">
+                            {measurementDatesMeta.byDate.map((info) => {
+                              const d = info.date;
+                              const isBeforeOrEqualPrev = prevSal ? d <= prevSal.date : false;
+                              const isSelected = d === salModalDate;
+                              return (
+                                <button
+                                  key={d}
+                                  type="button"
+                                  disabled={isBeforeOrEqualPrev}
+                                  onClick={() => {
+                                    setSalModalDate(d);
+                                    setSalModalError(null);
+                                  }}
+                                  className={`px-2 py-1 rounded-lg text-[11px] font-mono border transition-all flex items-center gap-1 ${
+                                    isSelected
+                                      ? 'bg-indigo-600 text-white border-indigo-700 font-bold shadow-xs'
+                                      : isBeforeOrEqualPrev
+                                        ? 'bg-gray-100 dark:bg-gray-800 text-gray-400 border-gray-200 dark:border-gray-700 opacity-50 cursor-not-allowed'
+                                        : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 border-gray-300 dark:border-gray-600 hover:border-indigo-400'
+                                  }`}
+                                  title={isBeforeOrEqualPrev ? `Già contabilizzata in SAL precedente (≤ ${format(parseISO(prevSal!.date), 'dd/MM/yyyy')})` : `Imposta data SAL al ${format(parseISO(d), 'dd/MM/yyyy')}`}
+                                >
+                                  <span>{format(parseISO(d), 'dd/MM/yyyy')}</span>
+                                  <span className={`px-1 rounded text-[9px] ${isSelected ? 'bg-indigo-800 text-white' : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'}`}>
+                                    {info.count} mis.
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Anteprima in tempo reale delle misure che finiscono nel SAL */}
+                      <div className="grid grid-cols-2 gap-3 p-3 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800">
+                        <div>
+                          <span className="text-[10px] font-bold uppercase text-emerald-800 dark:text-emerald-300 block">
+                            Misure incluse nel SAL N. {targetSalNumber}
+                          </span>
+                          <span className="font-mono font-black text-base text-emerald-700 dark:text-emerald-300">
+                            {includedMeasures.length} {includedMeasures.length === 1 ? 'misura' : 'misure'}
+                          </span>
+                          <span className="block text-[11px] font-mono font-bold text-emerald-800 dark:text-emerald-200">
+                            Importo lordo: {currencyFormatter.format(includedGrossAmount)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] font-bold uppercase text-gray-500 dark:text-gray-400 block">
+                            Misure con data successiva (&gt; SAL N. {targetSalNumber})
+                          </span>
+                          <span className="font-mono font-bold text-sm text-gray-700 dark:text-gray-300">
+                            {futureMeasures.length} {futureMeasures.length === 1 ? 'misura' : 'misure'}
+                          </span>
+                          <span className="block text-[10px] text-gray-500 dark:text-gray-400">
+                            (Andranno nel SAL N. {targetSalNumber + 1} e successivi)
+                          </span>
+                        </div>
+                      </div>
+
+                      {salModalError && (
+                        <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/50 border border-red-300 dark:border-red-700 text-xs font-bold text-red-700 dark:text-red-300">
+                          ⚠️ {salModalError}
+                        </div>
+                      )}
+
+                      <div className="flex justify-end items-center gap-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+                        <button
+                          type="button"
+                          onClick={() => setIsSalModalOpen(false)}
+                          className="px-4 py-2 rounded-xl text-xs font-bold text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                        >
+                          Annulla
+                        </button>
+                        <button
+                          type="submit"
+                          className="px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-wider bg-indigo-600 hover:bg-indigo-700 text-white shadow-md transition-all"
+                        >
+                          {editingSal ? `Aggiorna Data SAL N. ${targetSalNumber}` : `Conferma ed Emetti SAL N. ${targetSalNumber}`}
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              );
+            })()}
         </div>
     </div>
   );
