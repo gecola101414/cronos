@@ -164,6 +164,18 @@ export interface ContractConfig {
     advancePaymentPercent?: number; // Recupero Anticipazione %
     excludeLaborFromDiscount?: boolean; // Scorpora Costo Manodopera dal Ribasso
     contractLaborAmount?: number; // NEW: Importo manodopera offerto dall'impresa
+    // Nuovi campi standard ministeriale / PriMus (Comune, Committente, DL, RUP, Repertorio, INAIL, Anticipazione)
+    municipalityName?: string; // es. "Comune di MILANO"
+    provinceName?: string; // es. "Provincia di Milano"
+    clientName?: string; // Committente, es. "Sviluppo Milanese s.r.l."
+    locationCity?: string; // Luogo firma documenti, es. "Milano"
+    contractRepertory?: string; // es. "repertorio n. 432 registrato a Milano in data 20/11/2008 al n. 2243"
+    directorOfWorks?: string; // Il Direttore dei Lavori, es. "Ing. Valerio Direttorio"
+    rupName?: string; // Il Responsabile del Procedimento, es. "Ing. Ivo Responsabile"
+    studioHeader?: string; // Intestazione Studio Tecnico / Direzione Lavori
+    inailPolicy?: string; // Polizza INAIL operai
+    anticipationGrantedAmount?: number; // Importo anticipazione erogata (€)
+    roundCertificateTo100?: boolean; // Arrotonda il credito impresa a 100 euro
 }
 
 export interface SalEntry {

@@ -1,9 +1,60 @@
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { ProjectDocument, ContractConfig, SalEntry, WorkGroup, PriceDepreciation } from '../types';
-import { format, parseISO, startOfDay, isAfter, endOfDay, isValid } from 'date-fns';
+import { format as dfFormat, parseISO as dfParseISO, parse as dfParse, startOfDay, isAfter, endOfDay, isValid } from 'date-fns';
 import { it } from 'date-fns/locale/it';
 import { EuropeanDateInput } from './EuropeanDateInput';
+
+// Helper sicuro anti-RangeError per qualsiasi stringa data (ISO yyyy-MM-dd, europeo dd/MM/yyyy, Date o valori vuoti/non validi)
+const parseISO = (val: any): Date => {
+  if (val instanceof Date) {
+    return isValid(val) ? val : new Date();
+  }
+  if (!val || typeof val !== 'string') {
+    return new Date();
+  }
+  const trimmed = val.trim();
+  if (!trimmed || trimmed.startsWith('0000')) {
+    return new Date(2000, 0, 1);
+  }
+  try {
+    const iso = dfParseISO(trimmed);
+    if (isValid(iso)) return iso;
+  } catch (e) {}
+
+  const euFormats = ['dd/MM/yyyy', 'dd-MM-yyyy', 'yyyy-MM-dd', 'dd/MM/yy', 'd/M/yyyy'];
+  for (const fmt of euFormats) {
+    try {
+      const parsed = dfParse(trimmed, fmt, new Date());
+      if (isValid(parsed)) return parsed;
+    } catch (e) {}
+  }
+
+  try {
+    const native = new Date(trimmed);
+    if (isValid(native)) return native;
+  } catch (e) {}
+
+  return new Date();
+};
+
+const format = (dateVal: any, pattern: string, options?: any): string => {
+  try {
+    const d = dateVal instanceof Date ? (isValid(dateVal) ? dateVal : parseISO('')) : parseISO(dateVal);
+    if (!isValid(d)) return '-';
+    return options ? dfFormat(d, pattern, options) : dfFormat(d, pattern);
+  } catch (e) {
+    return '-';
+  }
+};
+
+const normalizeIsoDateString = (val?: string | null): string => {
+  if (!val || typeof val !== 'string' || !val.trim()) {
+    return dfFormat(new Date(), 'yyyy-MM-dd');
+  }
+  const d = parseISO(val);
+  return isValid(d) ? dfFormat(d, 'yyyy-MM-dd') : dfFormat(new Date(), 'yyyy-MM-dd');
+};
 
 
 declare const jspdf: any;
@@ -44,10 +95,66 @@ const formatLibrettoRef = (progressiveIndex: number, librettoPage: number = 1, m
         : `N. LB. ${progressiveIndex} - Pag. ${librettoPage}`;
 };
 
+// Convertitore importo numerico in lettere secondo lo standard ministeriale ("diciottomilacento/00")
+const intToItalianWords = (n: number): string => {
+    if (n === 0) return 'zero';
+    const ones = ['', 'uno', 'due', 'tre', 'quattro', 'cinque', 'sei', 'sette', 'otto', 'nove', 'dieci', 'undici', 'dodici', 'tredici', 'quattordici', 'quindici', 'sedici', 'diciassette', 'diciotto', 'diciannove'];
+    const tens = ['', '', 'venti', 'trenta', 'quaranta', 'cinquanta', 'sessanta', 'settanta', 'ottanta', 'novanta'];
+
+    const convertUnder1000 = (num: number): string => {
+        if (num === 0) return '';
+        let res = '';
+        const h = Math.floor(num / 100);
+        const rem = num % 100;
+        const t = Math.floor(rem / 10);
+        const u = rem % 10;
+
+        if (h > 0) {
+            res += (h === 1 ? 'cento' : ones[h] + 'cento');
+            if (t === 8) res = res.slice(0, -1); // centottanta
+        }
+        if (rem > 0) {
+            if (rem < 20) {
+                res += ones[rem];
+            } else {
+                let tenWord = tens[t];
+                if (u === 1 || u === 8) tenWord = tenWord.slice(0, -1); // ventuno, ventotto
+                res += tenWord + (u === 3 ? 'tré' : ones[u]);
+            }
+        }
+        return res;
+    };
+
+    let result = '';
+    const millions = Math.floor(n / 1000000);
+    const thousands = Math.floor((n % 1000000) / 1000);
+    const rest = n % 1000;
+
+    if (millions > 0) {
+        result += (millions === 1 ? 'unmilione' : convertUnder1000(millions) + 'milioni');
+    }
+    if (thousands > 0) {
+        result += (thousands === 1 ? 'mille' : convertUnder1000(thousands) + 'mila');
+    }
+    if (rest > 0) {
+        result += convertUnder1000(rest);
+    }
+    return result;
+};
+
+const numberToItalianWords = (amount: number): string => {
+    const absVal = Math.abs(round2(amount));
+    const intPart = Math.floor(absVal);
+    const cents = Math.round((absVal - intPart) * 100);
+    const centsStr = cents.toString().padStart(2, '0');
+    return `${amount < 0 ? 'meno ' : ''}${intToItalianWords(intPart)}/${centsStr}`;
+};
+
 interface AccountingEntry {
     id: string; 
     progressiveIndex: number; 
     librettoPage: number;
+    registerOrderIndex?: number;
     date: string;
     articleCode: string;
     originalIndex?: number; 
@@ -74,8 +181,9 @@ interface AccountingEntry {
 
 interface SummaryMeasurementLine {
     id: string;
-    progressiveIndex: number; // Num. ord. misura progressivo
+    progressiveIndex: number; // Num. ord. misura progressivo (N. LB.)
     librettoPage: number;     // Pagina del Libretto Unico
+    registerOrderIndex: number; // Num. ord. Registro di Contabilità (RC / N. RG.)
     date: string;
     salNumber?: number;
     salLabel?: string;
@@ -209,7 +317,18 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       contractDate: '',
       advancePaymentPercent: 20, 
       excludeLaborFromDiscount: false,
-      contractLaborAmount: 0
+      contractLaborAmount: 0,
+      municipalityName: 'STAZIONE APPALTANTE',
+      provinceName: '',
+      clientName: '',
+      locationCity: '',
+      contractRepertory: '',
+      directorOfWorks: '',
+      rupName: '',
+      studioHeader: 'Ufficio di Direzione dei Lavori e Contabilità',
+      inailPolicy: '',
+      anticipationGrantedAmount: 0,
+      roundCertificateTo100: false
   });
 
   useEffect(() => {
@@ -228,7 +347,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
   const salReferenceDate = useMemo(() => {
       if (activeSalId) {
           const sal = sals.find(s => s.id === activeSalId);
-          return sal ? sal.date : format(new Date(), 'yyyy-MM-dd');
+          return sal && sal.date ? normalizeIsoDateString(sal.date) : format(new Date(), 'yyyy-MM-dd');
       }
       return format(new Date(), 'yyyy-MM-dd');
   }, [activeSalId, sals]);
@@ -237,7 +356,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
   const [activePopover, setActivePopover] = useState<string | null>(null);
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
   const [summaryMode, setSummaryMode] = useState<'analytical' | 'synthetic'>('analytical');
-  const [summaryGrouping, setSummaryGrouping] = useState<'grouped_by_wbs' | 'flat'>('grouped_by_wbs');
+  const [summaryGrouping, setSummaryGrouping] = useState<'standard_primus' | 'grouped_by_wbs' | 'flat'>('standard_primus');
   const [summarySalScope, setSummarySalScope] = useState<'cumulative' | 'current_sal'>('cumulative');
   const [deprModalItemSearch, setDeprModalItemSearch] = useState('');
   const [deprModalCategoryFilter, setDeprModalCategoryFilter] = useState('all');
@@ -808,6 +927,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           return {
               ...entry,
               progressiveIndex: actualIndex,
+              registerOrderIndex: actualIndex,
               librettoPage: finalPage,
               progressive: runningTotal
           }; 
@@ -849,6 +969,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           totalGross: round2(worksBaseTotal + security), 
           measureTotal, 
           bodyTotal, 
+          bodyGroupsTotalValue,
           bodyPercentage,
           security, 
           worksBase: worksBaseTotal, 
@@ -896,6 +1017,55 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       return previousSalObject.date;
   }, [previousSalObject]);
 
+  // Calcolo della catena storica di tutti i Certificati di Pagamento (SAL 1 .. SAL N) secondo lo standard PriMus / LL.PP.
+  const allSalCertificates = useMemo(() => {
+      const sortedAsc = [...sals].sort((a, b) => a.number - b.number);
+      let runningPreviousCertifiedTotal = 0;
+
+      return sortedAsc.map((s) => {
+          const totals = calculateTotalsAtDate(s.date);
+          const sommanoSoggettiARitenute = totals.netWorksAfterDiscount;
+          const sommanoNonSoggettiARitenute = totals.security;
+          const totalNetWorksAndSecurity = totals.totalNet;
+
+          // Detrazioni cumulative a tutto il SAL s.number (come da prospetto standard PriMus)
+          const cumRetention = round2(totalNetWorksAndSecurity * (localConfig.withholdingTaxPercent / 100));
+          const cumAdvanceRecovery = round2(totalNetWorksAndSecurity * ((localConfig.advancePaymentPercent || 0) / 100));
+          const prevCertsAmount = runningPreviousCertifiedTotal;
+          const sommanoDetrazioni = round2(cumRetention + cumAdvanceRecovery + prevCertsAmount);
+
+          const rawCreditoImpresa = Math.max(0, round2(totalNetWorksAndSecurity - sommanoDetrazioni));
+          const creditoImpresa = localConfig.roundCertificateTo100
+              ? Math.floor(rawCreditoImpresa / 100) * 100
+              : rawCreditoImpresa;
+
+          const vatAmount = round2(creditoImpresa * (localConfig.vatPercent / 100));
+          const totalPayable = round2(creditoImpresa + vatAmount);
+
+          runningPreviousCertifiedTotal = round2(runningPreviousCertifiedTotal + creditoImpresa);
+
+          return {
+              salId: s.id,
+              number: s.number,
+              salNumber: s.number,
+              date: normalizeIsoDateString(s.date),
+              sommanoSoggettiARitenute,
+              sommanoNonSoggettiARitenute,
+              totalNetWorksAndSecurity,
+              cumRetention,
+              cumAdvanceRecovery,
+              prevCertsAmount,
+              sommanoDetrazioni,
+              rawCreditoImpresa,
+              creditoImpresa,
+              netCertificateAmount: creditoImpresa,
+              vatAmount,
+              totalPayable,
+              cumulativeCertifiedAfterThis: runningPreviousCertifiedTotal
+          };
+      });
+  }, [sals, accountingRegistry, localConfig, documents]);
+
   const paymentCertData = useMemo(() => {
       const currentNet = currentSalData.totalNet;
       let previousNet = 0;
@@ -904,11 +1074,53 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       const retentionAmount = round2(rataAcconto * (localConfig.withholdingTaxPercent / 100));
       const advancePercent = localConfig.advancePaymentPercent || 0;
       const recoveryAmount = round2(rataAcconto * (advancePercent / 100));
-      const taxableCertified = round2(rataAcconto - retentionAmount - recoveryAmount);
+
+      // Identifichiamo tutti i certificati precedenti al SAL attivo
+      const activeSalObj = sals.find(s => s.id === activeSalId);
+      const currentSalNum = activeSalObj ? activeSalObj.number : (sals.length > 0 ? Math.max(...sals.map(s => s.number)) : 1);
+      const previousCertificates = activeSalObj
+          ? allSalCertificates.filter(c => c.number < activeSalObj.number)
+          : [];
+      const previousCertificatesTotal = round2(previousCertificates.reduce((acc, c) => acc + c.creditoImpresa, 0));
+      const anticipationGranted = round2(localConfig.anticipationGrantedAmount || 0);
+
+      // Calcolo secondo il prospetto cumulativo PriMus (identico a Esempio-Certificato-di-pagamento.jpg)
+      const sommanoSoggettiARitenute = currentSalData.netWorksAfterDiscount;
+      const sommanoNonSoggettiARitenute = currentSalData.security;
+      const cumRetentionAmount = round2(currentNet * (localConfig.withholdingTaxPercent / 100));
+      const cumRecoveryAmount = round2(currentNet * (advancePercent / 100));
+      const sommanoDetrazioni = round2(cumRetentionAmount + cumRecoveryAmount + previousCertificatesTotal);
+
+      const rawTaxableCertified = round2(currentNet - sommanoDetrazioni);
+      const taxableCertified = localConfig.roundCertificateTo100
+          ? Math.floor(Math.max(0, rawTaxableCertified) / 100) * 100
+          : rawTaxableCertified;
       const vatAmount = round2(taxableCertified * (localConfig.vatPercent / 100));
       const totalPayable = round2(taxableCertified + vatAmount);
-      return { currentNet, previousNet, rataAcconto, retentionAmount, recoveryAmount, taxableCertified, vatAmount, totalPayable };
-  }, [currentSalData, previousSalObject, salCumulativeValuesMap, localConfig]);
+      const diconsiText = numberToItalianWords(taxableCertified);
+
+      return {
+          currentSalNum,
+          currentNet,
+          previousNet,
+          rataAcconto,
+          retentionAmount,
+          recoveryAmount,
+          sommanoSoggettiARitenute,
+          sommanoNonSoggettiARitenute,
+          cumRetentionAmount,
+          cumRecoveryAmount,
+          previousCertificates,
+          previousCertificatesTotal,
+          anticipationGranted,
+          sommanoDetrazioni,
+          rawTaxableCertified,
+          taxableCertified,
+          vatAmount,
+          totalPayable,
+          diconsiText
+      };
+  }, [currentSalData, previousSalObject, salCumulativeValuesMap, localConfig, sals, activeSalId, allSalCertificates]);
 
   const filteredLibretto = useMemo(() => {
       const runningQuantities = new Map<string, number>();
@@ -1047,6 +1259,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
               id: entry.id,
               progressiveIndex: entry.progressiveIndex,
               librettoPage: entry.librettoPage,
+              registerOrderIndex: entry.registerOrderIndex || entry.progressiveIndex,
               date: entry.date,
               salNumber: salAssign.salNumber,
               salLabel: salAssign.salLabel,
@@ -1159,14 +1372,16 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       setIsSalModalOpen(true);
   };
 
-  // Apertura modale modifica data di un SAL esistente
-  const handleOpenEditSalDateModal = (sal: SalEntry) => {
+  // Apertura modale modifica data di un SAL esistente (accetta sia oggetto SalEntry sia ID stringa)
+  const handleOpenEditSalDateModal = (salOrId: SalEntry | string) => {
+      const sal = typeof salOrId === 'string' ? sals.find(s => s.id === salOrId) : salOrId;
+      if (!sal) return;
       if (sal.isLocked) {
           alert("Questo SAL è bloccato (🔒). Sbloccalo prima di modificarne la data.");
           return;
       }
       setEditingSalModalId(sal.id);
-      setSalModalDate(sal.date);
+      setSalModalDate(normalizeIsoDateString(sal.date));
       setSalModalError(null);
       setIsSalModalOpen(true);
   };
@@ -1265,6 +1480,432 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       onUpdateSals(sals.map(s => s.id === id ? { ...s, isLocked: !s.isLocked } : s));
   };
 
+  // Generatore PDF Vettoriale Certificato di Pagamento conforme allo standard Ministeriale / PriMus
+  const generatePaymentCertVectorPdf = () => {
+    setIsGeneratingPdf(true);
+    try {
+      const doc = new jspdf.jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      const pageWidth = doc.internal.pageSize.getWidth(); // 210
+      const activeSal = sals.find(s => s.id === activeSalId);
+      const salNum = activeSal?.number || 1;
+      const salDateStr = format(parseISO(salReferenceDate), 'dd/MM/yyyy');
+      const fmtNum = (n: number) => numberFormatter.format(round2(n));
+
+      const muniName = localConfig.municipalityName || 'STAZIONE APPALTANTE';
+      const provName = localConfig.provinceName || '';
+      const clientName = localConfig.clientName || localConfig.municipalityName || 'Amministrazione Committente';
+      const contractorName = localConfig.contractorName || 'Impresa Appaltatrice';
+      const city = localConfig.locationCity || 'Sede Lavori';
+      const director = localConfig.directorOfWorks || 'Il Direttore dei Lavori';
+      const rup = localConfig.rupName || 'Il Responsabile del Procedimento';
+      const contractDateFormatted = localConfig.contractDate ? format(parseISO(localConfig.contractDate), 'dd/MM/yyyy') : '___/___/______';
+      const repertoryInfo = localConfig.contractRepertory || (localConfig.contractCode ? `CIG/CUP ${localConfig.contractCode}` : 'repertorio agli atti');
+
+      // 1. Stemma / Intestazione Ente
+      doc.setDrawColor(40, 40, 40);
+      doc.setLineWidth(0.5);
+      // Scudo / Stemma stilizzato istituzionale
+      doc.rect(18, 12, 16, 18);
+      doc.line(26, 12, 26, 30);
+      doc.line(18, 21, 34, 21);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(15);
+      doc.setTextColor(20, 20, 20);
+      doc.text(muniName, 40, 19);
+      if (provName) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(11);
+        doc.text(provName, 40, 25);
+      }
+
+      // 2. Oggetto, Committente, Impresa
+      doc.setFontSize(8.5);
+      doc.setFont('helvetica', 'bold');
+      doc.text('OGGETTO:', 38, 36, { align: 'right' });
+      doc.setFont('helvetica', 'normal');
+      const objLines = doc.splitTextToSize(projectName || 'Lavori in appalto', 150);
+      doc.text(objLines, 41, 36);
+
+      const yAfterObj = 36 + Math.max(1, objLines.length) * 4.2 + 2;
+      doc.setFont('helvetica', 'bold');
+      doc.text('COMMITTENTE:', 38, yAfterObj, { align: 'right' });
+      doc.setFont('helvetica', 'normal');
+      doc.text(clientName, 41, yAfterObj);
+
+      doc.setFont('helvetica', 'bold');
+      doc.text('IMPRESA:', 38, yAfterObj + 5, { align: 'right' });
+      doc.setFont('helvetica', 'normal');
+      doc.text(contractorName, 41, yAfterObj + 5);
+
+      // 3. Titolo Certificato di Pagamento
+      const titleY = yAfterObj + 15;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(14.5);
+      doc.text(`CERTIFICATO DI PAGAMENTO N. ${salNum}`, pageWidth / 2 + 5, titleY, { align: 'center' });
+      doc.setFontSize(10.5);
+      doc.text(`PER IL PAGAMENTO DELLA RATA N. ${salNum} DI euro ${fmtNum(paymentCertData.taxableCertified)}`, pageWidth / 2 + 5, titleY + 5.5, { align: 'center' });
+
+      // 4. Layout a 2 Colonne:
+      // Colonna Sinistra (x = 12..68, w = 56): Tabella CERTIFICATI PRECEDENTI + ASSICURAZIONE OPERAI + Firma DL
+      const leftX = 12;
+      const leftW = 56;
+      const topTableY = titleY + 11;
+      const bottomBoxY = 278;
+
+      // Cornice verde scuro/nero stile PriMus
+      doc.setDrawColor(46, 107, 52);
+      doc.setLineWidth(0.5);
+      doc.rect(leftX, topTableY, leftW, bottomBoxY - topTableY);
+
+      // Header CERTIFICATI PRECEDENTI
+      doc.line(leftX, topTableY + 6, leftX + leftW, topTableY + 6);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.5);
+      doc.setTextColor(46, 107, 52);
+      doc.text('CERTIFICATI PRECEDENTI', leftX + leftW / 2, topTableY + 4.3, { align: 'center' });
+
+      // Sotto-colonne: n. (w=7) | data (w=22) | importo (w=27)
+      const col1W = 7;
+      const col2W = 22;
+      doc.line(leftX, topTableY + 11, leftX + leftW, topTableY + 11);
+      doc.line(leftX + col1W, topTableY + 6, leftX + col1W, topTableY + 135);
+      doc.line(leftX + col1W + col2W, topTableY + 6, leftX + col1W + col2W, topTableY + 141);
+
+      doc.setFontSize(7.5);
+      doc.text('n.', leftX + col1W / 2, topTableY + 9.6, { align: 'center' });
+      doc.text('data', leftX + col1W + col2W / 2, topTableY + 9.6, { align: 'center' });
+      doc.text('importo', leftX + col1W + col2W + (leftW - col1W - col2W) / 2, topTableY + 9.6, { align: 'center' });
+
+      // 25 righe numerate (1..25) con i certificati precedenti compilati
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(20, 20, 20);
+      doc.setFontSize(7.2);
+      const maxCertRows = 25;
+      const rowH = 4.8;
+      for (let r = 1; r <= maxCertRows; r++) {
+        const ry = topTableY + 11 + r * rowH;
+        doc.setTextColor(60, 60, 60);
+        doc.text(`${r}`, leftX + col1W - 1.2, ry - 1, { align: 'right' });
+        const foundPrev = paymentCertData.previousCertificates.find(c => c.number === r);
+        if (foundPrev) {
+          doc.setTextColor(10, 10, 10);
+          doc.text(format(parseISO(foundPrev.date), 'dd/MM/yyyy'), leftX + col1W + col2W / 2, ry - 1, { align: 'center' });
+          doc.text(fmtNum(foundPrev.creditoImpresa), leftX + leftW - 1.5, ry - 1, { align: 'right' });
+        }
+      }
+
+      const totRowY = topTableY + 135;
+      doc.setDrawColor(46, 107, 52);
+      doc.line(leftX, totRowY, leftX + leftW, totRowY);
+      doc.line(leftX, totRowY + 6, leftX + leftW, totRowY + 6);
+      doc.line(leftX, totRowY + 12, leftX + leftW, totRowY + 12);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      doc.setTextColor(20, 20, 20);
+      doc.text('TOTALE', leftX + col1W + col2W - 1.5, totRowY + 4.2, { align: 'right' });
+      doc.text(fmtNum(paymentCertData.previousCertificatesTotal), leftX + leftW - 1.5, totRowY + 4.2, { align: 'right' });
+
+      doc.setFont('helvetica', 'normal');
+      doc.text('anticipazione', leftX + col1W + col2W - 1.5, totRowY + 10.2, { align: 'right' });
+      doc.text(fmtNum(localConfig.anticipationGrantedAmount || 0), leftX + leftW - 1.5, totRowY + 10.2, { align: 'right' });
+
+      // ASSICURAZIONE OPERAI
+      const assY = totRowY + 20;
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.text('ASSICURAZIONE OPERAI', leftX + leftW / 2, assY, { align: 'center' });
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7);
+      const inailText = `L'Impresa ha assicurato gli operai con Polizza continuativa presso l'INAIL ${localConfig.inailPolicy || `di ${city}`}`;
+      const inailLines = doc.splitTextToSize(inailText, leftW - 4);
+      doc.text(inailLines, leftX + 2, assY + 7);
+      doc.line(leftX + 2, assY + 20, leftX + leftW - 2, assY + 20);
+
+      // Firma Direttore dei Lavori nella colonna sinistra
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      doc.text('Il Direttore dei Lavori', leftX + leftW / 2, bottomBoxY - 18, { align: 'center' });
+      doc.setFont('helvetica', 'bold');
+      doc.text(director, leftX + leftW / 2, bottomBoxY - 14, { align: 'center' });
+
+      // 5. Colonna Destra (x = 73..198)
+      const rightX = 73;
+      const rightEnd = 198;
+      const valColW = 34;
+      const valColX = rightEnd - valColW;
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(20, 20, 20);
+      doc.text('IL SOTTOSCRITTO,', rightX, topTableY + 4);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.5);
+      const preambleText = `VISTO: il Contratto in data ${contractDateFormatted} ${repertoryInfo} con il quale fu affidata alla predetta impresa l'esecuzione dei suindicati lavori;\nRISULTANDO dalla contabilità sino ad oggi che l'ammontare dei lavori eseguiti e delle spese fatte è quello in seguito riportato:`;
+      const preambleLines = doc.splitTextToSize(preambleText, rightEnd - rightX);
+      doc.text(preambleLines, rightX, topTableY + 11);
+
+      // Tabella importi colonna destra (stile PriMus)
+      let curY = topTableY + 30;
+      doc.setDrawColor(46, 107, 52);
+      doc.setLineWidth(0.4);
+
+      // Blocco 1: Lavori e somministrazioni (Misura + Corpo - Ribasso)
+      const box1StartY = curY;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.8);
+      doc.text('Lavori a misura eseguiti', valColX - 3, curY + 4.5, { align: 'right' });
+      doc.text(fmtNum(currentSalData.measureTotal), rightEnd - 2, curY + 4.5, { align: 'right' });
+      curY += 5.5;
+
+      if (currentSalData.bodyTotal > 0) {
+        doc.text('Lavori a corpo eseguiti', valColX - 3, curY + 4.5, { align: 'right' });
+        doc.text(fmtNum(currentSalData.bodyTotal), rightEnd - 2, curY + 4.5, { align: 'right' });
+        curY += 5.5;
+      }
+
+      if (localConfig.discountPercent > 0) {
+        doc.text(`Ribasso d'asta del ${numberFormatter.format(localConfig.discountPercent)}% su euro ${fmtNum(currentSalData.worksBase)}`, valColX - 3, curY + 4.5, { align: 'right' });
+        doc.text(`-${fmtNum(currentSalData.discount)}`, rightEnd - 2, curY + 4.5, { align: 'right' });
+        curY += 5.5;
+      } else {
+        curY += 4;
+      }
+
+      doc.rect(valColX, box1StartY, valColW, curY - box1StartY);
+
+      // Riga SOMMANO importi soggetti a ritenute euro
+      doc.setFont('helvetica', 'bold');
+      doc.text('SOMMANO importi soggetti a ritenute euro', valColX - 3, curY + 4.5, { align: 'right' });
+      doc.rect(valColX, curY, valColW, 6.5);
+      doc.text(fmtNum(paymentCertData.sommanoSoggettiARitenute), rightEnd - 2, curY + 4.5, { align: 'right' });
+      curY += 6.5;
+
+      // Blocco 2: IMPORTI NON SOGGETTI A RITENUTE (Oneri Sicurezza)
+      const box2StartY = curY;
+      doc.setFont('helvetica', 'normal');
+      doc.text('IMPORTI NON SOGGETTI A RITENUTE (Oneri Sicurezza)', valColX - 3, curY + 5, { align: 'right' });
+      if (paymentCertData.sommanoNonSoggettiARitenute > 0) {
+        doc.text(fmtNum(paymentCertData.sommanoNonSoggettiARitenute), rightEnd - 2, curY + 5, { align: 'right' });
+      }
+      curY += 10;
+      doc.rect(valColX, box2StartY, valColW, curY - box2StartY);
+
+      // Riga SOMMANO importi NON soggetti a ritenute euro
+      doc.setFont('helvetica', 'bold');
+      doc.text('SOMMANO importi NON soggetti a ritenute euro', valColX - 3, curY + 4.5, { align: 'right' });
+      doc.rect(valColX, curY, valColW, 6.5);
+      doc.text(fmtNum(paymentCertData.sommanoNonSoggettiARitenute), rightEnd - 2, curY + 4.5, { align: 'right' });
+      curY += 6.5;
+
+      // Header DETRAZIONI nella colonna valori
+      doc.rect(valColX, curY, valColW, 6);
+      doc.text('DETRAZIONI', valColX + valColW / 2, curY + 4.2, { align: 'center' });
+      curY += 6;
+
+      // Blocco Detrazioni
+      const box3StartY = curY;
+      doc.setFont('helvetica', 'normal');
+      doc.text(`Ritenuta per infortuni ${localConfig.withholdingTaxPercent}%`, valColX - 3, curY + 5.5, { align: 'right' });
+      doc.text(fmtNum(paymentCertData.cumRetentionAmount), rightEnd - 2, curY + 5.5, { align: 'right' });
+      curY += 5.5;
+
+      if ((localConfig.advancePaymentPercent || 0) > 0) {
+        doc.text(`Recupero anticipazione ${localConfig.advancePaymentPercent}%`, valColX - 3, curY + 5.5, { align: 'right' });
+        doc.text(fmtNum(paymentCertData.cumRecoveryAmount), rightEnd - 2, curY + 5.5, { align: 'right' });
+        curY += 5.5;
+      }
+
+      curY += 12;
+      doc.text('Ammontare dei certificati precedenti euro', valColX - 3, curY + 4.5, { align: 'right' });
+      doc.text(fmtNum(paymentCertData.previousCertificatesTotal), rightEnd - 2, curY + 4.5, { align: 'right' });
+      curY += 6;
+      doc.rect(valColX, box3StartY, valColW, curY - box3StartY);
+
+      // SOMMANO LE DETRAZIONI euro
+      doc.setFont('helvetica', 'bold');
+      doc.text('SOMMANO LE DETRAZIONI euro', valColX - 3, curY + 4.5, { align: 'right' });
+      doc.rect(valColX, curY, valColW, 6.5);
+      doc.text(fmtNum(paymentCertData.sommanoDetrazioni), rightEnd - 2, curY + 4.5, { align: 'right' });
+      curY += 6.5;
+
+      // CREDITO Impresa
+      doc.text(
+        localConfig.roundCertificateTo100 ? 'CREDITO Impresa arrotondato a 100 euro' : 'CREDITO Impresa (Rata netta certificata) euro',
+        valColX - 3,
+        curY + 4.8,
+        { align: 'right' }
+      );
+      doc.rect(valColX, curY, valColW, 7);
+      doc.text(fmtNum(paymentCertData.taxableCertified), rightEnd - 2, curY + 4.8, { align: 'right' });
+      curY += 7;
+
+      // I.V.A.
+      doc.setFont('helvetica', 'normal');
+      doc.text(`per I.V.A. al ${localConfig.vatPercent}%`, valColX - 3, curY + 4.5, { align: 'right' });
+      doc.rect(valColX, curY, valColW, 6.5);
+      doc.text(fmtNum(paymentCertData.vatAmount), rightEnd - 2, curY + 4.5, { align: 'right' });
+      curY += 6.5;
+
+      // TOTALE GENERALE euro
+      doc.setFont('helvetica', 'bold');
+      doc.text('T O T A L E   G E N E R A L E   euro', valColX - 3, curY + 5, { align: 'right' });
+      doc.rect(valColX, curY, valColW, 7.5);
+      doc.text(fmtNum(paymentCertData.totalPayable), rightEnd - 2, curY + 5, { align: 'right' });
+      curY += 15;
+
+      // CERTIFICA
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.5);
+      doc.text('C E R T I F I C A', (rightX + rightEnd) / 2, curY, { align: 'center' });
+      curY += 8;
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      const certBody = `CHE ai termini del capitolato speciale d'appalto si può pagare all'impresa la rata di euro ${fmtNum(paymentCertData.taxableCertified)} oltre IVA, se dovuta, come per legge.\nDiconsi: (euro ${paymentCertData.diconsiText}).`;
+      const certLines = doc.splitTextToSize(certBody, rightEnd - rightX);
+      doc.text(certLines, rightX, curY);
+      curY += certLines.length * 4.5 + 10;
+
+      // Data e Firma RUP
+      doc.text(`${city}, ${salDateStr}`, rightX, curY);
+      doc.text('Il Responsabile del Procedimento', rightEnd - 28, curY + 6, { align: 'center' });
+      doc.setFont('helvetica', 'bold');
+      doc.text(rup, rightEnd - 28, curY + 10.5, { align: 'center' });
+
+      doc.save(`${projectName?.replace(/[^a-z0-9]/gi, '_') || 'Progetto'}_Certificato_Pagamento_SAL_${salNum}.pdf`);
+    } catch (err) {
+      console.error(err);
+      alert("Errore durante la generazione del PDF del Certificato di Pagamento.");
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  };
+
+  // Disegna il Frontespizio Standard PriMus (con banda gialla laterale, Stemma, Oggetto, Committente, Impresa, Titolo Rosso e Firme)
+  const drawPriMusCoverPage = (
+    doc: any,
+    pageWidth: number,
+    pageHeight: number,
+    docTitleMain: string,
+    docTitleSub: string,
+    redSubtitle: string,
+    signerRole: string,
+    signerName: string
+  ) => {
+    const margin = 12;
+    const boxW = pageWidth - margin * 2;
+    const boxH = pageHeight - margin * 2;
+    const headerH = 38;
+    const footerH = 14;
+    const yellowColW = 42;
+
+    doc.setDrawColor(40, 40, 40);
+    doc.setLineWidth(0.35);
+    doc.rect(margin, margin, boxW, boxH);
+
+    // Fascia Gialla Sinistra (tra header e footer)
+    const bodyTop = margin + headerH;
+    const bodyH = boxH - headerH - footerH;
+    doc.setFillColor(255, 255, 0);
+    doc.rect(margin, bodyTop, yellowColW, bodyH, 'FD');
+
+    // Linee divisorie orizzontali Header e Footer
+    doc.line(margin, bodyTop, margin + boxW, bodyTop);
+    doc.line(margin, margin + boxH - footerH, margin + boxW, margin + boxH - footerH);
+    doc.line(margin + yellowColW, margin + boxH - footerH, margin + yellowColW, margin + boxH);
+
+    // Stemma + Nome Ente nell'Header
+    doc.setLineWidth(0.5);
+    doc.rect(margin + 10, margin + 7, 18, 22);
+    doc.line(margin + 19, margin + 7, margin + 19, margin + 29);
+    doc.line(margin + 10, margin + 18, margin + 28, margin + 18);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(16);
+    doc.setTextColor(0, 0, 180);
+    doc.text(localConfig.municipalityName || 'STAZIONE APPALTANTE', margin + 44, margin + 18);
+    if (localConfig.provinceName) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(12);
+      doc.text(localConfig.provinceName, margin + 44, margin + 25);
+    }
+
+    // "pag. 1" in alto a destra nel corpo
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(30, 30, 30);
+    doc.text('pag. 1', margin + boxW - 4, bodyTop + 5, { align: 'right' });
+
+    // Titolo Principale Rosso Scuro stile PriMus
+    const rightX = margin + yellowColW + 4;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(22);
+    doc.setTextColor(128, 0, 0);
+    doc.text(docTitleMain, rightX, bodyTop + 30);
+    if (docTitleSub) {
+      doc.setFontSize(17);
+      doc.text(docTitleSub, rightX, bodyTop + 39);
+    }
+
+    // Etichette nella colonna gialla e valori a destra
+    const yObj = bodyTop + 54;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(20, 20, 20);
+    doc.text('OGGETTO:', margin + yellowColW - 2, yObj, { align: 'right' });
+    doc.setFont('helvetica', 'normal');
+    const objLines = doc.splitTextToSize(projectName || 'Lavori in appalto', boxW - yellowColW - 10);
+    doc.text(objLines, rightX, yObj);
+
+    const yComm = yObj + Math.max(2, objLines.length) * 5 + 8;
+    doc.setFont('helvetica', 'bold');
+    doc.text('COMMITTENTE:', margin + yellowColW - 2, yComm, { align: 'right' });
+    doc.setFont('helvetica', 'normal');
+    doc.text(localConfig.clientName || localConfig.municipalityName || 'Amministrazione Committente', rightX, yComm);
+
+    const yImp = yComm + 12;
+    doc.setFont('helvetica', 'bold');
+    doc.text('IMPRESA:', margin + yellowColW - 2, yImp, { align: 'right' });
+    doc.setFont('helvetica', 'normal');
+    doc.text(localConfig.contractorName || 'Impresa Appaltatrice', rightX, yImp);
+
+    // Sottotitolo rosso (es. "Sommario Registro di Contabilità al S.A.L. n. 1")
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10.5);
+    doc.setTextColor(128, 0, 0);
+    doc.text(redSubtitle, rightX, yImp + 16);
+
+    // Blocco Firma in basso a destra
+    const sigY = margin + boxH - footerH - 26;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(20, 20, 20);
+    doc.text(signerRole, margin + boxW - 45, sigY, { align: 'center' });
+    doc.setFont('helvetica', 'normal');
+    doc.text(signerName, margin + boxW - 45, sigY + 5, { align: 'center' });
+
+    // Footer Studio Tecnico
+    const footY = margin + boxH - footerH;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(120, 90, 0);
+    doc.text('DIREZIONE LAVORI', margin + yellowColW / 2, footY + 8, { align: 'center' });
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.5);
+    doc.setTextColor(0, 0, 180);
+    doc.text(localConfig.studioHeader || 'Ufficio di Direzione dei Lavori e Contabilità', rightX, footY + 6);
+    doc.setFontSize(7.5);
+    doc.text(
+      `Contratto: ${localConfig.contractCode ? `CIG/CUP ${localConfig.contractCode}` : 'Agli atti'} • Data stampa: ${format(new Date(), 'dd/MM/yyyy')}`,
+      rightX,
+      footY + 11
+    );
+  };
+
   const generateAccountingPdf = (type: 'libretto' | 'register' | 'summary') => {
     setIsGeneratingPdf(true);
     try {
@@ -1272,40 +1913,51 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       const doc = new jspdf.jsPDF({ orientation, unit: 'mm', format: 'a4' });
       const pageWidth = doc.internal.pageSize.getWidth();
       const pageHeight = doc.internal.pageSize.getHeight();
+      const sal = sals.find(s => s.id === activeSalId);
+      const salNum = sal?.number || 1;
+      const fmtNum = (n: number) => numberFormatter.format(round2(n));
 
-      // Cover Page
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(22);
-      doc.text(projectName || 'Progetto', pageWidth / 2, 55, { align: 'center' });
-      
-      doc.setFontSize(16);
       const titles = {
         libretto: 'Libretto delle Misure',
         register: 'Registro di Contabilità',
-        summary: 'Sommario del Registro'
+        summary: 'Sommario del Registro di Contabilità'
       };
-      doc.text(titles[type], pageWidth / 2, 75, { align: 'center' });
-      
-      const sal = sals.find(s => s.id === activeSalId);
-      if (sal) {
-        doc.setFontSize(13);
-        doc.setFont('helvetica', 'normal');
-        doc.text(`Stato Avanzamento Lavori N. ${sal.number}`, pageWidth / 2, 95, { align: 'center' });
-        doc.text(`Situazione contabile a tutto il ${format(parseISO(sal.date), 'dd/MM/yyyy')}`, pageWidth / 2, 105, { align: 'center' });
-      }
 
-      if (localConfig.contractorName) {
-        doc.setFontSize(11);
-        doc.text(`Impresa Appaltatrice: ${localConfig.contractorName}`, pageWidth / 2, 125, { align: 'center' });
+      // Pagina 1: Frontespizio Standard PriMus
+      if (type === 'summary') {
+        drawPriMusCoverPage(
+          doc,
+          pageWidth,
+          pageHeight,
+          'SOMMARIO',
+          "REGISTRO DI CONTABILITA'",
+          `Sommario Registro di Contabilità al S.A.L. n. ${salNum}`,
+          'IL DIRETTORE DEI LAVORI',
+          localConfig.directorOfWorks || 'Il Direttore dei Lavori'
+        );
+      } else if (type === 'register') {
+        drawPriMusCoverPage(
+          doc,
+          pageWidth,
+          pageHeight,
+          "REGISTRO DI CONTABILITA'",
+          '',
+          `Registro di Contabilità a tutto il S.A.L. n. ${salNum} (${format(parseISO(salReferenceDate), 'dd/MM/yyyy')})`,
+          'IL RESPONSABILE DEL PROCEDIMENTO',
+          localConfig.rupName || 'Il Responsabile del Procedimento'
+        );
+      } else {
+        drawPriMusCoverPage(
+          doc,
+          pageWidth,
+          pageHeight,
+          'LIBRETTO DELLE MISURE',
+          '',
+          `Libretto Unico delle Misure a tutto il S.A.L. n. ${salNum} (${format(parseISO(salReferenceDate), 'dd/MM/yyyy')})`,
+          'IL DIRETTORE DEI LAVORI',
+          localConfig.directorOfWorks || 'Il Direttore dei Lavori'
+        );
       }
-      
-      if (localConfig.contractCode) {
-        doc.text(`CIG/CUP: ${localConfig.contractCode}`, pageWidth / 2, 135, { align: 'center' });
-      }
-
-      doc.setFontSize(9);
-      doc.setTextColor(120);
-      doc.text("Generato con Chronos AI - D.Lgs. 36/2023", pageWidth / 2, pageHeight - 18, { align: 'center' });
 
       doc.addPage();
 
@@ -1313,8 +1965,10 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       let rows: any[] = [];
       let columnStyles: any = {};
       let grandTotal = 0;
+      let grandPaymentTotal = 0;
 
       if (type === 'libretto') {
+        // IMPORTANTE: Manteniamo identiche le geometrie di autoTable per il Libretto Unico per preservare la corrispondenza 1:1 Pag. X di Y
         columns = [
           { header: 'N. ord. (LB)', dataKey: 'idx' },
           { header: 'Data', dataKey: 'date' },
@@ -1346,189 +2000,368 @@ const AccountingView: React.FC<AccountingViewProps> = ({
           };
         });
       } else if (type === 'register') {
+        // REGISTRO DI CONTABILITÀ STANDARD PRIMUS (Colonne: Num.Ord./TARIFFA/DATA | INDICAZIONE DEI LAVORI | libretto Nr | Pg | Quantità Positivi | Negativi | PREZZO unitario | IMPORTI Debito | Pagamento)
         columns = [
-          { header: 'N. RG.', dataKey: 'regIdx' },
-          { header: 'Data', dataKey: 'date' },
-          { header: 'Rif. (N. LB. / Pag.)', dataKey: 'libIdx' },
-          { header: 'Codice Articolo', dataKey: 'code' },
-          { header: 'Designazione dei Lavori e delle Provviste', dataKey: 'desc' },
-          { header: 'U.M.', dataKey: 'um' },
-          { header: 'Quantità', dataKey: 'qty' },
-          { header: 'Prezzo Unit.', dataKey: 'price' },
-          { header: 'Importo Debito', dataKey: 'amount' },
-          { header: 'Totale Prog.', dataKey: 'prog' }
+          { header: 'Num.Ord.\nTARIFFA\nD A T A', dataKey: 'colOrd' },
+          { header: 'INDICAZIONE DEI LAVORI\nE DELLE\nSOMMINISTRAZIONI', dataKey: 'desc' },
+          { header: 'libretto\nNr', dataKey: 'libNr' },
+          { header: 'libretto\nPg', dataKey: 'libPg' },
+          { header: 'Quantità/Perc.\nPositivi', dataKey: 'qtyPos' },
+          { header: 'Quantità/Perc.\nNegativi', dataKey: 'qtyNeg' },
+          { header: 'PREZZO\nunitario', dataKey: 'price' },
+          { header: 'I M P O R T I\nDebito', dataKey: 'debit' },
+          { header: 'I M P O R T I\nPagamento', dataKey: 'payment' }
         ];
         columnStyles = {
-          regIdx: { halign: 'center', cellWidth: 16, fontStyle: 'bold' },
-          date: { halign: 'center', cellWidth: 20 },
-          libIdx: { halign: 'center', cellWidth: 24, fontStyle: 'bold' },
-          code: { fontStyle: 'bold', cellWidth: 28 },
-          desc: { cellWidth: 81, halign: 'justify' },
-          um: { halign: 'center', cellWidth: 12 },
-          qty: { halign: 'right', cellWidth: 20 },
-          price: { halign: 'right', cellWidth: 24 },
-          amount: { halign: 'right', cellWidth: 24, fontStyle: 'bold' },
-          prog: { halign: 'right', cellWidth: 24, fontStyle: 'bold' }
-        };
-        const visibleEntries = activeRegisterEntries.filter(applyFilters);
-        grandTotal = visibleEntries.length > 0 ? visibleEntries[visibleEntries.length - 1].runningProgressive : 0;
-
-        rows = visibleEntries.map(e => {
-          const fmtQty = e.accountingType === 'body' ? percentFormatter.format(e.quantity) : numberFormatter.format(e.quantity);
-          const dims = (e.accountingType !== 'body' && (e.factor !== undefined || e.length !== undefined || e.width !== undefined || e.height !== undefined))
-            ? `\n([${[
-                e.factor !== undefined ? `F:${numberFormatter.format(e.factor)}` : null,
-                e.length !== undefined ? `L:${numberFormatter.format(e.length)}` : null,
-                e.width !== undefined ? `l:${numberFormatter.format(e.width)}` : null,
-                e.height !== undefined ? `H:${numberFormatter.format(e.height)}` : null
-              ].filter(Boolean).join(' × ')}])`
-            : '';
-
-          return {
-            regIdx: `N. RG. ${e.registerOrderIndex}`,
-            date: format(parseISO(e.date), 'dd/MM/yyyy'),
-            libIdx: formatLibrettoRef(e.progressiveIndex, e.librettoPage, true),
-            code: formatCodeWithComputoIndex(e.articleCode, e.originalIndex, e.accountingType),
-            desc: `${e.description}${e.measurementNote ? '\nNote: ' + e.measurementNote : ''}${dims}`,
-            um: e.unit,
-            qty: fmtQty,
-            price: currencyFormatter.format(e.unitPrice),
-            amount: currencyFormatter.format(e.debit),
-            prog: currencyFormatter.format(e.runningProgressive),
-            rawCumulativeAmount: e.runningProgressive
-          };
-        });
-      } else if (type === 'summary') {
-        columns = [
-          { header: 'N. SM. / Rif. (N. LB.-Pag.)', dataKey: 'idx' },
-          { header: 'Data / WBS', dataKey: 'date' },
-          { header: 'Codice Articolo / Designazione Lavori', dataKey: 'desc' },
-          { header: 'U.M.', dataKey: 'um' },
-          { header: 'Quantità', dataKey: 'qty' },
-          { header: 'Prezzo Unit.', dataKey: 'price' },
-          { header: 'Importo Tot.', dataKey: 'amount' }
-        ];
-        columnStyles = {
-          idx: { halign: 'center', cellWidth: 24, fontStyle: 'bold' },
-          date: { halign: 'center', cellWidth: 22 },
-          desc: { cellWidth: 66, halign: 'justify' },
-          um: { halign: 'center', cellWidth: 12 },
-          qty: { halign: 'right', cellWidth: 18 },
+          colOrd: { halign: 'left', cellWidth: 28, fontSize: 7 },
+          desc: { cellWidth: 123, halign: 'justify', fontSize: 7.5 },
+          libNr: { halign: 'center', cellWidth: 11, fontStyle: 'bold' },
+          libPg: { halign: 'center', cellWidth: 11 },
+          qtyPos: { halign: 'right', cellWidth: 20 },
+          qtyNeg: { halign: 'right', cellWidth: 18 },
           price: { halign: 'right', cellWidth: 20 },
-          amount: { halign: 'right', cellWidth: 24, fontStyle: 'bold' }
+          debit: { halign: 'right', cellWidth: 21, fontStyle: 'bold' },
+          payment: { halign: 'right', cellWidth: 21, fontStyle: 'bold' }
+        };
+
+        const visibleEntries = activeRegisterEntries.filter(applyFilters);
+        rows = [];
+        let runningDebit = 0;
+
+        // Raggruppiamo come nello standard PriMus o elenchiamo con intestazioni di sezione al cambio categoria
+        const pushRegisterSection = (sectionTitle: string, sectionEntries: typeof visibleEntries, isBodySection: boolean = false) => {
+          if (sectionEntries.length === 0) return;
+          rows.push({
+            colOrd: '',
+            desc: sectionTitle,
+            libNr: '',
+            libPg: '',
+            qtyPos: '',
+            qtyNeg: '',
+            price: '',
+            debit: '',
+            payment: '',
+            isSectionHeader: true,
+            rawCumulativeAmount: runningDebit
+          });
+
+          let sectionSum = 0;
+          sectionEntries.forEach(e => {
+            runningDebit = round2(runningDebit + e.debit);
+            sectionSum = round2(sectionSum + e.debit);
+            const codeLine = (e.accountingType !== 'body' && e.originalIndex && e.originalIndex > 0)
+              ? `N. CM. ${e.originalIndex} - ${e.articleCode}`
+              : e.articleCode;
+            const dims = (e.accountingType !== 'body' && (e.factor !== undefined || e.length !== undefined || e.width !== undefined || e.height !== undefined))
+              ? ` ([${[
+                  e.factor !== undefined ? `F:${numberFormatter.format(e.factor)}` : null,
+                  e.length !== undefined ? `L:${numberFormatter.format(e.length)}` : null,
+                  e.width !== undefined ? `l:${numberFormatter.format(e.width)}` : null,
+                  e.height !== undefined ? `H:${numberFormatter.format(e.height)}` : null
+                ].filter(Boolean).join(' × ')}])`
+              : '';
+            const qtyVal = e.accountingType === 'body' ? e.quantity * 100 : e.quantity;
+            const posStr = qtyVal >= 0 ? numberFormatter.format(qtyVal) : '';
+            const negStr = qtyVal < 0 ? numberFormatter.format(Math.abs(qtyVal)) : '';
+
+            rows.push({
+              colOrd: `N. RG. ${e.registerOrderIndex}\n${codeLine}\n${format(parseISO(e.date), 'dd/MM/yyyy')}`,
+              desc: `${e.description}${e.measurementNote ? '\n' + e.measurementNote : ''}${dims}\nSOMMANO ${e.accountingType === 'body' ? '%' : e.unit}`,
+              libNr: `${e.progressiveIndex}`,
+              libPg: `${e.librettoPage}`,
+              qtyPos: posStr,
+              qtyNeg: negStr,
+              price: fmtNum(e.unitPrice),
+              debit: fmtNum(e.debit),
+              payment: '',
+              rawCumulativeAmount: runningDebit
+            });
+          });
+
+          rows.push({
+            colOrd: '',
+            desc: isBodySection ? `Parziale LAVORI A CORPO euro` : `Parziale ${sectionTitle.split('\n')[0]} euro`,
+            libNr: '',
+            libPg: '',
+            qtyPos: '',
+            qtyNeg: '',
+            price: '',
+            debit: fmtNum(sectionSum),
+            payment: '',
+            isSubtotalRow: true,
+            rawCumulativeAmount: runningDebit
+          });
+        };
+
+        const measureItems = visibleEntries.filter(e => e.accountingType === 'measure' && !e.isSecurityCost);
+        const bodyItems = visibleEntries.filter(e => e.accountingType === 'body' && !e.isSecurityCost);
+        const securityItems = visibleEntries.filter(e => e.isSecurityCost);
+
+        pushRegisterSection('LAVORI A MISURA', measureItems, false);
+        pushRegisterSection(
+          `LAVORI A CORPO${currentSalData.bodyGroupsTotalValue > 0 ? `\n(Progetto euro ${fmtNum(currentSalData.bodyGroupsTotalValue)} - 100%)` : ''}`,
+          bodyItems,
+          true
+        );
+        pushRegisterSection('COSTI SICUREZZA (SPECIALI)', securityItems, false);
+
+        grandTotal = runningDebit;
+
+        // Riga TOTALE euro e annotazione Certificato di Pagamento emesso (come a pag. 4 di Registro_contabilita_933a136b.PDF)
+        if (grandTotal > 0) {
+          rows.push({
+            colOrd: '',
+            desc: `T O T A L E   euro\n\n${localConfig.locationCity || 'Sede Lavori'}, ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')}\n\nL'Impresa: ${localConfig.contractorName || '____________________'}\nIl Direttore dei Lavori: ${localConfig.directorOfWorks || '____________________'}`,
+            libNr: '',
+            libPg: '',
+            qtyPos: '',
+            qtyNeg: '',
+            price: '',
+            debit: fmtNum(grandTotal),
+            payment: '',
+            isSubtotalRow: true,
+            rawCumulativeAmount: grandTotal
+          });
+
+          // Annotazione Certificati di Pagamento emessi fino al SAL corrente
+          const certsUpToActive = activeSalId
+            ? allSalCertificates.filter(c => c.number <= salNum)
+            : allSalCertificates;
+
+          certsUpToActive.forEach(cert => {
+            grandPaymentTotal = round2(grandPaymentTotal + cert.creditoImpresa);
+            rows.push({
+              colOrd: '',
+              desc: `In data ${format(parseISO(cert.date), 'dd/MM/yyyy')} è stato emesso il CERTIFICATO DI PAGAMENTO n. ${cert.number} per un importo di euro\n   Il Direttore dei Lavori: ${localConfig.directorOfWorks || ''}`,
+              libNr: '',
+              libPg: '',
+              qtyPos: '',
+              qtyNeg: '',
+              price: '',
+              debit: '',
+              payment: fmtNum(cert.creditoImpresa),
+              rawCumulativeAmount: grandTotal
+            });
+          });
+        }
+      } else if (type === 'summary') {
+        // SOMMARIO DEL REGISTRO DI CONTABILITÀ STANDARD PRIMUS
+        // Colonne: Num.Ord./TARIFFA | INDICAZIONE DEI LAVORI E DELLE SOMMINISTRAZIONI | riferimenti SAL | RC | Quantità | IMPORTI unitario | TOTALE
+        columns = [
+          { header: 'Num.Ord.\nTARIFFA', dataKey: 'colOrd' },
+          { header: 'INDICAZIONE DEI LAVORI\nE DELLE\nSOMMINISTRAZIONI', dataKey: 'desc' },
+          { header: 'rif.\nSAL', dataKey: 'refSal' },
+          { header: 'rif.\nRC / LB', dataKey: 'refRc' },
+          { header: 'Quantità', dataKey: 'qty' },
+          { header: 'IMPORTI\nunitario', dataKey: 'price' },
+          { header: 'IMPORTI\nTOTALE', dataKey: 'amount' }
+        ];
+        columnStyles = {
+          colOrd: { halign: 'left', cellWidth: 23, fontSize: 7, fontStyle: 'bold' },
+          desc: { cellWidth: 79, halign: 'justify', fontSize: 7.5 },
+          refSal: { halign: 'center', cellWidth: 10, fontStyle: 'bold' },
+          refRc: { halign: 'center', cellWidth: 16, fontSize: 6.8 },
+          qty: { halign: 'right', cellWidth: 18 },
+          price: { halign: 'right', cellWidth: 19 },
+          amount: { halign: 'right', cellWidth: 21, fontStyle: 'bold' }
         };
 
         const visibleItems = accountingSummary.filter(applyFilters);
         let runningSum = 0;
         rows = [];
+        let globalSmIdx = 0;
 
-        visibleItems.forEach((item, artIdx) => {
-          const fmtQty = (q: number) => item.accountingType === 'body' ? percentFormatter.format(q) : numberFormatter.format(q);
-          const allLines = item.allLines || [...item.previousLines, ...item.currentLines];
-          const formattedItemCode = formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType);
-          const salBreakdownText = (item.salBreakdown && item.salBreakdown.length > 0)
-            ? `Rif. SAL: ${item.salBreakdown.map(sb => `${sb.salLabel} [Q.tà: ${fmtQty(sb.quantity)} | ${currencyFormatter.format(sb.amount)}]`).join('  •  ')}`
-            : '';
+        const pushSummarySection = (sectionTitle: string, sectionItems: SummaryEntry[], isBodySection: boolean = false) => {
+          if (sectionItems.length === 0) return;
+          rows.push({
+            colOrd: '',
+            desc: sectionTitle,
+            refSal: '',
+            refRc: '',
+            qty: '',
+            price: '',
+            amount: '',
+            isSectionHeader: true,
+            rawCumulativeAmount: runningSum
+          });
 
-          if (summaryMode === 'analytical') {
-            // Riga Intestazione Articolo (senza dati ridondanti a destra, riportati nelle righe sottostanti e nel SOMMANO)
+          let sectionSubtotal = 0;
+          sectionItems.forEach((item) => {
+            globalSmIdx++;
+            const fmtQty = (q: number) => item.accountingType === 'body' ? numberFormatter.format(q * 100) : numberFormatter.format(q);
+            const allLines = item.allLines || [...item.previousLines, ...item.currentLines];
+            const formattedItemCode = formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType);
+
+            // 1. Riga Intestazione Voce (senza dati ridondanti a destra, esattamente come PriMus pag. 2)
             rows.push({
-              idx: `N. SM. ${artIdx + 1}`,
-              date: item.wbsName,
-              desc: `${formattedItemCode}\n${item.description}`,
-              um: '',
+              colOrd: `${globalSmIdx}\n${formattedItemCode}`,
+              desc: item.description,
+              refSal: '',
+              refRc: '',
               qty: '',
               price: '',
               amount: '',
               rawCumulativeAmount: runningSum
             });
 
-            // Righe Misure associate con riferimento SAL
-            allLines.forEach(line => {
-              const dims = (item.accountingType !== 'body' && (line.factor !== undefined || line.length !== undefined || line.width !== undefined || line.height !== undefined))
-                ? ` ([${[
-                    line.factor !== undefined ? `F:${numberFormatter.format(line.factor)}` : null,
-                    line.length !== undefined ? `L:${numberFormatter.format(line.length)}` : null,
-                    line.width !== undefined ? `l:${numberFormatter.format(line.width)}` : null,
-                    line.height !== undefined ? `H:${numberFormatter.format(line.height)}` : null
-                  ].filter(Boolean).join(' × ')}])`
-                : '';
-
-              rows.push({
-                idx: formatLibrettoRef(line.progressiveIndex, line.librettoPage, true),
-                date: `${format(parseISO(line.date), 'dd/MM/yyyy')}\n[${line.salLabel || 'SAL N. 1'}]`,
-                desc: `   ${line.measurementNote}${dims}`,
-                um: item.unit,
-                qty: fmtQty(line.quantity),
-                price: '',
-                amount: '',
-                rawCumulativeAmount: runningSum
+            // 2. Righe Misure con SAL | RC | Quantità | TOTALE riga
+            if (summaryMode === 'analytical') {
+              allLines.forEach(line => {
+                rows.push({
+                  colOrd: '',
+                  desc: line.measurementNote && line.measurementNote !== item.description ? `   ${line.measurementNote}` : '',
+                  refSal: `${line.salNumber || 1}`,
+                  refRc: `${line.registerOrderIndex}\n(LB.${line.progressiveIndex}/P.${line.librettoPage})`,
+                  qty: fmtQty(line.quantity),
+                  price: '',
+                  amount: fmtNum(line.amount),
+                  rawCumulativeAmount: runningSum
+                });
               });
-            });
+            }
 
-            // Riga SOMMANO con riepilogo quote per SAL
+            // 3. Riga SOMMANO al S.A.L. n. X
             runningSum = round2(runningSum + item.totalAmount);
+            sectionSubtotal = round2(sectionSubtotal + item.totalAmount);
+            const salBreakdownNote = (item.salBreakdown && item.salBreakdown.length > 1)
+              ? `\n[${item.salBreakdown.map(sb => `${sb.salLabel}: ${fmtQty(sb.quantity)} ${item.unit} = € ${fmtNum(sb.amount)}`).join(' | ')}]`
+              : '';
+            const bodyAliquotaPct = (isBodySection && currentSalData.bodyGroupsTotalValue > 0)
+              ? `\n(${((item.totalAmount / currentSalData.bodyGroupsTotalValue) * 100).toFixed(3)}%)`
+              : '';
+            const bodyPriceAliquotaPct = (isBodySection && currentSalData.bodyGroupsTotalValue > 0)
+              ? `\n(${((item.unitPrice / currentSalData.bodyGroupsTotalValue) * 100).toFixed(3)}%)`
+              : '';
+
             rows.push({
-              idx: '',
-              date: item.salBreakdown?.map(sb => sb.salLabel).join(', ') || '',
-              desc: `SOMMANO (${formattedItemCode})${salBreakdownText ? `\n${salBreakdownText}` : ''}`,
-              um: item.unit,
+              colOrd: '',
+              desc: `SOMMANO al S.A.L. n. ${salNum} ${item.accountingType === 'body' ? '%' : item.unit}${isBodySection ? '\naliquote' : ''}${salBreakdownNote}`,
+              refSal: summaryMode === 'synthetic' ? item.salBreakdown.map(s => s.salNumber).join(',') : '',
+              refRc: summaryMode === 'synthetic' ? allLines.map(l => l.registerOrderIndex).join(',') : '',
               qty: fmtQty(item.totalQuantity),
-              price: currencyFormatter.format(item.unitPrice),
-              amount: currencyFormatter.format(item.totalAmount),
+              price: `${fmtNum(item.unitPrice)}${bodyPriceAliquotaPct}`,
+              amount: `${fmtNum(item.totalAmount)}${bodyAliquotaPct}`,
+              isSommanoRow: true,
               rawCumulativeAmount: runningSum
             });
-          } else {
-            // Sintetico con riferimento SAL
-            runningSum = round2(runningSum + item.totalAmount);
-            const libRefs = allLines.map(l => `${formatLibrettoRef(l.progressiveIndex, l.librettoPage, false)} (${l.salLabel || 'SAL N. 1'})`).join(', ');
-            rows.push({
-              idx: `N. SM. ${artIdx + 1}`,
-              date: libRefs,
-              desc: `[${item.wbsName}] ${formattedItemCode} - ${item.description}${salBreakdownText ? `\n${salBreakdownText}` : ''}`,
-              um: item.unit,
-              qty: fmtQty(item.totalQuantity),
-              price: currencyFormatter.format(item.unitPrice),
-              amount: currencyFormatter.format(item.totalAmount),
-              rawCumulativeAmount: runningSum
-            });
-          }
-        });
+          });
+
+          const sectionAliquota = (isBodySection && currentSalData.bodyGroupsTotalValue > 0)
+            ? `\n(${((sectionSubtotal / currentSalData.bodyGroupsTotalValue) * 100).toFixed(3)}%)`
+            : '';
+          rows.push({
+            colOrd: '',
+            desc: isBodySection ? `Parziale LAVORI A CORPO euro\naliquota` : `Parziale ${sectionTitle.split('\n')[0]} euro`,
+            refSal: '',
+            refRc: '',
+            qty: '',
+            price: '',
+            amount: `${fmtNum(sectionSubtotal)}${sectionAliquota}`,
+            isSubtotalRow: true,
+            rawCumulativeAmount: runningSum
+          });
+        };
+
+        const measureItems = visibleItems.filter(i => i.accountingType === 'measure' && !i.isSecurityCost);
+        const bodyItems = visibleItems.filter(i => i.accountingType === 'body' && !i.isSecurityCost);
+        const securityItems = visibleItems.filter(i => i.isSecurityCost);
+
+        pushSummarySection('LAVORI A MISURA', measureItems, false);
+        pushSummarySection(
+          `LAVORI A CORPO${currentSalData.bodyGroupsTotalValue > 0 ? `\n(Progetto euro ${fmtNum(currentSalData.bodyGroupsTotalValue)} - 100%)` : ''}`,
+          bodyItems,
+          true
+        );
+        pushSummarySection('COSTI SICUREZZA (SPECIALI)', securityItems, false);
+
         grandTotal = runningSum;
+
+        if (grandTotal > 0) {
+          rows.push({
+            colOrd: '',
+            desc: `T O T A L E   euro\n\n${localConfig.locationCity || 'Sede Lavori'}, ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')}\n\nIl Direttore dei Lavori\n${localConfig.directorOfWorks || '____________________'}`,
+            refSal: '',
+            refRc: '',
+            qty: '',
+            price: '',
+            amount: fmtNum(grandTotal),
+            isSubtotalRow: true,
+            rawCumulativeAmount: grandTotal
+          });
+        }
       }
 
-      // AutoTable render with margins dedicated for Riporto / A Riporto
+      // Render Tabella AutoTable
       (doc as any).autoTable({
         columns: columns,
         body: rows,
         startY: 32,
         margin: { top: 32, bottom: 25, left: 12, right: 12 },
-        styles: { fontSize: 7.5, cellPadding: 2, overflow: 'linebreak', font: 'helvetica' },
-        headStyles: { fillColor: [45, 55, 72], textColor: 255, fontStyle: 'bold', halign: 'center' },
+        styles: {
+          fontSize: 7.5,
+          cellPadding: 2,
+          overflow: 'linebreak',
+          font: type === 'libretto' ? 'helvetica' : 'times',
+          lineColor: [46, 107, 52],
+          lineWidth: 0.2
+        },
+        headStyles: {
+          fillColor: type === 'libretto' ? [45, 55, 72] : [245, 250, 245],
+          textColor: type === 'libretto' ? 255 : [25, 65, 30],
+          fontStyle: 'bold',
+          halign: 'center',
+          lineColor: [46, 107, 52],
+          lineWidth: 0.35
+        },
         columnStyles: columnStyles,
-        alternateRowStyles: { fillColor: [248, 250, 252] },
-        didDrawPage: (data: any) => {
-          // Intestazione in cima ad ogni pagina
+        didParseCell: (data: any) => {
+          if (data.section === 'body' && data.row.raw) {
+            if (data.row.raw.isSectionHeader) {
+              data.cell.styles.fontStyle = 'bold';
+              data.cell.styles.halign = 'center';
+              data.cell.styles.fillColor = [242, 247, 242];
+              data.cell.styles.textColor = [20, 20, 20];
+            } else if (data.row.raw.isSommanoRow) {
+              data.cell.styles.fontStyle = 'bold';
+              if (data.column.dataKey === 'desc') {
+                data.cell.styles.halign = 'right';
+              }
+            } else if (data.row.raw.isSubtotalRow) {
+              data.cell.styles.fontStyle = 'bold';
+              data.cell.styles.fillColor = [248, 250, 248];
+              if (data.column.dataKey === 'desc') {
+                data.cell.styles.halign = 'right';
+              }
+            }
+          }
+        },
+        didDrawPage: () => {
+          // Intestazione superiore stile PriMus
           doc.setFontSize(8.5);
-          doc.setFont('helvetica', 'bold');
-          doc.setTextColor(40);
-          doc.text(`${projectName || 'Progetto'}`, 12, 14);
-          doc.setFont('helvetica', 'normal');
-          doc.text(`${titles[type]} - Situazione al ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')} (SAL N. ${sal?.number || 'Bozza'})`, 12, 19);
-          
-          doc.setDrawColor(200, 200, 200);
-          doc.setLineWidth(0.4);
-          doc.line(12, 21.5, pageWidth - 12, 21.5);
+          doc.setFont('times', 'bold');
+          doc.setTextColor(30, 30, 30);
+          doc.text(localConfig.studioHeader || `${projectName || 'Progetto'}`, 12, 13);
+          doc.setFont('times', 'normal');
+          doc.setFontSize(8);
+          doc.text(`${titles[type]} - S.A.L. n. ${salNum} a tutto il ${format(parseISO(salReferenceDate), 'dd/MM/yyyy')}`, 12, 18);
 
-          // Data stampa in fondo alla pagina
+          doc.setDrawColor(46, 107, 52);
+          doc.setLineWidth(0.5);
+          doc.line(12, 20.5, pageWidth - 12, 20.5);
+
+          // Piè di pagina stile PriMus
           doc.setFontSize(7.5);
-          doc.setTextColor(120);
-          doc.text(`Data stampa: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 12, pageHeight - 8);
-          doc.text(`Doc: ${titles[type]}`, pageWidth / 2, pageHeight - 8, { align: 'center' });
+          doc.setTextColor(40, 40, 40);
+          doc.text(`COMMITTENTE: ${localConfig.clientName || localConfig.municipalityName || projectName || ''}`, 12, pageHeight - 10);
+          doc.text(`${titles[type].toUpperCase()} N. ${salNum}`, 12, pageHeight - 6);
+          if (type === 'register') {
+            doc.text("L'IMPRESA", pageWidth * 0.35, pageHeight - 6, { align: 'center' });
+            doc.text('IL RESPONSABILE DEL PROCEDIMENTO', pageWidth * 0.65, pageHeight - 6, { align: 'center' });
+          }
         }
       });
 
-      // Post-Processing: Riporto e A Riporto pagina per pagina
+      // Post-Processing: R I P O R T O / A R I P O R T A R E e Paginazione
       const totalDocPages = (doc as any).internal.getNumberOfPages();
       const lastTable = (doc as any).lastAutoTable;
       const tablePagesCount = lastTable ? lastTable.pageCount : (totalDocPages - 1);
@@ -1541,69 +2374,78 @@ const AccountingView: React.FC<AccountingViewProps> = ({
       };
 
       for (let p = 1; p <= tablePagesCount; p++) {
-        const docPage = p + 1; // pagina 1 è la copertina
+        const docPage = p + 1; // pagina 1 è il Frontespizio
         if (docPage > totalDocPages) break;
         doc.setPage(docPage);
 
-        if (tablePagesCount > 1) {
-          // RIPORTO a inizio pagina (dalla seconda pagina del documento)
+        if (tablePagesCount > 1 && type !== 'libretto') {
+          // R I P O R T O a inizio pagina
           if (p > 1) {
             const prevCum = getPageCumulative(p - 1);
-            doc.setFillColor(248, 250, 252);
-            doc.setDrawColor(203, 213, 225);
-            doc.setLineWidth(0.3);
-            doc.rect(12, 23.5, pageWidth - 24, 6.5, 'FD');
+            doc.setFillColor(245, 250, 245);
+            doc.setDrawColor(46, 107, 52);
+            doc.setLineWidth(0.35);
+            doc.rect(12, 23, pageWidth - 24, 6.5, 'FD');
 
-            doc.setFont('helvetica', 'bold');
+            doc.setFont('times', 'bold');
             doc.setFontSize(8);
-            doc.setTextColor(71, 85, 105);
-            doc.text('RIPORTO DALLA PAGINA PRECEDENTE', 16, 27.8);
+            doc.setTextColor(25, 65, 30);
+            doc.text('R I P O R T O', pageWidth / 2, 27.3, { align: 'center' });
 
             doc.setFontSize(8.5);
             doc.setTextColor(15, 23, 42);
-            doc.text(currencyFormatter.format(prevCum), pageWidth - 16, 27.8, { align: 'right' });
+            doc.text(fmtNum(prevCum), pageWidth - 15, 27.3, { align: 'right' });
           }
 
-          // A RIPORTO a fine pagina (fino alla penultima pagina)
+          // A   R I P O R T A R E a fine pagina
           if (p < tablePagesCount) {
             const currCum = getPageCumulative(p);
-            doc.setFillColor(248, 250, 252);
-            doc.setDrawColor(203, 213, 225);
-            doc.setLineWidth(0.3);
-            doc.rect(12, pageHeight - 23.5, pageWidth - 24, 6.5, 'FD');
+            doc.setFillColor(245, 250, 245);
+            doc.setDrawColor(46, 107, 52);
+            doc.setLineWidth(0.35);
+            doc.rect(12, pageHeight - 21, pageWidth - 24, 6.5, 'FD');
 
-            doc.setFont('helvetica', 'bold');
+            doc.setFont('times', 'bold');
             doc.setFontSize(8);
-            doc.setTextColor(71, 85, 105);
-            doc.text('A RIPORTO ALLA PAGINA SUCCESSIVA', 16, pageHeight - 19.2);
+            doc.setTextColor(25, 65, 30);
+            doc.text('A   R I P O R T A R E', pageWidth / 2, pageHeight - 16.7, { align: 'center' });
 
             doc.setFontSize(8.5);
             doc.setTextColor(15, 23, 42);
-            doc.text(currencyFormatter.format(currCum), pageWidth - 16, pageHeight - 19.2, { align: 'right' });
+            doc.text(fmtNum(currCum), pageWidth - 15, pageHeight - 16.7, { align: 'right' });
           }
         }
 
-        // Ultima pagina: TOTALE PROGRESSIVO GENERALE
-        if (p === tablePagesCount && grandTotal > 0) {
-          doc.setFillColor(238, 242, 255);
-          doc.setDrawColor(99, 102, 241);
+        // Ultima pagina del Registro: A R I P O R T A R E con Debito e Pagamento
+        if (p === tablePagesCount && type === 'register' && grandTotal > 0) {
+          doc.setFillColor(245, 250, 245);
+          doc.setDrawColor(46, 107, 52);
           doc.setLineWidth(0.4);
-          doc.rect(12, pageHeight - 23.5, pageWidth - 24, 7, 'FD');
+          doc.rect(12, pageHeight - 21, pageWidth - 24, 6.5, 'FD');
 
-          doc.setFont('helvetica', 'bold');
+          doc.setFont('times', 'bold');
+          doc.setFontSize(8);
+          doc.setTextColor(25, 65, 30);
+          doc.text('A   R I P O R T A R E', pageWidth / 2, pageHeight - 16.7, { align: 'center' });
+
           doc.setFontSize(8.5);
-          doc.setTextColor(49, 46, 129);
-          doc.text(`TOTALE PROGRESSIVO GENERALE A TUTTO IL SAL N. ${sal?.number || 'CORRENTE'}`, 16, pageHeight - 19);
-
-          doc.setFontSize(9.5);
-          doc.text(currencyFormatter.format(grandTotal), pageWidth - 16, pageHeight - 19, { align: 'right' });
+          doc.setTextColor(15, 23, 42);
+          doc.text(fmtNum(grandTotal), pageWidth - 35, pageHeight - 16.7, { align: 'right' });
+          if (grandPaymentTotal > 0) {
+            doc.text(fmtNum(grandPaymentTotal), pageWidth - 14, pageHeight - 16.7, { align: 'right' });
+          }
         }
 
-        // Paginazione a fondo pagina (corrispondenza esatta Pagina / Numero d'Ordine)
+        // Paginazione: per il Libretto Unico manteniamo "Pag. p di tablePagesCount" a fondo pagina per corrispondenza 1:1
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(8.5);
         doc.setTextColor(30, 41, 59);
-        doc.text(`Pag. ${p} di ${tablePagesCount}`, pageWidth - 12, pageHeight - 8, { align: 'right' });
+        if (type === 'libretto') {
+          doc.text(`Pag. ${p} di ${tablePagesCount}`, pageWidth - 12, pageHeight - 8, { align: 'right' });
+        } else {
+          doc.text(`pag. ${p + 1}`, pageWidth - 12, 18, { align: 'right' });
+          doc.text(`Pag. ${p} di ${tablePagesCount}`, pageWidth - 12, pageHeight - 6, { align: 'right' });
+        }
       }
 
       doc.save(`${projectName?.replace(/[^a-z0-9]/gi, '_') || 'document'}_${titles[type].replace(/[^a-z0-9]/gi, '_')}.pdf`);
@@ -1764,7 +2606,7 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                     <button 
                         onClick={() => { 
                             if (activeTab === 'sal_technical' && certificateRef.current) generatePdfWithCover('Stato Avanzamento Lavori', certificateRef.current); 
-                            else if (activeTab === 'payment_cert' && certificateRef.current) generatePdfWithCover('Certificato di Pagamento', certificateRef.current); 
+                            else if (activeTab === 'payment_cert') generatePaymentCertVectorPdf(); 
                             else if (['libretto', 'register', 'summary'].includes(activeTab)) generateAccountingPdf(activeTab as any);
                         }} 
                         disabled={isGeneratingPdf} 
@@ -1784,13 +2626,66 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                         <div className="bg-gray-50 dark:bg-gray-700/30 p-5 rounded-xl border border-gray-200 dark:border-gray-600">
                             <h3 className="text-base font-bold text-gray-800 dark:text-gray-200 mb-4 border-b pb-2 dark:border-gray-600 flex items-center">
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2-2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" /></svg>
-                                Dati Generali Contratto
+                                Dati Generali Contratto &amp; Intestazione Standard PriMus
                             </h3>
-                            <div className="space-y-4">
-                                <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Impresa Appaltatrice</label><input type="text" value={localConfig.contractorName || ''} onChange={e => setLocalConfig({...localConfig, contractorName: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" /></div>
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">CIG/CUP</label><input type="text" value={localConfig.contractCode || ''} onChange={e => setLocalConfig({...localConfig, contractCode: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" /></div>
-                                    <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Data Contratto</label><EuropeanDateInput value={localConfig.contractDate || ''} onChange={val => setLocalConfig({...localConfig, contractDate: val})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" /></div>
+                            <div className="space-y-3 text-xs">
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="block font-medium text-gray-700 dark:text-gray-300">Ente / Stazione Appaltante</label>
+                                        <input type="text" placeholder="es. Comune di MILANO" value={localConfig.municipalityName || ''} onChange={e => setLocalConfig({...localConfig, municipalityName: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" />
+                                    </div>
+                                    <div>
+                                        <label className="block font-medium text-gray-700 dark:text-gray-300">Provincia</label>
+                                        <input type="text" placeholder="es. Provincia di Milano" value={localConfig.provinceName || ''} onChange={e => setLocalConfig({...localConfig, provinceName: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" />
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="block font-medium text-gray-700 dark:text-gray-300">Committente</label>
+                                        <input type="text" placeholder="es. Sviluppo Milanese s.r.l." value={localConfig.clientName || ''} onChange={e => setLocalConfig({...localConfig, clientName: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" />
+                                    </div>
+                                    <div>
+                                        <label className="block font-medium text-gray-700 dark:text-gray-300">Impresa Appaltatrice</label>
+                                        <input type="text" value={localConfig.contractorName || ''} onChange={e => setLocalConfig({...localConfig, contractorName: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" />
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-3 gap-3">
+                                    <div>
+                                        <label className="block font-medium text-gray-700 dark:text-gray-300">CIG / CUP</label>
+                                        <input type="text" value={localConfig.contractCode || ''} onChange={e => setLocalConfig({...localConfig, contractCode: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" />
+                                    </div>
+                                    <div>
+                                        <label className="block font-medium text-gray-700 dark:text-gray-300">Data Contratto</label>
+                                        <EuropeanDateInput value={localConfig.contractDate || ''} onChange={val => setLocalConfig({...localConfig, contractDate: val})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" />
+                                    </div>
+                                    <div>
+                                        <label className="block font-medium text-gray-700 dark:text-gray-300">Luogo / Città Atti</label>
+                                        <input type="text" placeholder="es. Milano" value={localConfig.locationCity || ''} onChange={e => setLocalConfig({...localConfig, locationCity: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" />
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="block font-medium text-gray-700 dark:text-gray-300">Estremi Repertorio e Registrazione Contratto</label>
+                                    <input type="text" placeholder="es. repertorio n. 432 registrato a Milano in data 20/11/2008 al n. 2243" value={localConfig.contractRepertory || ''} onChange={e => setLocalConfig({...localConfig, contractRepertory: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" />
+                                </div>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="block font-medium text-gray-700 dark:text-gray-300">Direttore dei Lavori</label>
+                                        <input type="text" placeholder="es. Ing. Valerio Direttorio" value={localConfig.directorOfWorks || ''} onChange={e => setLocalConfig({...localConfig, directorOfWorks: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" />
+                                    </div>
+                                    <div>
+                                        <label className="block font-medium text-gray-700 dark:text-gray-300">Responsabile del Procedimento (RUP)</label>
+                                        <input type="text" placeholder="es. Ing. Ivo Responsabile" value={localConfig.rupName || ''} onChange={e => setLocalConfig({...localConfig, rupName: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" />
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <label className="block font-medium text-gray-700 dark:text-gray-300">Intestazione Studio / Ufficio Tecnico</label>
+                                        <input type="text" placeholder="es. Studio Tecnico Associato..." value={localConfig.studioHeader || ''} onChange={e => setLocalConfig({...localConfig, studioHeader: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" />
+                                    </div>
+                                    <div>
+                                        <label className="block font-medium text-gray-700 dark:text-gray-300">Polizza INAIL Operai (Sede e N.)</label>
+                                        <input type="text" placeholder="es. Milano pos. n. 12345678" value={localConfig.inailPolicy || ''} onChange={e => setLocalConfig({...localConfig, inailPolicy: e.target.value})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 dark:text-white" />
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1800,11 +2695,21 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v.01" /></svg>
                                 Parametri Economici Contratto
                             </h3>
-                            <div className="grid grid-cols-2 gap-4 mb-4">
-                                <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Ribasso d'Asta (%)</label><input type="number" step="0.01" value={localConfig.discountPercent} onChange={e => setLocalConfig({...localConfig, discountPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" /></div>
-                                <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Ritenuta Garanzia (%)</label><input type="number" step="0.1" value={localConfig.withholdingTaxPercent} onChange={e => setLocalConfig({...localConfig, withholdingTaxPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" /></div>
-                                <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Recupero Anticipazione (%)</label><input type="number" step="0.1" value={localConfig.advancePaymentPercent ?? 20} onChange={e => setLocalConfig({...localConfig, advancePaymentPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" /></div>
-                                <div><label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Aliquota I.V.A. (%)</label><input type="number" step="1" value={localConfig.vatPercent} onChange={e => setLocalConfig({...localConfig, vatPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" /></div>
+                            <div className="grid grid-cols-2 gap-3 mb-4 text-xs">
+                                <div><label className="block font-medium text-gray-700 dark:text-gray-300">Ribasso d'Asta (%)</label><input type="number" step="0.01" value={localConfig.discountPercent} onChange={e => setLocalConfig({...localConfig, discountPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" /></div>
+                                <div><label className="block font-medium text-gray-700 dark:text-gray-300">Ritenuta Infortuni / Garanzia (%)</label><input type="number" step="0.1" value={localConfig.withholdingTaxPercent} onChange={e => setLocalConfig({...localConfig, withholdingTaxPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" /></div>
+                                <div><label className="block font-medium text-gray-700 dark:text-gray-300">Recupero Anticipazione (%)</label><input type="number" step="0.1" value={localConfig.advancePaymentPercent ?? 20} onChange={e => setLocalConfig({...localConfig, advancePaymentPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" /></div>
+                                <div><label className="block font-medium text-gray-700 dark:text-gray-300">Aliquota I.V.A. (%)</label><input type="number" step="1" value={localConfig.vatPercent} onChange={e => setLocalConfig({...localConfig, vatPercent: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" /></div>
+                                <div>
+                                    <label className="block font-medium text-gray-700 dark:text-gray-300">Anticipazione Erogata (€)</label>
+                                    <input type="number" step="0.01" value={localConfig.anticipationGrantedAmount ?? 0} onChange={e => setLocalConfig({...localConfig, anticipationGrantedAmount: parseFloat(e.target.value) || 0})} className="mt-1 w-full p-2 border rounded-md dark:bg-gray-600 dark:border-gray-500 text-right font-semibold" />
+                                </div>
+                                <div className="flex items-end pb-1">
+                                    <label className="inline-flex items-center gap-2 cursor-pointer select-none text-gray-700 dark:text-gray-200 font-semibold">
+                                        <input type="checkbox" checked={!!localConfig.roundCertificateTo100} onChange={e => setLocalConfig({...localConfig, roundCertificateTo100: e.target.checked})} className="rounded text-indigo-600 focus:ring-indigo-500 h-4 w-4" />
+                                        <span>Arrotonda rata Certificato a 100 €</span>
+                                    </label>
+                                </div>
                             </div>
 
                             <div className="mt-4 p-4 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-600">
@@ -2049,130 +2954,294 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             
             {activeTab === 'register' && (
                 <div className="flex-grow p-2 overflow-hidden flex flex-col min-h-0 gap-2">
-                    {/* Barra di filtro pulita stile Computo */}
+                    {/* Barra di filtro e info Standard PriMus */}
                     <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-gray-50 dark:bg-gray-800/80 rounded-lg border border-gray-200 dark:border-gray-700 flex-shrink-0">
                         <div className="flex items-center gap-2 flex-wrap">
+                            <span className="px-2 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700 text-[10px] font-black uppercase tracking-wider">
+                                Standard PriMus / Lavori Pubblici
+                            </span>
                             <input
                                 type="text"
                                 value={filters.code}
                                 onChange={e => setFilters(prev => ({ ...prev, code: e.target.value }))}
-                                placeholder="Filtra codice articolo..."
+                                placeholder="Filtra codice tariffa..."
                                 className="px-2.5 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 focus:ring-1 focus:ring-indigo-500 outline-none w-44"
                             />
                             <input
                                 type="text"
                                 value={filters.description}
                                 onChange={e => setFilters(prev => ({ ...prev, description: e.target.value }))}
-                                placeholder="Filtra descrizione / nota..."
+                                placeholder="Filtra indicazione lavori..."
                                 className="px-2.5 py-1 text-xs border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-100 focus:ring-1 focus:ring-indigo-500 outline-none w-52"
                             />
                         </div>
                         {(() => {
                             const visibleEntries = activeRegisterEntries.filter(applyFilters);
-                            const totalProg = visibleEntries.length > 0 ? visibleEntries[visibleEntries.length - 1].runningProgressive : 0;
+                            const totalDebit = round2(visibleEntries.reduce((acc, e) => acc + e.debit, 0));
                             return (
-                                <div className="flex items-center gap-2 text-xs">
-                                    <span className="text-gray-500 dark:text-gray-400 font-medium">Totale Progressivo Registro a tutto il SAL N. {sals.find(s => s.id === activeSalId)?.number || 'Corrente'}:</span>
-                                    <span className="font-mono font-bold text-sm text-indigo-700 dark:text-indigo-300">{currencyFormatter.format(totalProg)}</span>
+                                <div className="flex items-center gap-3 text-xs">
+                                    <span className="text-gray-500 dark:text-gray-400 font-medium">
+                                        A tutto il S.A.L. n. {sals.find(s => s.id === activeSalId)?.number || '1'} ({format(parseISO(salReferenceDate), 'dd/MM/yyyy')}):
+                                    </span>
+                                    <span className="font-mono font-bold text-sm text-emerald-800 dark:text-emerald-300">
+                                        Debito: {currencyFormatter.format(totalDebit)}
+                                    </span>
                                 </div>
                             );
                         })()}
                     </div>
 
-                    <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-xs border border-gray-200 dark:border-gray-700 flex-grow overflow-auto min-h-0">
-                        <table className="w-full text-xs text-left text-gray-700 dark:text-gray-200 border-collapse">
-                            <thead className="text-[11px] text-gray-600 dark:text-gray-300 uppercase bg-gray-100 dark:bg-gray-700 sticky top-0 z-10 border-b border-gray-300 dark:border-gray-600">
+                    <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-xs border-2 border-[#2e6b34] flex-grow overflow-auto min-h-0" style={{ fontFamily: "'Times New Roman', Times, serif" }}>
+                        <table className="w-full text-xs text-left text-gray-900 dark:text-gray-100 border-collapse">
+                            <thead className="text-[11px] text-[#19411e] dark:text-emerald-200 bg-[#f5faf5] dark:bg-gray-800 sticky top-0 z-10 border-b-2 border-[#2e6b34]">
                                 <tr>
-                                    <th className="px-2 py-2 w-24 text-center border-r border-gray-200 dark:border-gray-600">N. RG.</th>
-                                    <th className="px-2 py-2 w-24 text-center border-r border-gray-200 dark:border-gray-600">Data</th>
-                                    <th className="px-2.5 py-2 w-36 text-center border-r border-gray-200 dark:border-gray-600">Rif. (N. LB. / Pag.)</th>
-                                    <th className="px-2.5 py-2 w-36 border-r border-gray-200 dark:border-gray-600">Codice Art.</th>
-                                    <th className="px-3 py-2 border-r border-gray-200 dark:border-gray-600">Designazione dei Lavori e delle Provviste</th>
-                                    <th className="px-2 py-2 w-12 text-center border-r border-gray-200 dark:border-gray-600">U.M.</th>
-                                    <th className="px-2.5 py-2 text-right w-24 border-r border-gray-200 dark:border-gray-600 font-bold">Quantità</th>
-                                    <th className="px-2.5 py-2 text-right w-24 border-r border-gray-200 dark:border-gray-600">Prezzo Unit.</th>
-                                    <th className="px-3 py-2 text-right w-28 border-r border-gray-200 dark:border-gray-600 font-bold">Importo</th>
-                                    <th className="px-3 py-2 text-right w-32 font-black bg-indigo-50/50 dark:bg-indigo-900/20">Totale Prog.</th>
+                                    <th rowSpan={2} className="px-2 py-1.5 w-28 text-center border-r border-[#2e6b34] font-bold leading-tight">
+                                        <div>Num.Ord.</div>
+                                        <div className="border-t border-[#2e6b34]/40 my-0.5 pt-0.5">TARIFFA</div>
+                                        <div className="border-t border-[#2e6b34]/40 pt-0.5 tracking-widest">D A T A</div>
+                                    </th>
+                                    <th rowSpan={2} className="px-3 py-1.5 border-r border-[#2e6b34] text-center font-bold uppercase">
+                                        INDICAZIONE DEI LAVORI E DELLE SOMMINISTRAZIONI
+                                    </th>
+                                    <th colSpan={2} className="px-1.5 py-1 text-center border-r border-b border-[#2e6b34] font-bold lowercase">
+                                        libretto
+                                    </th>
+                                    <th colSpan={2} className="px-1.5 py-1 text-center border-r border-b border-[#2e6b34] font-bold">
+                                        Quantità/Percentuali
+                                    </th>
+                                    <th rowSpan={2} className="px-2 py-1.5 w-24 text-center border-r border-[#2e6b34] font-bold leading-tight">
+                                        <div>PREZZO</div>
+                                        <div className="font-normal">unitario</div>
+                                    </th>
+                                    <th colSpan={2} className="px-2 py-1 text-center border-b border-[#2e6b34] font-bold tracking-widest">
+                                        I M P O R T I
+                                    </th>
+                                </tr>
+                                <tr>
+                                    <th className="px-1.5 py-1 w-14 text-center border-r border-[#2e6b34] font-bold">Nr</th>
+                                    <th className="px-1.5 py-1 w-14 text-center border-r border-[#2e6b34] font-bold">Pg</th>
+                                    <th className="px-2 py-1 w-24 text-right border-r border-[#2e6b34] font-bold">Positivi</th>
+                                    <th className="px-2 py-1 w-24 text-right border-r border-[#2e6b34] font-bold">Negativi</th>
+                                    <th className="px-2.5 py-1 w-28 text-right border-r border-[#2e6b34] font-bold">Debito</th>
+                                    <th className="px-2.5 py-1 w-28 text-right font-bold">Pagamento</th>
                                 </tr>
                             </thead>
-                            <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                                {activeRegisterEntries.filter(applyFilters).map((entry) => {
-                                    const fmtQty = entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity);
-                                    const hasDims = entry.accountingType !== 'body' && (entry.factor !== undefined || entry.length !== undefined || entry.width !== undefined || entry.height !== undefined);
+                            <tbody className="divide-y divide-[#2e6b34]/40">
+                                {(() => {
+                                    const visibleEntries = activeRegisterEntries.filter(applyFilters);
+                                    const measureEntries = visibleEntries.filter(e => e.accountingType === 'measure' && !e.isSecurityCost);
+                                    const bodyEntries = visibleEntries.filter(e => e.accountingType === 'body' && !e.isSecurityCost);
+                                    const securityEntries = visibleEntries.filter(e => e.isSecurityCost);
+
+                                    const renderSection = (title: string, sectionEntries: AccountingEntry[], isBody: boolean) => {
+                                        if (sectionEntries.length === 0) return null;
+                                        const sectionSubtotal = round2(sectionEntries.reduce((acc, e) => acc + e.debit, 0));
+                                        const bodyAliquota = (isBody && currentSalData.bodyGroupsTotalValue > 0)
+                                            ? ((sectionSubtotal / currentSalData.bodyGroupsTotalValue) * 100).toFixed(3)
+                                            : null;
+
+                                        return (
+                                            <React.Fragment key={title}>
+                                                <tr className="bg-[#f2f7f2] dark:bg-emerald-950/30 font-bold text-gray-900 dark:text-white border-y border-[#2e6b34]">
+                                                    <td className="px-2 py-1.5 border-r border-[#2e6b34]"></td>
+                                                    <td className="px-3 py-1.5 text-center border-r border-[#2e6b34] whitespace-pre-line">
+                                                        {title}
+                                                    </td>
+                                                    <td className="border-r border-[#2e6b34]"></td>
+                                                    <td className="border-r border-[#2e6b34]"></td>
+                                                    <td className="border-r border-[#2e6b34]"></td>
+                                                    <td className="border-r border-[#2e6b34]"></td>
+                                                    <td className="border-r border-[#2e6b34]"></td>
+                                                    <td className="border-r border-[#2e6b34]"></td>
+                                                    <td></td>
+                                                </tr>
+                                                {sectionEntries.map(entry => {
+                                                    const fmtQ = entry.accountingType === 'body' ? percentFormatter.format(entry.quantity) : numberFormatter.format(entry.quantity);
+                                                    const isPos = entry.quantity >= 0;
+                                                    const hasDims = entry.accountingType !== 'body' && (entry.factor !== undefined || entry.length !== undefined || entry.width !== undefined || entry.height !== undefined);
+                                                    const tariffaStr = formatCodeWithComputoIndex(entry.articleCode, entry.originalIndex, entry.accountingType);
+
+                                                    return (
+                                                        <tr key={entry.id} className="hover:bg-[#f8fcf8] dark:hover:bg-gray-700/40 transition-colors">
+                                                            <td className="px-2 py-2 text-center font-mono border-r border-[#2e6b34] align-top whitespace-nowrap leading-snug">
+                                                                <div className="font-bold text-gray-900 dark:text-white">{entry.registerOrderIndex}</div>
+                                                                <div className="text-[10px] font-bold text-[#19411e] dark:text-emerald-300">{tariffaStr}</div>
+                                                                <div className="text-[11px] text-gray-700 dark:text-gray-300 mt-0.5">{format(parseISO(entry.date), 'dd/MM/yyyy')}</div>
+                                                            </td>
+                                                            <td className="px-3 py-2 border-r border-[#2e6b34] align-top text-justify">
+                                                                <div className="text-justify leading-relaxed">{entry.description}</div>
+                                                                {entry.measurementNote && entry.measurementNote !== entry.description && (
+                                                                    <div className="italic text-gray-700 dark:text-gray-300 text-[11px] mt-1 pl-3 text-justify">
+                                                                        {entry.measurementNote}
+                                                                    </div>
+                                                                )}
+                                                                {hasDims && (
+                                                                    <div className="font-mono text-[10px] text-gray-500 mt-0.5 pl-3">
+                                                                        ({[
+                                                                            entry.factor !== undefined ? `F:${numberFormatter.format(entry.factor)}` : null,
+                                                                            entry.length !== undefined ? `L:${numberFormatter.format(entry.length)}` : null,
+                                                                            entry.width !== undefined ? `l:${numberFormatter.format(entry.width)}` : null,
+                                                                            entry.height !== undefined ? `H/P:${numberFormatter.format(entry.height)}` : null
+                                                                        ].filter(Boolean).join(' × ')})
+                                                                    </div>
+                                                                )}
+                                                                <div className="text-right font-bold text-[11px] mt-1.5 text-gray-900 dark:text-white">
+                                                                    SOMMANO {entry.accountingType === 'body' ? '%' : entry.unit}
+                                                                </div>
+                                                            </td>
+                                                            <td className="px-1.5 py-2 text-center font-mono border-r border-[#2e6b34] align-top">
+                                                                <div className="text-[10px] text-gray-400">1</div>
+                                                                <div className="font-bold text-[11px] text-indigo-700 dark:text-indigo-300" title="N. ord. Libretto Unico">N.LB.{entry.progressiveIndex}</div>
+                                                            </td>
+                                                            <td className="px-1.5 py-2 text-center font-mono font-bold border-r border-[#2e6b34] align-top">
+                                                                {entry.librettoPage}
+                                                            </td>
+                                                            <td className="px-2 py-2 text-right font-mono border-r border-[#2e6b34] align-bottom font-bold">
+                                                                {isPos ? (
+                                                                    <div>
+                                                                        <div className="font-normal text-gray-600 dark:text-gray-400">{fmtQ}</div>
+                                                                        <div className="border-t border-gray-300 dark:border-gray-600 mt-1 pt-0.5">{fmtQ}</div>
+                                                                    </div>
+                                                                ) : ''}
+                                                            </td>
+                                                            <td className="px-2 py-2 text-right font-mono border-r border-[#2e6b34] align-bottom font-bold text-red-600">
+                                                                {!isPos ? (
+                                                                    <div>
+                                                                        <div className="font-normal">{fmtQ}</div>
+                                                                        <div className="border-t border-red-300 mt-1 pt-0.5">{fmtQ}</div>
+                                                                    </div>
+                                                                ) : ''}
+                                                            </td>
+                                                            <td className="px-2 py-2 text-right font-mono border-r border-[#2e6b34] align-bottom">
+                                                                {entry.isDepreciated && (
+                                                                    <span className="block text-[9px] font-sans font-black text-amber-600 dark:text-amber-400">⚖️ Det. RUP</span>
+                                                                )}
+                                                                {numberFormatter.format(entry.unitPrice)}
+                                                            </td>
+                                                            <td className="px-2.5 py-2 text-right font-mono font-bold border-r border-[#2e6b34] align-bottom text-gray-900 dark:text-white">
+                                                                {numberFormatter.format(entry.debit)}
+                                                            </td>
+                                                            <td className="px-2.5 py-2 text-right font-mono align-bottom"></td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                                <tr className="bg-[#f8faf8] dark:bg-gray-700/60 font-bold border-y border-[#2e6b34]">
+                                                    <td className="border-r border-[#2e6b34]"></td>
+                                                    <td className="px-3 py-1.5 text-right border-r border-[#2e6b34]">
+                                                        <div>{isBody ? 'Parziale LAVORI A CORPO euro' : `Parziale ${title.split('\n')[0]} euro`}</div>
+                                                        {bodyAliquota && <div className="text-[11px] font-normal italic">aliquota</div>}
+                                                    </td>
+                                                    <td className="border-r border-[#2e6b34]"></td>
+                                                    <td className="border-r border-[#2e6b34]"></td>
+                                                    <td className="border-r border-[#2e6b34]"></td>
+                                                    <td className="border-r border-[#2e6b34]"></td>
+                                                    <td className="border-r border-[#2e6b34]"></td>
+                                                    <td className="px-2.5 py-1.5 text-right font-mono border-r border-[#2e6b34]">
+                                                        <div>{numberFormatter.format(sectionSubtotal)}</div>
+                                                        {bodyAliquota && <div className="text-[10px]">({bodyAliquota}%)</div>}
+                                                    </td>
+                                                    <td></td>
+                                                </tr>
+                                            </React.Fragment>
+                                        );
+                                    };
+
+                                    const grandTotal = round2(visibleEntries.reduce((acc, e) => acc + e.debit, 0));
+                                    const activeSalNum = sals.find(s => s.id === activeSalId)?.number || (sals.length || 1);
+                                    const emittedCerts = allSalCertificates.filter(c => c.salNumber <= activeSalNum);
 
                                     return (
-                                        <tr 
-                                            key={entry.id} 
-                                            className="bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700/40 text-gray-700 dark:text-gray-300 transition-colors"
-                                        >
-                                            <td className="px-2 py-2 text-center font-mono font-bold text-gray-700 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top whitespace-nowrap">
-                                                N. RG. {entry.registerOrderIndex}
-                                            </td>
-                                            <td className="px-2 py-2 text-center font-mono text-[11px] text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
-                                                {format(parseISO(entry.date), 'dd/MM/yyyy')}
-                                            </td>
-                                            <td className="px-2.5 py-2 text-center border-r border-gray-200 dark:border-gray-700 align-top">
-                                                <span className="inline-block px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 font-mono font-bold text-[10px] border border-gray-300 dark:border-gray-600 whitespace-nowrap">
-                                                    {formatLibrettoRef(entry.progressiveIndex, entry.librettoPage)}
-                                                </span>
-                                            </td>
-                                            <td className="px-2.5 py-2 font-mono font-bold text-indigo-700 dark:text-indigo-300 border-r border-gray-200 dark:border-gray-700 align-top">
-                                                <div>{formatCodeWithComputoIndex(entry.articleCode, entry.originalIndex, entry.accountingType)}</div>
-                                                <div className="text-[10px] font-sans font-normal text-gray-400 uppercase mt-0.5">{entry.groupName}</div>
-                                            </td>
-                                            <td className="px-3 py-2 text-gray-900 dark:text-gray-100 border-r border-gray-200 dark:border-gray-700 align-top text-justify">
-                                                <div className="font-semibold text-justify leading-relaxed">{entry.description}</div>
-                                                {entry.measurementNote && (
-                                                    <div className="italic text-gray-600 dark:text-gray-300 text-[11px] mt-0.5 text-justify">
-                                                        {entry.measurementNote}
-                                                    </div>
-                                                )}
-                                                {hasDims && (
-                                                    <div className="font-mono text-[10px] text-gray-400 mt-0.5">
-                                                        ({[
-                                                            entry.factor !== undefined ? `F:${numberFormatter.format(entry.factor)}` : null,
-                                                            entry.length !== undefined ? `L:${numberFormatter.format(entry.length)}` : null,
-                                                            entry.width !== undefined ? `l:${numberFormatter.format(entry.width)}` : null,
-                                                            entry.height !== undefined ? `H/P:${numberFormatter.format(entry.height)}` : null
-                                                        ].filter(Boolean).join(' × ')})
-                                                    </div>
-                                                )}
-                                            </td>
-                                            <td className="px-2 py-2 text-center font-mono text-gray-600 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
-                                                {entry.unit}
-                                            </td>
-                                            <td className="px-2.5 py-2 text-right font-mono font-bold text-gray-900 dark:text-white border-r border-gray-200 dark:border-gray-700 align-top">
-                                                {fmtQty}
-                                            </td>
-                                            <td className="px-2.5 py-2 text-right font-mono text-gray-700 dark:text-gray-300 border-r border-gray-200 dark:border-gray-700 align-top">
-                                                {entry.isDepreciated && (
-                                                    <span className="block text-[9px] font-sans font-black text-amber-600 dark:text-amber-400" title="Prezzo unitario deprezzato autorizzato con Determina RUP">
-                                                        ⚖️ Det. RUP
-                                                    </span>
-                                                )}
-                                                {currencyFormatter.format(entry.unitPrice)}
-                                            </td>
-                                            <td className="px-3 py-2 text-right font-mono font-bold text-gray-900 dark:text-white border-r border-gray-200 dark:border-gray-700 align-top">
-                                                {currencyFormatter.format(entry.debit)}
-                                            </td>
-                                            <td className="px-3 py-2 text-right font-mono font-black text-indigo-700 dark:text-indigo-300 bg-indigo-50/40 dark:bg-indigo-900/20 align-top">
-                                                {currencyFormatter.format(entry.runningProgressive)}
-                                            </td>
-                                        </tr>
+                                        <>
+                                            {renderSection('LAVORI A MISURA', measureEntries, false)}
+                                            {renderSection(
+                                                `LAVORI A CORPO${currentSalData.bodyGroupsTotalValue > 0 ? `\n(Progetto euro ${numberFormatter.format(currentSalData.bodyGroupsTotalValue)} - 100%)` : ''}`,
+                                                bodyEntries,
+                                                true
+                                            )}
+                                            {renderSection('COSTI SICUREZZA (SPECIALI)', securityEntries, false)}
+
+                                            {grandTotal > 0 && (
+                                                <>
+                                                    <tr className="bg-[#f2f7f2] dark:bg-emerald-950/40 font-bold border-y-2 border-[#2e6b34]">
+                                                        <td className="border-r border-[#2e6b34]"></td>
+                                                        <td className="px-3 py-2 text-right border-r border-[#2e6b34]">
+                                                            <div className="tracking-widest text-sm">T O T A L E   euro</div>
+                                                            <div className="text-[11px] font-normal mt-1">
+                                                                Lavori a tutto il {format(parseISO(salReferenceDate), 'dd/MM/yyyy')} (S.A.L. n. {activeSalNum})
+                                                            </div>
+                                                        </td>
+                                                        <td className="border-r border-[#2e6b34]"></td>
+                                                        <td className="border-r border-[#2e6b34]"></td>
+                                                        <td className="border-r border-[#2e6b34]"></td>
+                                                        <td className="border-r border-[#2e6b34]"></td>
+                                                        <td className="border-r border-[#2e6b34]"></td>
+                                                        <td className="px-2.5 py-2 text-right font-mono text-sm border-r border-[#2e6b34]">
+                                                            {numberFormatter.format(grandTotal)}
+                                                        </td>
+                                                        <td></td>
+                                                    </tr>
+
+                                                    {emittedCerts.length > 0 ? (
+                                                        emittedCerts.map(cert => (
+                                                            <tr key={cert.salId} className="bg-amber-50/40 dark:bg-amber-950/20 font-bold border-b border-[#2e6b34]">
+                                                                <td className="border-r border-[#2e6b34]"></td>
+                                                                <td className="px-3 py-2 text-justify border-r border-[#2e6b34]">
+                                                                    In data {format(parseISO(cert.date), 'dd/MM/yyyy')} è stato emesso il CERTIFICATO DI PAGAMENTO n. {cert.salNumber} per un importo di euro
+                                                                </td>
+                                                                <td className="border-r border-[#2e6b34]"></td>
+                                                                <td className="border-r border-[#2e6b34]"></td>
+                                                                <td className="border-r border-[#2e6b34]"></td>
+                                                                <td className="border-r border-[#2e6b34]"></td>
+                                                                <td className="border-r border-[#2e6b34]"></td>
+                                                                <td className="border-r border-[#2e6b34]"></td>
+                                                                <td className="px-2.5 py-2 text-right font-mono text-emerald-800 dark:text-emerald-300">
+                                                                    {numberFormatter.format(cert.netCertificateAmount)}
+                                                                </td>
+                                                            </tr>
+                                                        ))
+                                                    ) : (
+                                                        <tr className="bg-amber-50/40 dark:bg-amber-950/20 font-bold border-b border-[#2e6b34]">
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="px-3 py-2 text-justify border-r border-[#2e6b34]">
+                                                                In data {format(parseISO(salReferenceDate), 'dd/MM/yyyy')} è stato emesso il CERTIFICATO DI PAGAMENTO n. {activeSalNum} per un importo di euro
+                                                            </td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="px-2.5 py-2 text-right font-mono text-emerald-800 dark:text-emerald-300">
+                                                                {numberFormatter.format(paymentCertData.taxableCertified)}
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                </>
+                                            )}
+                                        </>
                                     );
-                                })}
+                                })()}
                             </tbody>
                             <tfoot>
                                 {(() => {
                                     const visibleEntries = activeRegisterEntries.filter(applyFilters);
-                                    const totalProg = visibleEntries.length > 0 ? visibleEntries[visibleEntries.length - 1].runningProgressive : 0;
+                                    const totalDebit = round2(visibleEntries.reduce((acc, e) => acc + e.debit, 0));
+                                    const activeSalNum = sals.find(s => s.id === activeSalId)?.number || (sals.length || 1);
+                                    const emittedCerts = allSalCertificates.filter(c => c.salNumber <= activeSalNum);
+                                    const totalPaid = emittedCerts.length > 0
+                                        ? round2(emittedCerts.reduce((acc, c) => acc + c.netCertificateAmount, 0))
+                                        : paymentCertData.taxableCertified;
+
                                     return (
-                                        <tr className="bg-gray-100 dark:bg-gray-700 font-bold border-t-2 border-gray-300 dark:border-gray-600 text-gray-900 dark:text-white">
-                                            <td colSpan={9} className="px-3 py-2.5 text-right uppercase tracking-wider text-xs border-r border-gray-200 dark:border-gray-600">
-                                                IMPORTO TOTALE PROGRESSIVO DEL REGISTRO A TUTTO IL SAL N. {sals.find(s => s.id === activeSalId)?.number || 'CORRENTE'}
+                                        <tr className="bg-[#f5faf5] dark:bg-gray-700 font-bold border-t-2 border-[#2e6b34] text-[#19411e] dark:text-emerald-200">
+                                            <td colSpan={7} className="px-3 py-2 text-center uppercase tracking-widest text-xs border-r border-[#2e6b34]">
+                                                A   R I P O R T A R E
                                             </td>
-                                            <td className="px-3 py-2.5 text-right font-mono text-sm font-black text-indigo-700 dark:text-indigo-300 bg-indigo-100/50 dark:bg-indigo-900/40">
-                                                {currencyFormatter.format(totalProg)}
+                                            <td className="px-2.5 py-2 text-right font-mono text-sm font-black border-r border-[#2e6b34]">
+                                                {numberFormatter.format(totalDebit)}
+                                            </td>
+                                            <td className="px-2.5 py-2 text-right font-mono text-sm font-black">
+                                                {numberFormatter.format(totalPaid)}
                                             </td>
                                         </tr>
                                     );
@@ -2269,14 +3338,21 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                                 </button>
                             </div>
 
-                            {/* Raggruppamento per Gruppi / Categorie */}
+                            {/* Raggruppamento: Standard PriMus vs Gruppi WBS vs Elenco Singolo */}
                             <div className="inline-flex rounded-md bg-white dark:bg-gray-700 p-0.5 border border-gray-200 dark:border-gray-600">
+                                <button
+                                    onClick={() => setSummaryGrouping('standard_primus')}
+                                    className={`px-2.5 py-1 text-xs font-bold rounded transition-colors ${summaryGrouping === 'standard_primus' ? 'bg-emerald-700 text-white shadow-xs' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600'}`}
+                                    title="Impaginazione Ufficiale Standard PriMus (Lavori a Misura, Lavori a Corpo, Costi Sicurezza con colonne SAL e RC)"
+                                >
+                                    🏛️ Standard PriMus (SAL / RC)
+                                </button>
                                 <button
                                     onClick={() => setSummaryGrouping('grouped_by_wbs')}
                                     className={`px-2.5 py-1 text-xs font-bold rounded transition-colors ${summaryGrouping === 'grouped_by_wbs' ? 'bg-violet-600 text-white shadow-xs' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-600'}`}
                                     title="Struttura il sommario raggruppato per Gruppi di Lavoro / Categorie WBS"
                                 >
-                                    📁 Strutturato per Gruppi
+                                    📁 Per Gruppi WBS
                                 </button>
                                 <button
                                     onClick={() => setSummaryGrouping('flat')}
@@ -2325,7 +3401,222 @@ const AccountingView: React.FC<AccountingViewProps> = ({
                     </div>
 
                     <div ref={contentRef} className="bg-white dark:bg-gray-800 rounded-lg shadow-xs border border-gray-200 dark:border-gray-700 flex-grow overflow-auto min-h-0">
-                        {summaryGrouping === 'grouped_by_wbs' ? (
+                        {summaryGrouping === 'standard_primus' ? (
+                            /* VISUALIZZAZIONE UFFICIALE STANDARD PRIMUS (Sommario_Registro_Contabilita.pdf) */
+                            <div className="border-2 border-[#2e6b34]" style={{ fontFamily: "'Times New Roman', Times, serif" }}>
+                                <table className="w-full text-xs text-left text-gray-900 dark:text-gray-100 border-collapse">
+                                    <thead className="text-[11px] text-[#19411e] dark:text-emerald-200 bg-[#f5faf5] dark:bg-gray-800 sticky top-0 z-10 border-b-2 border-[#2e6b34]">
+                                        <tr>
+                                            <th rowSpan={2} className="px-2 py-1.5 w-32 text-center border-r border-[#2e6b34] font-bold leading-tight">
+                                                <div>Num.Ord.</div>
+                                                <div className="border-t border-[#2e6b34]/40 mt-0.5 pt-0.5">TARIFFA</div>
+                                            </th>
+                                            <th rowSpan={2} className="px-3 py-1.5 border-r border-[#2e6b34] text-center font-bold uppercase">
+                                                INDICAZIONE DEI LAVORI E DELLE SOMMINISTRAZIONI
+                                            </th>
+                                            <th colSpan={2} className="px-1.5 py-1 text-center border-r border-b border-[#2e6b34] font-bold lowercase">
+                                                riferimenti
+                                            </th>
+                                            <th rowSpan={2} className="px-2.5 py-1.5 w-28 text-right border-r border-[#2e6b34] font-bold">
+                                                Quantità
+                                            </th>
+                                            <th colSpan={2} className="px-2 py-1 text-center border-b border-[#2e6b34] font-bold uppercase">
+                                                IMPORTI
+                                            </th>
+                                        </tr>
+                                        <tr>
+                                            <th className="px-1.5 py-1 w-14 text-center border-r border-[#2e6b34] font-bold">SAL</th>
+                                            <th className="px-1.5 py-1 w-24 text-center border-r border-[#2e6b34] font-bold" title="Numero d'ordine Registro di Contabilità (RC) e riferimento Libretto">RC</th>
+                                            <th className="px-2.5 py-1 w-28 text-right border-r border-[#2e6b34] font-bold">unitario</th>
+                                            <th className="px-2.5 py-1 w-32 text-right font-bold">TOTALE</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-[#2e6b34]/40">
+                                        {(() => {
+                                            const visibleItems = accountingSummary.filter(applyFilters);
+                                            const measureItems = visibleItems.filter(i => i.accountingType === 'measure' && !i.isSecurityCost);
+                                            const bodyItems = visibleItems.filter(i => i.accountingType === 'body' && !i.isSecurityCost);
+                                            const securityItems = visibleItems.filter(i => i.isSecurityCost);
+                                            const activeSalNum = sals.find(s => s.id === activeSalId)?.number || (sals.length || 1);
+                                            let ordCounter = 0;
+
+                                            const renderSummarySection = (title: string, sectionItems: SummaryEntry[], isBody: boolean) => {
+                                                if (sectionItems.length === 0) return null;
+                                                const sectionSubtotal = round2(sectionItems.reduce((acc, i) => acc + i.totalAmount, 0));
+                                                const sectionAliquota = (isBody && currentSalData.bodyGroupsTotalValue > 0)
+                                                    ? ((sectionSubtotal / currentSalData.bodyGroupsTotalValue) * 100).toFixed(3)
+                                                    : null;
+
+                                                return (
+                                                    <React.Fragment key={title}>
+                                                        <tr className="bg-[#f2f7f2] dark:bg-emerald-950/30 font-bold text-gray-900 dark:text-white border-y border-[#2e6b34]">
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="px-3 py-1.5 text-center border-r border-[#2e6b34] whitespace-pre-line">
+                                                                {title}
+                                                            </td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td></td>
+                                                        </tr>
+                                                        {sectionItems.map(item => {
+                                                            ordCounter++;
+                                                            const allLines = item.allLines || [...item.previousLines, ...item.currentLines];
+                                                            const fmtQty = (q: number) => item.accountingType === 'body' ? percentFormatter.format(q) : numberFormatter.format(q);
+                                                            const tariffaStr = formatCodeWithComputoIndex(item.articleCode, item.originalIndex, item.accountingType);
+                                                            const itemPriceAliquota = (isBody && currentSalData.bodyGroupsTotalValue > 0)
+                                                                ? ((item.unitPrice / currentSalData.bodyGroupsTotalValue) * 100).toFixed(3)
+                                                                : null;
+                                                            const itemTotalAliquota = (isBody && currentSalData.bodyGroupsTotalValue > 0)
+                                                                ? ((item.totalAmount / currentSalData.bodyGroupsTotalValue) * 100).toFixed(3)
+                                                                : null;
+
+                                                            return (
+                                                                <React.Fragment key={item.articleCode}>
+                                                                    {/* Riga intestazione voce: solo Num.Ord./TARIFFA e Descrizione giustificata */}
+                                                                    <tr className="bg-white dark:bg-gray-800">
+                                                                        <td className="px-2 py-2 text-center font-mono border-r border-[#2e6b34] align-top whitespace-nowrap">
+                                                                            <div className="font-bold text-gray-900 dark:text-white">{ordCounter}</div>
+                                                                            <div className="text-[10px] font-bold text-[#19411e] dark:text-emerald-300 mt-0.5">{tariffaStr}</div>
+                                                                        </td>
+                                                                        <td className="px-3 py-2 border-r border-[#2e6b34] align-top text-justify leading-relaxed">
+                                                                            {item.description}
+                                                                        </td>
+                                                                        <td className="border-r border-[#2e6b34]"></td>
+                                                                        <td className="border-r border-[#2e6b34]"></td>
+                                                                        <td className="border-r border-[#2e6b34]"></td>
+                                                                        <td className="border-r border-[#2e6b34]"></td>
+                                                                        <td></td>
+                                                                    </tr>
+
+                                                                    {/* Righe singole misurazioni con SAL | RC | Quantità | TOTALE riga */}
+                                                                    {summaryMode === 'analytical' && allLines.map(line => (
+                                                                        <tr key={`primus-sum-${line.id}`} className="bg-white dark:bg-gray-800/80 hover:bg-[#f8fcf8] dark:hover:bg-gray-700/30 text-[11px]">
+                                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                                            <td className="px-3 py-1 border-r border-[#2e6b34] italic text-gray-600 dark:text-gray-300 pl-6 text-justify">
+                                                                                {line.measurementNote && line.measurementNote !== item.description ? line.measurementNote : ''}
+                                                                            </td>
+                                                                            <td className="px-1.5 py-1 text-center font-mono font-bold border-r border-[#2e6b34]">
+                                                                                {line.salNumber || 1}
+                                                                            </td>
+                                                                            <td className="px-1.5 py-1 text-center font-mono border-r border-[#2e6b34]" title={`Registro N. RG. ${line.registerOrderIndex} — ${formatLibrettoRef(line.progressiveIndex, line.librettoPage)}`}>
+                                                                                <span className="font-bold">{line.registerOrderIndex}</span>
+                                                                                <span className="block text-[9px] text-gray-500">
+                                                                                    (LB.{line.progressiveIndex}/P.{line.librettoPage})
+                                                                                </span>
+                                                                            </td>
+                                                                            <td className="px-2.5 py-1 text-right font-mono border-r border-[#2e6b34]">
+                                                                                {fmtQty(line.quantity)}
+                                                                            </td>
+                                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                                            <td className="px-2.5 py-1 text-right font-mono">
+                                                                                {numberFormatter.format(line.amount)}
+                                                                            </td>
+                                                                        </tr>
+                                                                    ))}
+
+                                                                    {/* Riga SOMMANO al S.A.L. n. X */}
+                                                                    <tr className="bg-[#f8fcf8] dark:bg-gray-700/40 font-bold border-b border-[#2e6b34]">
+                                                                        <td className="border-r border-[#2e6b34]"></td>
+                                                                        <td className="px-3 py-1.5 text-right border-r border-[#2e6b34]">
+                                                                            <div>
+                                                                                SOMMANO al S.A.L. n. {activeSalNum} <span className="ml-1">{item.accountingType === 'body' ? '%' : item.unit}</span>
+                                                                            </div>
+                                                                            {isBody && <div className="text-[10px] font-normal italic">aliquote</div>}
+                                                                            {item.salBreakdown && item.salBreakdown.length > 1 && (
+                                                                                <div className="flex flex-wrap justify-end gap-1 mt-1 font-normal">
+                                                                                    {item.salBreakdown.map(sb => (
+                                                                                        <span key={sb.salNumber} className="px-1.5 py-0.2 rounded bg-white dark:bg-gray-800 border border-[#2e6b34]/40 text-[10px] font-mono text-[#19411e] dark:text-emerald-300">
+                                                                                            {sb.salLabel}: {fmtQty(sb.quantity)} {item.unit} ({currencyFormatter.format(sb.amount)})
+                                                                                        </span>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
+                                                                        </td>
+                                                                        <td className="px-1.5 py-1.5 text-center font-mono text-[10px] border-r border-[#2e6b34]">
+                                                                            {summaryMode === 'synthetic' ? item.salBreakdown.map(s => s.salNumber).join(',') : ''}
+                                                                        </td>
+                                                                        <td className="px-1.5 py-1.5 text-center font-mono text-[10px] border-r border-[#2e6b34]">
+                                                                            {summaryMode === 'synthetic' ? allLines.map(l => l.registerOrderIndex).join(',') : ''}
+                                                                        </td>
+                                                                        <td className="px-2.5 py-1.5 text-right font-mono border-r border-[#2e6b34] align-top">
+                                                                            <div className="border-t border-gray-400 pt-0.5">{fmtQty(item.totalQuantity)}</div>
+                                                                        </td>
+                                                                        <td className="px-2.5 py-1.5 text-right font-mono border-r border-[#2e6b34] align-top">
+                                                                            <div>{numberFormatter.format(item.unitPrice)}</div>
+                                                                            {itemPriceAliquota && <div className="text-[10px] font-normal">({itemPriceAliquota}%)</div>}
+                                                                        </td>
+                                                                        <td className="px-2.5 py-1.5 text-right font-mono align-top">
+                                                                            <div className="border-t border-gray-400 pt-0.5">{numberFormatter.format(item.totalAmount)}</div>
+                                                                            {itemTotalAliquota && <div className="text-[10px] font-normal">({itemTotalAliquota}%)</div>}
+                                                                        </td>
+                                                                    </tr>
+                                                                </React.Fragment>
+                                                            );
+                                                        })}
+
+                                                        {/* Subtotale Sezione */}
+                                                        <tr className="bg-[#f2f7f2] dark:bg-emerald-950/40 font-bold border-y border-[#2e6b34]">
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="px-3 py-1.5 text-right border-r border-[#2e6b34]">
+                                                                <div>{isBody ? 'Parziale LAVORI A CORPO euro' : `Parziale ${title.split('\n')[0]} euro`}</div>
+                                                                {sectionAliquota && <div className="text-[10px] font-normal italic">aliquota</div>}
+                                                            </td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="px-2.5 py-1.5 text-right font-mono">
+                                                                <div>{numberFormatter.format(sectionSubtotal)}</div>
+                                                                {sectionAliquota && <div className="text-[10px]">({sectionAliquota}%)</div>}
+                                                            </td>
+                                                        </tr>
+                                                    </React.Fragment>
+                                                );
+                                            };
+
+                                            const grandTotal = round2(visibleItems.reduce((acc, i) => acc + i.totalAmount, 0));
+
+                                            return (
+                                                <>
+                                                    {renderSummarySection('LAVORI A MISURA', measureItems, false)}
+                                                    {renderSummarySection(
+                                                        `LAVORI A CORPO${currentSalData.bodyGroupsTotalValue > 0 ? `\n(Progetto euro ${numberFormatter.format(currentSalData.bodyGroupsTotalValue)} - 100%)` : ''}`,
+                                                        bodyItems,
+                                                        true
+                                                    )}
+                                                    {renderSummarySection('COSTI SICUREZZA (SPECIALI)', securityItems, false)}
+
+                                                    {grandTotal > 0 && (
+                                                        <tr className="bg-[#f5faf5] dark:bg-gray-800 font-bold border-t-2 border-[#2e6b34]">
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="px-4 py-4 border-r border-[#2e6b34]">
+                                                                <div className="text-right tracking-widest text-sm font-black">T O T A L E   euro</div>
+                                                                <div className="mt-4 text-left font-normal text-xs">
+                                                                    {localConfig.locationCity || 'Milano'}, {format(parseISO(salReferenceDate), 'dd/MM/yyyy')}
+                                                                </div>
+                                                                <div className="mt-4 text-center font-normal text-xs">
+                                                                    <div>Il Direttore dei Lavori</div>
+                                                                    <div className="font-bold mt-1">{localConfig.directorOfWorks || '____________________'}</div>
+                                                                </div>
+                                                            </td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="border-r border-[#2e6b34]"></td>
+                                                            <td className="px-2.5 py-4 text-right font-mono text-sm font-black align-top">
+                                                                {numberFormatter.format(grandTotal)}
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                </>
+                                            );
+                                        })()}
+                                    </tbody>
+                                </table>
+                            </div>
+                        ) : summaryGrouping === 'grouped_by_wbs' ? (
                             /* VISUALIZZAZIONE STRUTTURATA PER GRUPPI / CATEGORIE */
                             <div className="divide-y divide-gray-200 dark:divide-gray-700">
                                 {(() => {
@@ -2755,22 +4046,257 @@ const AccountingView: React.FC<AccountingViewProps> = ({
             )}
 
             {activeTab === 'payment_cert' && (
-                <div className="flex-grow overflow-auto bg-gray-100 dark:bg-gray-900 p-3 md:p-5 flex justify-center min-h-0">
-                    <div ref={certificateRef} className="bg-white text-gray-900 w-[210mm] min-h-[297mm] p-[20mm] shadow-2xl text-[12px] relative h-fit" style={{ fontFamily: "'Times New Roman', Times, serif" }}>
-                        <div className="text-center mb-8 border-b-2 border-black pb-4"><h1 className="text-xl font-bold uppercase tracking-widest mb-1">Certificato di Pagamento</h1><h2 className="text-lg">Rata di Acconto N. {sals.find(s => s.id === activeSalId)?.number || '(Bozza)'}</h2></div>
-                        <table className="w-full mb-8 border-collapse border border-black text-[12px]">
-                            <thead><tr className="bg-gray-200 uppercase"><th className="border border-black p-2 text-left font-bold">Descrizione</th><th className="border border-black p-2 text-right w-32 font-bold">Importi</th></tr></thead>
-                            <tbody>
-                                <tr><td className="border border-black p-2 font-bold">1. Totale Netto Lavori (da SAL Cumulativo)</td><td className="border border-black p-2 text-right font-bold">{currencyFormatter.format(paymentCertData.currentNet)}</td></tr>
-                                {previousSalObject && (<tr><td className="border border-black p-2 pl-4 text-gray-600">Dedurre SAL precedente n. {previousSalObject.number} (Netto Cumulativo)</td><td className="border border-black p-2 text-right text-red-600">- {currencyFormatter.format(paymentCertData.previousNet)}</td></tr>)}
-                                <tr className="bg-gray-50"><td className="border border-black p-2 font-bold">2. Rata di Acconto Lorda (Delta SAL)</td><td className="border border-black p-2 text-right font-bold">{currencyFormatter.format(paymentCertData.rataAcconto)}</td></tr>
-                                <tr><td className="border border-black p-2 pl-4">Ritenuta a garanzia ({localConfig.withholdingTaxPercent}%)</td><td className="border border-black p-2 text-right text-red-600">- {currencyFormatter.format(paymentCertData.retentionAmount)}</td></tr>
-                                <tr><td className="border border-black p-2 pl-4">Recupero Anticipazione ({localConfig.advancePaymentPercent}%)</td><td className="border border-black p-2 text-right text-red-600">- {currencyFormatter.format(paymentCertData.recoveryAmount)}</td></tr>
-                                <tr className="bg-gray-100 font-bold uppercase"><td className="border border-black p-2">3. Imponibile Certificato</td><td className="border border-black p-2 text-right">{currencyFormatter.format(paymentCertData.taxableCertified)}</td></tr>
-                                <tr><td className="border border-black p-2 pl-4">I.V.A. ({localConfig.vatPercent}%)</td><td className="border border-black p-2 text-right">{currencyFormatter.format(paymentCertData.vatAmount)}</td></tr>
-                                <tr className="bg-gray-200 text-base font-bold uppercase"><td className="border border-black p-3">TOTALE DA PAGARE</td><td className="border border-black p-3 text-right">{currencyFormatter.format(paymentCertData.totalPayable)}</td></tr>
-                            </tbody>
-                        </table>
+                <div className="flex-grow overflow-auto bg-gray-200 dark:bg-gray-900 p-3 md:p-6 flex justify-center min-h-0">
+                    <div
+                        ref={certificateRef}
+                        className="bg-white text-gray-900 w-[210mm] min-h-[297mm] px-[12mm] py-[12mm] shadow-2xl text-[11px] relative h-fit border border-gray-300"
+                        style={{ fontFamily: "'Arial', 'Helvetica', sans-serif" }}
+                    >
+                        {/* INTESTAZIONE ISTITUZIONALE CON STEMMA */}
+                        <div className="flex items-start gap-4 mb-4">
+                            {/* Stemma Araldico SVG */}
+                            <div className="w-16 h-20 flex-shrink-0 flex items-center justify-center">
+                                <svg viewBox="0 0 80 96" className="w-14 h-18 text-gray-800">
+                                    {/* Corona turrita */}
+                                    <path d="M18 18 L22 8 L28 14 L34 8 L40 14 L46 8 L52 14 L58 8 L62 18 Z" fill="none" stroke="currentColor" strokeWidth="2.2" />
+                                    {/* Scudo */}
+                                    <path d="M20 22 H60 V50 C60 68 40 80 40 80 C40 80 20 68 20 50 Z" fill="none" stroke="currentColor" strokeWidth="2.5" />
+                                    {/* Croce nello scudo */}
+                                    <path d="M40 22 V79 M20 46 H60" stroke="currentColor" strokeWidth="5" />
+                                    {/* Rami d'alloro e quercia */}
+                                    <path d="M14 45 C10 64 24 82 40 88 C56 82 70 64 66 45" fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray="3 2" />
+                                </svg>
+                            </div>
+                            <div className="pt-1">
+                                <div className="text-xl font-black tracking-wider text-gray-900">
+                                    {localConfig.municipalityName || 'Comune / Stazione Appaltante'}
+                                </div>
+                                <div className="text-sm text-gray-800 font-normal">
+                                    {localConfig.provinceName || 'Provincia / Ente Appaltante'}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* OGGETTO / COMMITTENTE / IMPRESA */}
+                        <div className="space-y-1.5 mb-4 text-[11px]">
+                            <div className="grid grid-cols-[110px_1fr] gap-2">
+                                <div className="text-right font-bold uppercase">OGGETTO:</div>
+                                <div className="text-justify leading-snug">{projectName || 'Lavori di realizzazione opera pubblica'}</div>
+                            </div>
+                            <div className="grid grid-cols-[110px_1fr] gap-2">
+                                <div className="text-right font-bold uppercase">COMMITTENTE:</div>
+                                <div>{localConfig.clientName || localConfig.municipalityName || '-'}</div>
+                            </div>
+                            <div className="grid grid-cols-[110px_1fr] gap-2">
+                                <div className="text-right font-bold uppercase">IMPRESA:</div>
+                                <div className="font-semibold">{localConfig.contractorName || '-'}</div>
+                            </div>
+                        </div>
+
+                        {/* TITOLO CENTRALE CERTIFICATO */}
+                        <div className="mb-4 pl-[118px]">
+                            <div className="text-lg font-black uppercase tracking-wide text-gray-900 leading-tight">
+                                CERTIFICATO DI PAGAMENTO N. {paymentCertData.currentSalNum}
+                            </div>
+                            <div className="text-xs font-bold uppercase text-gray-900">
+                                PER IL PAGAMENTO DELLA RATA N. {paymentCertData.currentSalNum} DI euro {numberFormatter.format(paymentCertData.taxableCertified)}
+                            </div>
+                        </div>
+
+                        {/* CORPO A DUE COLONNE: SINISTRA (CERTIFICATI PRECEDENTI + INAIL + DL) / DESTRA (QUADRO CONTABILE + CERTIFICA + RUP) */}
+                        <div className="grid grid-cols-[62mm_1fr] gap-3 items-stretch">
+                            {/* COLONNA SINISTRA RIQUADRATA VERDE ISTITUZIONALE */}
+                            <div className="border-2 border-[#2e6b34] flex flex-col justify-between text-[10px]">
+                                <div>
+                                    <div className="text-center font-bold uppercase py-1 border-b border-[#2e6b34] text-[#1f5224] bg-[#f5faf5]">
+                                        CERTIFICATI PRECEDENTI
+                                    </div>
+                                    <table className="w-full border-collapse text-[10px]">
+                                        <thead>
+                                            <tr className="border-b border-[#2e6b34] text-[#1f5224] bg-[#f9fcf9]">
+                                                <th className="w-7 py-0.5 text-center border-r border-[#2e6b34] font-bold">n.</th>
+                                                <th className="w-20 py-0.5 text-center border-r border-[#2e6b34] font-bold">data</th>
+                                                <th className="py-0.5 pr-1.5 text-right font-bold">importo</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {Array.from({ length: Math.max(25, paymentCertData.previousCertificates.length) }, (_, idx) => {
+                                                const cert = paymentCertData.previousCertificates[idx];
+                                                return (
+                                                    <tr key={idx} className="leading-[13.5px]">
+                                                        <td className="text-right pr-1 border-r border-[#2e6b34] text-gray-700 font-mono">
+                                                            {idx + 1}
+                                                        </td>
+                                                        <td className="text-center border-r border-[#2e6b34] font-mono">
+                                                            {cert ? format(parseISO(cert.date), 'dd/MM/yyyy') : ''}
+                                                        </td>
+                                                        <td className="text-right pr-1.5 font-mono">
+                                                            {cert ? numberFormatter.format(cert.netCertificateAmount) : ''}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+
+                                    {/* TOTALE E ANTICIPAZIONE */}
+                                    <div className="border-t border-[#2e6b34] grid grid-cols-[108px_1fr] items-center py-0.5 font-bold">
+                                        <div className="text-right pr-2 border-r border-[#2e6b34]">TOTALE</div>
+                                        <div className="text-right pr-1.5 font-mono">{numberFormatter.format(paymentCertData.previousCertificatesTotal)}</div>
+                                    </div>
+                                    <div className="border-t border-b border-[#2e6b34] grid grid-cols-[108px_1fr] items-center py-0.5">
+                                        <div className="text-right pr-2 border-r border-[#2e6b34]">anticipazione</div>
+                                        <div className="text-right pr-1.5 font-mono">{numberFormatter.format(paymentCertData.anticipationGranted)}</div>
+                                    </div>
+                                </div>
+
+                                {/* ASSICURAZIONE OPERAI E FIRMA DIRETTORE DEI LAVORI */}
+                                <div className="p-2 flex-grow flex flex-col justify-between">
+                                    <div>
+                                        <div className="text-center font-bold uppercase underline mb-2">
+                                            ASSICURAZIONE OPERAI
+                                        </div>
+                                        <p className="text-[9.5px] leading-snug">
+                                            L'Impresa ha assicurato gli operai con Polizza continuativa presso l'INAIL di
+                                        </p>
+                                        <div className="border-b border-gray-800 mt-2 pb-0.5 font-semibold text-[10px] min-h-[16px]">
+                                            {localConfig.inailPolicy || ''}
+                                        </div>
+                                    </div>
+
+                                    <div className="text-center mt-8 mb-4">
+                                        <div className="font-semibold">Il Direttore dei Lavori</div>
+                                        <div className="mt-1 font-bold">{localConfig.directorOfWorks || ''}</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* COLONNA DESTRA: PREMESSA, TABELLA CONTABILE, CERTIFICAZIONE E RUP */}
+                            <div className="flex flex-col justify-between text-[10.5px]">
+                                <div>
+                                    <div className="font-bold uppercase mb-2">IL SOTTOSCRITTO,</div>
+                                    <p className="text-justify leading-snug mb-1">
+                                        <strong>VISTO:</strong> il Contratto in data {localConfig.contractDate ? format(parseISO(localConfig.contractDate), 'dd/MM/yyyy') : '__/__/____'} {localConfig.contractRepertory || `CIG/CUP ${localConfig.contractCode || 'n.d.'}`} con il quale fu affidata alla predetta impresa l'esecuzione dei suindicati lavori;
+                                    </p>
+                                    <p className="text-justify leading-snug mb-3">
+                                        <strong>RISULTANDO</strong> dalla contabilità sino ad oggi che l'ammontare dei lavori eseguiti e delle spese fatte è quello in seguito riportato:
+                                    </p>
+
+                                    {/* TABELLA CONTABILE DESTRA CON COLONNA IMPORTI INRIQUADRATA */}
+                                    <div className="grid grid-cols-[1fr_36mm] items-stretch">
+                                        {/* Etichette */}
+                                        <div className="pr-2 flex flex-col">
+                                            <div className="h-14 pt-1 text-right">
+                                                <div>Lavori e somministrazioni</div>
+                                                {localConfig.discountPercent > 0 && (
+                                                    <div className="text-[9.5px] text-gray-600">
+                                                        (al netto del ribasso del {localConfig.discountPercent}%)
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="h-6 flex items-center justify-end font-bold">
+                                                SOMMANO importi soggetti a ritenute euro
+                                            </div>
+                                            <div className="h-10 pt-1 text-right">
+                                                <div className="uppercase text-[10px]">IMPORTI NON SOGGETTI A RITENUTE</div>
+                                                {paymentCertData.sommanoNonSoggettiARitenute > 0 && (
+                                                    <div className="text-[9.5px] text-gray-600">Oneri di sicurezza non soggetti a ribasso</div>
+                                                )}
+                                            </div>
+                                            <div className="h-6 flex items-center justify-end font-bold">
+                                                SOMMANO importi NON soggetti a ritenute euro
+                                            </div>
+                                            <div className="h-6 flex items-center justify-end"></div>
+                                            <div className="h-24 pt-1 text-right flex flex-col justify-between pb-1">
+                                                <div className="space-y-0.5">
+                                                    <div>Ritenuta per infortuni {localConfig.withholdingTaxPercent}%</div>
+                                                    {(localConfig.advancePaymentPercent || 0) > 0 && (
+                                                        <div>Recupero anticipazione {localConfig.advancePaymentPercent}%</div>
+                                                    )}
+                                                </div>
+                                                <div>Ammontare dei certificati precedenti euro</div>
+                                            </div>
+                                            <div className="h-6 flex items-center justify-end font-bold">
+                                                SOMMANO LE DETRAZIONI euro
+                                            </div>
+                                            <div className="h-6 flex items-center justify-end font-bold">
+                                                CREDITO Impresa {localConfig.roundCertificateTo100 ? 'arrotondato a 100 euro' : 'euro'}
+                                            </div>
+                                            <div className="h-6 flex items-center justify-end">
+                                                per I.V.A. al {localConfig.vatPercent}%
+                                            </div>
+                                            <div className="h-7 flex items-center justify-end font-black tracking-widest">
+                                                T O T A L E &nbsp; G E N E R A L E &nbsp; euro
+                                            </div>
+                                        </div>
+
+                                        {/* Colonna Valori Riquadrata Verde */}
+                                        <div className="border-2 border-[#2e6b34] flex flex-col font-mono text-[10.5px]">
+                                            <div className="h-14 pt-1 pr-1.5 text-right border-b border-[#2e6b34]">
+                                                <div>{numberFormatter.format(paymentCertData.sommanoSoggettiARitenute)}</div>
+                                            </div>
+                                            <div className="h-6 pr-1.5 flex items-center justify-end font-bold border-b border-[#2e6b34] bg-[#f9fcf9]">
+                                                {numberFormatter.format(paymentCertData.sommanoSoggettiARitenute)}
+                                            </div>
+                                            <div className="h-10 pt-1 pr-1.5 text-right border-b border-[#2e6b34]">
+                                                {paymentCertData.sommanoNonSoggettiARitenute > 0 ? numberFormatter.format(paymentCertData.sommanoNonSoggettiARitenute) : ''}
+                                            </div>
+                                            <div className="h-6 pr-1.5 flex items-center justify-end font-bold border-b border-[#2e6b34] bg-[#f9fcf9]">
+                                                {numberFormatter.format(paymentCertData.sommanoNonSoggettiARitenute)}
+                                            </div>
+                                            <div className="h-6 flex items-center justify-center font-sans font-bold text-[10px] border-b border-[#2e6b34] bg-[#f2f7f2] text-[#1f5224]">
+                                                DETRAZIONI
+                                            </div>
+                                            <div className="h-24 pt-1 pr-1.5 text-right border-b border-[#2e6b34] flex flex-col justify-between pb-1">
+                                                <div className="space-y-0.5">
+                                                    <div>{numberFormatter.format(paymentCertData.cumRetentionAmount)}</div>
+                                                    {(localConfig.advancePaymentPercent || 0) > 0 && (
+                                                        <div>{numberFormatter.format(paymentCertData.cumRecoveryAmount)}</div>
+                                                    )}
+                                                </div>
+                                                <div>{numberFormatter.format(paymentCertData.previousCertificatesTotal)}</div>
+                                            </div>
+                                            <div className="h-6 pr-1.5 flex items-center justify-end font-bold border-b border-[#2e6b34] bg-[#f9fcf9]">
+                                                {numberFormatter.format(paymentCertData.sommanoDetrazioni)}
+                                            </div>
+                                            <div className="h-6 pr-1.5 flex items-center justify-end font-bold border-b border-[#2e6b34]">
+                                                {numberFormatter.format(paymentCertData.taxableCertified)}
+                                            </div>
+                                            <div className="h-6 pr-1.5 flex items-center justify-end border-b border-[#2e6b34]">
+                                                {localConfig.vatPercent > 0 ? numberFormatter.format(paymentCertData.vatAmount) : ''}
+                                            </div>
+                                            <div className="h-7 pr-1.5 flex items-center justify-end font-bold bg-[#f5faf5]">
+                                                {numberFormatter.format(paymentCertData.totalPayable)}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* FORMULA C E R T I F I C A */}
+                                    <div className="text-center font-bold text-sm tracking-[0.25em] my-3">
+                                        C E R T I F I C A
+                                    </div>
+                                    <p className="text-justify leading-snug">
+                                        CHE ai termini dell'articolo 23 del capitolato speciale d'appalto si può pagare all'impresa la rata di euro <strong>{numberFormatter.format(paymentCertData.taxableCertified)}</strong> oltre IVA, se dovuta, come per legge.
+                                    </p>
+                                    <p className="mt-1">
+                                        Diconsi: <strong>(euro {paymentCertData.diconsiText})</strong>.
+                                    </p>
+                                </div>
+
+                                {/* DATA E FIRMA RUP */}
+                                <div className="mt-6 mb-4">
+                                    <div>
+                                        {localConfig.locationCity || 'Milano'}, {format(parseISO(salReferenceDate), 'dd/MM/yyyy')}
+                                    </div>
+                                    <div className="text-right pr-6 mt-4">
+                                        <div className="inline-block text-center">
+                                            <div className="font-semibold">Il Responsabile del Procedimento</div>
+                                            <div className="font-bold mt-1">{localConfig.rupName || ''}</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             )}
