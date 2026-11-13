@@ -4,9 +4,11 @@ import { ProjectDocument, WorkItem, WorkGroup } from '../types';
 import { format, parseISO } from 'date-fns';
 import { it } from 'date-fns/locale/it';
 
-const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 3 });
-const percentFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 3, maximumFractionDigits: 3 }); // 3 decimali per precisione percentuale
-const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
+import { createCurrencyFormatter, createNumberFormatter } from '../utils/formatters';
+
+const numberFormatter = createNumberFormatter(2, 3);
+const percentFormatter = createNumberFormatter(3, 3); // 3 decimali per precisione percentuale
+const currencyFormatter = createCurrencyFormatter(2, 2);
 
 // --- RENDERER PER LAVORI A MISURA (CLASSICO - DETTAGLIO ARTICOLI) ---
 const createMeasureRows = (group: WorkGroup, startProgressive: number) => {

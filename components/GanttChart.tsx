@@ -1,6 +1,7 @@
 
 import React, { useState, useMemo, useRef, useCallback, MouseEvent as ReactMouseEvent, useEffect } from 'react';
 import { WorkGroup, Expense, ProjectDocument, Dependency } from '../types';
+import { createCurrencyFormatter, createNumberFormatter } from '../utils/formatters';
 import { 
   eachDayOfInterval, 
   eachWeekOfInterval, 
@@ -61,8 +62,8 @@ const UNIT_CONFIG: Record<ZoomLevel, { width: number; getIntervals: (interval: {
   }
 };
 
-const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
-const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const currencyFormatter = createCurrencyFormatter(2, 2);
+const numberFormatter = createNumberFormatter(2, 2);
 
 const DAILY_RATE_PER_PERSON = 240;
 

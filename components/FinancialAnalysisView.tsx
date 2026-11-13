@@ -3,13 +3,14 @@ import React, { useMemo, useState } from 'react';
 import { ProjectDocument, Expense } from '../types';
 import { format, parseISO, differenceInDays, addDays, startOfMonth, endOfMonth, eachMonthOfInterval, isSameMonth, isValid } from 'date-fns';
 import { it } from 'date-fns/locale/it';
+import { createCurrencyFormatter } from '../utils/formatters';
 
 interface FinancialAnalysisViewProps {
   documents: ProjectDocument[];
   expenses: Expense[];
 }
 
-const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 });
+const currencyFormatter = createCurrencyFormatter(0, 0);
 
 const FinancialAnalysisView: React.FC<FinancialAnalysisViewProps> = ({ documents, expenses }) => {
   const [tooltip, setTooltip] = useState<{x: number, y: number, data: any} | null>(null);

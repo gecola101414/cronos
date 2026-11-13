@@ -1,6 +1,7 @@
 
 import React, { useState, useMemo, useRef, useCallback } from 'react';
 import { ProjectDocument } from '../types';
+import { createCurrencyFormatter, createNumberFormatter } from '../utils/formatters';
 
 interface ProjectSummaryProps {
   documents: ProjectDocument[];
@@ -15,8 +16,8 @@ interface ProjectSummaryProps {
   hideList?: boolean; // Nuova prop per il Patto d'Acciaio
 }
 
-const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
-const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const currencyFormatter = createCurrencyFormatter(2, 2);
+const numberFormatter = createNumberFormatter(2, 2);
 
 const ProjectSummary: React.FC<ProjectSummaryProps> = ({ 
     documents, 

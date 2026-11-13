@@ -3,6 +3,7 @@ import { Expense, WorkGroup, expenseCategories, ExpenseCategory } from '../types
 import { format, parseISO, startOfMonth, endOfMonth, eachDayOfInterval, getDay, addMonths, subMonths, isSameDay, isWithinInterval, isValid, startOfDay, endOfDay } from 'date-fns';
 import { it } from 'date-fns/locale/it';
 import { EuropeanDateInput } from './EuropeanDateInput';
+import { createCurrencyFormatter } from '../utils/formatters';
 
 
 interface CostsViewProps {
@@ -15,7 +16,7 @@ interface CostsViewProps {
   earnedValue: number;
 }
 
-const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
+const currencyFormatter = createCurrencyFormatter(2, 2);
 
 const emptyExpense: Omit<Expense, 'id' | 'insertionDate'> = {
   date: format(new Date(), 'yyyy-MM-dd'),

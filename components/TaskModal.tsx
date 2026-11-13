@@ -3,6 +3,7 @@ import { WorkGroup, WorkItem, Measurement, Dependency, DependencyType, Team, Wor
 import { format, parseISO, addDays, parse, isValid } from 'date-fns';
 
 import { EuropeanDateInput } from './EuropeanDateInput';
+import { createCurrencyFormatter, createNumberFormatter } from '../utils/formatters';
 
 
 interface TaskModalProps {
@@ -66,8 +67,8 @@ export interface SingleBoqMeasure {
   variantNumber?: string;
 }
 
-const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2 });
-const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 3 });
+const currencyFormatter = createCurrencyFormatter(2, 2);
+const numberFormatter = createNumberFormatter(2, 3);
 const DAILY_RATE_PER_PERSON = 240;
 const ITALIAN_HOLIDAYS = ['01-01', '06-01', '25-04', '01-05', '02-06', '15-08', '01-11', '08-12', '25-12', '26-12'];
 

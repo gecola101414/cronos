@@ -1,5 +1,6 @@
 import React from 'react';
 import { View } from '../App';
+import { createCurrencyFormatter, createNumberFormatter } from '../utils/formatters';
 
 interface DashboardProps {
   projectSummary: {
@@ -15,8 +16,8 @@ interface DashboardProps {
   isDemoMode: boolean;
 }
 
-const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
-const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const currencyFormatter = createCurrencyFormatter(2, 2);
+const numberFormatter = createNumberFormatter(1, 1);
 
 const StatCard: React.FC<{ title: string; value: string; icon: React.ReactNode; color: string; }> = ({ title, value, icon, color }) => (
     <div className="bg-white dark:bg-gray-800 p-5 rounded-xl shadow-md flex items-center space-x-4">
@@ -92,7 +93,7 @@ const WelcomeScreen: React.FC<{ onImport: () => void; isDemoMode: boolean; }> = 
         </svg>
         <h3 className="mt-4 text-2xl font-bold text-gray-800 dark:text-gray-200">Benvenuto in Chronos INTRANET</h3>
         <p className="mt-2 max-w-lg mx-auto text-gray-600 dark:text-gray-400">
-            Sistema di gestione cantiere locale. Per iniziare, importa un file di progetto esistente (.json).
+            Sistema di gestione cantiere locale. Per iniziare, importa un file di progetto (.json) oppure converti un computo (.xpwe).
         </p>
         <button
             onClick={onImport}

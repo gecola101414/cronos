@@ -4,9 +4,11 @@ import { format, parseISO } from 'date-fns';
 import { it } from 'date-fns/locale/it';
 import { EuropeanDateInput } from './EuropeanDateInput';
 
-const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
-const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const decimalFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+import { createCurrencyFormatter, createNumberFormatter } from '../utils/formatters';
+
+const currencyFormatter = createCurrencyFormatter(2, 2);
+const numberFormatter = createNumberFormatter(2, 2);
+const decimalFormatter = createNumberFormatter(4, 4);
 
 const safeFormatDate = (val?: string, pattern: string = 'dd/MM/yyyy', useItLocale: boolean = false): string => {
   if (!val) return '-';

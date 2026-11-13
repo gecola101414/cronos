@@ -3,6 +3,7 @@ import React, { useState, useMemo, DragEvent } from 'react';
 import { SavedProject, Team, Worker } from '../types';
 import { format } from 'date-fns';
 import { it } from 'date-fns/locale/it';
+import { createCurrencyFormatter } from '../utils/formatters';
 
 interface PortfolioViewProps {
   projects: SavedProject[];
@@ -18,7 +19,7 @@ interface PortfolioViewProps {
   onLogout: () => void;
 }
 
-const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 });
+const currencyFormatter = createCurrencyFormatter(0, 0);
 
 // --- UNIQUE BRANDING GENERATOR ---
 const GRADIENTS = [

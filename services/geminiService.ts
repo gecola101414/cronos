@@ -44,9 +44,9 @@ export async function analyzeBillOfQuantities(textContent: string): Promise<any[
   }
 }
 
-export async function analyzePrimusPdf(pdfBase64: string): Promise<any[]> {
+export async function analyzeComputoPdf(pdfBase64: string): Promise<any[]> {
   // Nota: richiede estrazione testo lato client o invio file a Gemini
-  throw new Error("Analisi PDF non supportata direttamente in questa build. Copia il testo o usa file .txt/.json");
+  throw new Error("Analisi PDF non supportata direttamente in questa build. Usa file .json o converti da file .xpwe");
 }
 
 export async function getProjectInsight(projectDocuments: any[], expenses: any[], question: string): Promise<string> {

@@ -5,8 +5,11 @@ import { format, parseISO, startOfWeek, endOfWeek, eachDayOfInterval, startOfMon
 import { it } from 'date-fns/locale/it';
 import { EuropeanDateInput } from './EuropeanDateInput';
 
-const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
-const percentFormatter = new Intl.NumberFormat('it-IT', { style: 'percent', minimumFractionDigits: 1 });
+import { createCurrencyFormatter, createNumberFormatter, createPercentFormatter } from '../utils/formatters';
+
+const currencyFormatter = createCurrencyFormatter(2, 2);
+const percentFormatter = createPercentFormatter(1, 1);
+const numberFormatter = createNumberFormatter(2, 2);
 
 interface ReportsViewProps {
     documents: ProjectDocument[];
@@ -333,7 +336,5 @@ const ReportsView: React.FC<ReportsViewProps> = ({ documents, teams, workers }) 
         </div>
     );
 };
-
-const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 export default ReportsView;

@@ -3,8 +3,10 @@ import { ProjectDocument } from '../types';
 import { format } from 'date-fns';
 import { it } from 'date-fns/locale/it';
 
-const currencyFormatter = new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR' });
-const numberFormatter = new Intl.NumberFormat('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+import { createCurrencyFormatter, createNumberFormatter } from '../utils/formatters';
+
+const currencyFormatter = createCurrencyFormatter(2, 2);
+const numberFormatter = createNumberFormatter(2, 2);
 
 declare const jspdf: any;
 declare const html2canvas: any;
@@ -341,7 +343,7 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents }) => {
                                 <th scope="col" className="px-3 py-2.5 min-w-[220px] font-bold">Descrizione della Lavorazione / Fornitura</th>
                                 <th scope="col" className="px-2 py-2.5 w-14 text-center font-bold">U.M.</th>
                                 <th scope="col" className="px-3 py-2.5 w-24 text-right font-bold">P. Unitario</th>
-                                <th scope="col" className="px-3 py-2.5 w-24 text-right bg-yellow-50 dark:bg-yellow-900/10 font-bold">Q.tà Computo</th>
+                                <th scope="col" className="px-3 py-2.5 w-24 text-right bg-[#dbeafe] dark:bg-sky-900/30 text-[#1e3a8a] dark:text-sky-200 font-bold">Q.tà Computo</th>
                                 {variationHeaders.map(vh => (
                                     <th key={vh} scope="col" className="px-3 py-2.5 w-24 text-right text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-900/10 whitespace-nowrap font-bold">
                                         {formatVariationHeader(vh)}
@@ -378,7 +380,7 @@ const ComputoDetailView: React.FC<ComputoDetailViewProps> = ({ documents }) => {
                                       <td className="px-3 py-2.5 align-top text-right font-mono font-medium text-gray-700 dark:text-gray-200 whitespace-nowrap">
                                         {currencyFormatter.format(item.unitPrice)}
                                       </td>
-                                      <td className="px-3 py-2.5 align-top text-right bg-yellow-50/40 dark:bg-yellow-900/10 font-mono font-bold text-gray-900 dark:text-white whitespace-nowrap">
+                                      <td className="px-3 py-2.5 align-top text-right bg-[#eff6ff] dark:bg-sky-900/15 font-mono font-bold text-gray-900 dark:text-white whitespace-nowrap">
                                         {numberFormatter.format(item.quantity)}
                                       </td>
                                       {variationHeaders.map(vh => {

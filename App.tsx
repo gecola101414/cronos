@@ -27,6 +27,7 @@ import ReportsView from './components/ReportsView';
 import PortfolioView from './components/PortfolioView';
 import UserManualView from './components/UserManualView';
 import AccountingView, { AccountingTab } from './components/AccountingView';
+import { parseXpweXmlToProject } from './utils/xpweParser';
 
 export type View = 'dashboard' | 'timeline' | 'summary' | 'measurements' | 'sal-report' | 'costs' | 'teams' | 'reports' | 'help' | 'accounting';
 
@@ -141,6 +142,7 @@ const App: React.FC = () => {
   const [pendingVariantNum, setPendingVariantNum] = useState<string | null>(null);
   const [isVariantModalOpen, setIsVariantModalOpen] = useState(false);
   const [variantInputVal, setVariantInputVal] = useState('1');
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
 
   useEffect(() => {
       const loadedProjects = localStorage.getItem('chronos_projects');
@@ -234,13 +236,50 @@ const App: React.FC = () => {
     setIsLoading(true); setError(null);
     const reader = new FileReader();
     reader.onload = async (e) => {
-      const content = e.target?.result as string;
+      const content = (e.target?.result as string) || '';
+      const lowerName = file.name.toLowerCase();
+      const baseDocName = file.name.replace(/\.(json|xpwe|xml)$/i, '');
+      const finalDocName = (isVariant && pendingVariantNum)
+          ? `VAR ${pendingVariantNum} - ${baseDocName}`
+          : baseDocName;
+
       try {
+        if (lowerName.endsWith('.dcf')) {
+            alert("Formato binario .dcf non leggibile: nel menu di conversione è supportata esclusivamente la versione salvata da ACCA PriMus con estensione .xpwe.");
+            return;
+        }
+
+        const isXpweOrXml = lowerName.endsWith('.xpwe') || lowerName.endsWith('.xml') || content.trimStart().startsWith('<');
+        if (isXpweOrXml) {
+            const parsedXpwe = parseXpweXmlToProject(content, baseDocName);
+            const xpweDocs = sanitizeDocuments(
+                [{ ...parsedXpwe.document, fileName: finalDocName }]
+            );
+
+            if (isVariant) {
+                setProjectDocuments(prev => [...prev, ...xpweDocs]);
+            } else {
+                setProjectDocuments(xpweDocs);
+                setExpenses([]);
+                setSals([]);
+                setPriceDepreciations([]);
+                setProjectName(parsedXpwe.projectTitle || baseDocName);
+                setContractConfig({
+                    discountPercent: 0,
+                    withholdingTaxPercent: 0.5,
+                    vatPercent: 22,
+                    advancePaymentPercent: 20,
+                    excludeLaborFromDiscount: false,
+                    ...parsedXpwe.contractConfig
+                });
+                setCurrentProjectId(crypto.randomUUID());
+            }
+            setIsImportModalOpen(false);
+            setActiveView('timeline');
+            return;
+        }
+
         const jsonData = JSON.parse(content);
-        const baseDocName = file.name.replace('.json', '');
-        const finalDocName = (isVariant && pendingVariantNum) 
-            ? `VAR ${pendingVariantNum} - ${baseDocName}` 
-            : baseDocName;
 
         if (isNewProjectFile(jsonData)) {
             const sanitized = sanitizeDocuments(jsonData.projectDocuments);
@@ -480,12 +519,13 @@ const App: React.FC = () => {
                 setCurrentProjectId(crypto.randomUUID());
             }
         } else {
-            alert("Il file JSON non è in un formato compatibile con Chronos.");
+            alert("Il file selezionato non è in un formato compatibile (.json / .xpwe).");
         }
         
+        setIsImportModalOpen(false);
         setActiveView('timeline');
       } catch (err: any) { 
-          alert(`Errore: Il file selezionato non è un JSON valido.`); 
+          alert(`Errore durante la lettura o conversione del file: ${err?.message || 'Formato non valido (.json / .xpwe).'}`); 
       } finally { 
           setIsLoading(false); 
           setPendingVariantNum(null);
@@ -616,8 +656,13 @@ const App: React.FC = () => {
 
   const handleOpenProject = (p: SavedProject) => { setProjectDocuments(p.data.projectDocuments); setExpenses(p.data.expenses); setProjectName(p.name); setLastSavedTime(p.lastModified); if(p.contractConfig) setContractConfig(p.contractConfig); if(p.data.sals) setSals(p.data.sals); setPriceDepreciations(p.data.priceDepreciations || []); setCurrentProjectId(p.id); setActiveView('dashboard'); };
   
-  const handleCreateProject = () => { 
+  const handleCreateProject = () => {
+      setIsImportModalOpen(true);
+  };
+
+  const triggerFilePicker = (acceptAttr: string) => {
       if (fileInputRef.current) {
+          fileInputRef.current.accept = acceptAttr;
           fileInputRef.current.value = '';
           fileInputRef.current.click();
       }
@@ -697,8 +742,8 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 font-sans">
-      <input type="file" ref={fileInputRef} onChange={e => e.target.files && handleFileUpload(e.target.files[0], false)} accept=".json" className="hidden" />
-      <input type="file" ref={variantInputRef} onChange={e => e.target.files && handleFileUpload(e.target.files[0], true)} accept=".json" className="hidden" />
+      <input type="file" ref={fileInputRef} onChange={e => e.target.files && handleFileUpload(e.target.files[0], false)} accept=".json,.xpwe,.xml" className="hidden" />
+      <input type="file" ref={variantInputRef} onChange={e => e.target.files && handleFileUpload(e.target.files[0], true)} accept=".json,.xpwe,.xml" className="hidden" />
       <div className="flex h-screen overflow-hidden">
           {currentProjectId || isShareMode ? (
             <>
@@ -717,6 +762,68 @@ const App: React.FC = () => {
           )}
       </div>
       
+      {/* Menu di Importazione & Conversione (.json e ACCA PriMus solo .xpwe) */}
+      {isImportModalOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setIsImportModalOpen(false)}>
+              <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl p-6 w-full max-w-lg border border-sky-200 dark:border-gray-700 animate-fade-in" onClick={e => e.stopPropagation()}>
+                  <div className="flex items-center justify-between mb-4 pb-3 border-b border-gray-200 dark:border-gray-700">
+                      <div className="flex items-center gap-2.5 text-sky-700 dark:text-sky-400">
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
+                          <h3 className="font-black text-lg uppercase tracking-tight">Menu Importazione e Conversione</h3>
+                      </div>
+                      <button onClick={() => setIsImportModalOpen(false)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 p-1 rounded-lg">✕</button>
+                  </div>
+
+                  <p className="text-xs text-gray-600 dark:text-gray-300 mb-4 leading-relaxed">
+                      Seleziona il formato di origine del progetto o del computo metrico estimativo da importare nell&apos;area di lavoro GeCoLa:
+                  </p>
+
+                  <div className="space-y-3 mb-5">
+                      <button
+                          type="button"
+                          onClick={() => triggerFilePicker('.json')}
+                          className="w-full text-left p-4 rounded-xl border-2 border-sky-200 dark:border-sky-800 bg-sky-50/70 dark:bg-sky-950/30 hover:border-sky-500 hover:bg-sky-100/70 transition-all group"
+                      >
+                          <div className="flex items-center justify-between">
+                              <span className="font-black text-sm text-sky-900 dark:text-sky-200">Progetto GeCoLa / Chronos (.json)</span>
+                              <span className="px-2 py-0.5 rounded bg-sky-600 text-white text-[10px] font-bold uppercase">.JSON</span>
+                          </div>
+                          <p className="text-xs text-sky-800/80 dark:text-sky-300/80 mt-1">
+                              Carica progetti completi salvati, SAL, contabilità, computi e scambi standard in formato JSON.
+                          </p>
+                      </button>
+
+                      <button
+                          type="button"
+                          onClick={() => triggerFilePicker('.xpwe,.xml')}
+                          className="w-full text-left p-4 rounded-xl border-2 border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-950/30 hover:border-blue-500 hover:bg-blue-100/70 transition-all group"
+                      >
+                          <div className="flex items-center justify-between">
+                              <span className="font-black text-sm text-blue-950 dark:text-blue-200">Conversione Computo ACCA PriMus (.xpwe)</span>
+                              <span className="px-2 py-0.5 rounded bg-blue-700 text-white text-[10px] font-bold uppercase">SOLO .XPWE</span>
+                          </div>
+                          <p className="text-xs text-blue-900/90 dark:text-blue-200/90 mt-1 font-semibold">
+                              Attenzione: il convertitore legge esclusivamente la versione salvata con estensione <span className="underline font-mono">.xpwe</span> (non legge file binari .dcf).
+                          </p>
+                          <p className="text-[11px] text-blue-800/75 dark:text-blue-300/75 mt-1">
+                              Importa automaticamente categorie/WBS, elenco prezzi unitari, voci di computo e misurazioni di progetto dal file XML PriMus (.xpwe).
+                          </p>
+                      </button>
+                  </div>
+
+                  <div className="flex justify-end">
+                      <button
+                          type="button"
+                          onClick={() => setIsImportModalOpen(false)}
+                          className="px-4 py-2 text-xs font-bold text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                      >
+                          Chiudi
+                      </button>
+                  </div>
+              </div>
+          </div>
+      )}
+
       {/* PATTO DI FERRO: Dialogo inserimento numero variante */}
       {isVariantModalOpen && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={() => setIsVariantModalOpen(false)}>
@@ -725,7 +832,7 @@ const App: React.FC = () => {
                       <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
                       <h3 className="font-black text-lg uppercase tracking-tight">Nuova Variante</h3>
                   </div>
-                  <p className="text-sm text-gray-500 dark:text-gray-400 mb-6 font-medium">Inserire il numero d'ordine della perizia di variante per attribuire correttamente il computo:</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mb-6 font-medium">Inserire il numero d'ordine della perizia di variante per attribuire correttamente il computo (.json / .xpwe):</p>
                   <div className="relative mb-6">
                       <input 
                         type="text" 

@@ -71,8 +71,8 @@ const UserManualView: React.FC = () => {
             </h2>
             <p className="mb-4">Il cuore di Chronos AI è la capacità di leggere i documenti tecnici.</p>
             <ol className="list-decimal pl-6 space-y-2">
-              <li><strong>Formati Supportati:</strong> PDF (es. Primus), JSON (file proprietari Chronos), Testo Semplice.</li>
-              <li><strong>Analisi Gemini 3:</strong> Caricando un computo metrico, l'AI analizza le voci, raggruppa le lavorazioni (WBS), stima le durate basandosi sugli importi e genera automaticamente una prima bozza di Gantt.</li>
+              <li><strong>Formati Supportati:</strong> File di progetto <code>.json</code> (Chronos / GeCoLa) e conversione diretta da <strong>ACCA PriMus</strong> (legge esclusivamente la versione salvata con estensione <code>.xpwe</code>).</li>
+              <li><strong>Analisi e Strutturazione Computo:</strong> Caricando un computo metrico, il sistema importa le voci, raggruppa le lavorazioni (WBS), stima le durate basandosi sugli importi e genera automaticamente una prima bozza di Gantt.</li>
               <li><strong>Salvataggio:</strong> Ricordarsi di usare frequentemente "Salva con Nome" per generare il file <code>.json</code> che contiene l'intero stato del cantiere. Il sistema visualizza sempre la data e l'ora dell'ultimo salvataggio nell'intestazione.</li>
             </ol>
           </section>

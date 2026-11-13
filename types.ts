@@ -164,7 +164,7 @@ export interface ContractConfig {
     advancePaymentPercent?: number; // Recupero Anticipazione %
     excludeLaborFromDiscount?: boolean; // Scorpora Costo Manodopera dal Ribasso
     contractLaborAmount?: number; // NEW: Importo manodopera offerto dall'impresa
-    // Nuovi campi standard ministeriale / PriMus (Comune, Committente, DL, RUP, Repertorio, INAIL, Anticipazione)
+    // Nuovi campi standard ministeriale LL.PP. / GeCoLa (Comune, Committente, DL, RUP, Repertorio, INAIL, Anticipazione)
     municipalityName?: string; // es. "Comune di MILANO"
     provinceName?: string; // es. "Provincia di Milano"
     clientName?: string; // Committente, es. "Sviluppo Milanese s.r.l."
